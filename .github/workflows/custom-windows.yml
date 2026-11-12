@@ -93,9 +93,13 @@ jobs:
         run: npm run typecheck
 
 
+
       - name: Run tests
-        shell: bash
-        run: NODE_ENV=test npx tsx --test tests/*.test.ts tests/*.test.tsx
+        shell: pwsh
+        env:
+          NODE_ENV: test
+        run: |
+          node --import=tsx --test --test-concurrency=4 "tests/*.test.ts" "tests/*.test.tsx"
 
       - name: Build LearnHarness
         run: npm run build
