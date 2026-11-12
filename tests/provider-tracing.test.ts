@@ -21,7 +21,7 @@ describe("standalone JavaScript tracing exclusions and native workaround policy"
 			}
 			// The explicit includes remain necessary: this raw ignore still matches SDK data.
 			assert.equal(ignored(file("node_modules/@earendil-works/pi-ai/dist/providers/data/models.json")), true);
-			assert.ok(nextConfig.outputFileTracingIncludes!["*"]!.includes("node_modules/@earendil-works/pi-ai/dist/providers/data/**/*"));
+			assert.equal(picomatch(nextConfig.outputFileTracingIncludes!["*"]!, { dot: true })("node_modules/@earendil-works/pi-ai/dist/providers/data/models.json"), true);
 		});
 		it(`does not confuse dependency suffixes with data directories (${windows ? "Windows" : "POSIX"})`, () => {
 			for (const relative of ["node_modules/gcp-metadata/build/src/index.js", "node_modules/form-data/lib/form_data.js", "node_modules/@swc/helpers/_/_ts_metadata.js", "node_modules/@swc/helpers/_/_ts_metadata/index.js", "node_modules/somedata/runtime.js"]) {
@@ -50,10 +50,8 @@ describe("standalone JavaScript tracing exclusions and native workaround policy"
 			"src/agent/image-processing/LICENSE",
 			"node_modules/@silvia-odwyer/photon-node/**/*",
 			"node_modules/@resvg/resvg-js-*/**/*",
-			"node_modules/@earendil-works/pi-ai/dist/providers/data/**/*",
-			"node_modules/@earendil-works/pi-ai/dist/auth/oauth/{load,github-copilot,xai,device-code}.js",
-			"node_modules/@earendil-works/pi-ai/dist/utils/sleep.js",
-			"node_modules/@earendil-works/pi-agent-core/dist/**/*.json",
+			"node_modules/@earendil-works/pi-ai/dist/**/*",
+			"node_modules/@earendil-works/pi-agent-core/dist/**/*",
 			"node_modules/gcp-metadata/**/*",
 			"node_modules/json-bigint/**/*",
 			"node_modules/bignumber.js/**/*",
