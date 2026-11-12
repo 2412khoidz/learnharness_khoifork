@@ -45,6 +45,26 @@ jobs:
           git apply --check copilot-student.patch
           git apply copilot-student.patch
 
+
+      - name: Sync plugin lockfiles after Pi upgrade
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path plugins -Directory | ForEach-Object {
+            $plugin = $_.FullName
+            $package = Join-Path $plugin "package.json"
+            $lock = Join-Path $plugin "package-lock.json"
+
+            if ((Test-Path $package) -and (Test-Path $lock)) {
+              Write-Host "Updating lockfile: $($_.Name)"
+
+              npm install --prefix "$plugin" --package-lock-only --ignore-scripts
+
+              if ($LASTEXITCODE -ne 0) {
+                throw "Failed to sync lockfile: $($_.Name)"
+              }
+            }
+          }
+
       - name: Prepare plugins
         run: npm run plugins:setup
 
