@@ -97,7 +97,17 @@ export function createPluginBackgroundTool<T extends TSchema>(deps: PluginBackgr
 		// preparation or execution when this host-derived acceptance is known.
 		let snapshot = workers.list().find((task) => task.requestId === requestId);
 		if (snapshot && (snapshot.definitionId !== workerId || snapshot.purpose !== "background")) throw new Error("Background request identity belongs to a different worker or purpose");
-		const options = snapshot ? undefined : await abortable(() => prepare.call(definition, input, context), preacceptSignal);
+
+const options = snapshot
+  ? undefined
+  : await abortable(
+      () => prepare.call(
+        definition,
+        input as unknown as Parameters<typeof prepare>[0],
+        context,
+      ),
+      preacceptSignal,
+    );
 		const accepted = jobStore.findJobByToolCallId(context.chatId, toolCallId);
 		if (accepted) return acknowledge(accepted);
 		if (preacceptSignal.aborted) throw new Error("Background tool call aborted before worker dispatch: plugin disabled or operation cancelled");
