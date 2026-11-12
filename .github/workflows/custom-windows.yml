@@ -42,8 +42,18 @@ jobs:
           Invoke-WebRequest `
             -Uri "https://github.com/amosblomqvist/learnharness/pull/223.patch" `
             -OutFile "copilot-student.patch"
-          git apply --check copilot-student.patch
-          git apply copilot-student.patch
+
+          git apply --check --exclude="tests/subscription-stream.test.ts" copilot-student.patch
+          if ($LASTEXITCODE -ne 0) {
+            throw "Copilot patch still has conflicts"
+          }
+
+          git apply --exclude="tests/subscription-stream.test.ts" copilot-student.patch
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to apply Copilot patch"
+          }
+
+          git diff --stat
 
 
       - name: Sync plugin lockfiles after Pi upgrade
