@@ -35,8 +35,11 @@ jobs:
       - name: Prepare plugins with original dependencies
         run: npm run plugins:setup
 
-      - name: Update Pi AI for GPT-6.1 Terra
-        run: npm install @earendil-works/pi-ai@1.5.2 --save-exact
+
+      - name: Update Pi AI and Agent Core together
+        run: |
+          npm install @earendil-works/pi-ai@1.5.2 @earendil-works/pi-agent-core@1.5.2 --save-exact
+          npm ls @earendil-works/pi-ai @earendil-works/pi-agent-core
 
       - name: Apply Copilot Student patch (optional)
         if: ${{ inputs.copilot_student }}
