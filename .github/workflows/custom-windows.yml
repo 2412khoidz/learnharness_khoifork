@@ -1,0 +1,75 @@
+
+name: LearnHarness Custom Windows Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      copilot_student:
+        description: "Include experimental Copilot Student fix PR 223"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Get source code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+
+      - name: Install original dependencies
+        run: npm ci
+
+      - name: Update Pi AI for GPT-6.1 Terra
+        run: npm install @earendil-works/pi-ai@1.5.2 --save-exact
+
+      - name: Apply Copilot Student patch (optional)
+        if: ${{ inputs.copilot_student }}
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/amosblomqvist/learnharness/pull/223.patch" `
+            -OutFile "copilot-student.patch"
+          git apply --check copilot-student.patch
+          git apply copilot-student.patch
+
+      - name: Prepare plugins
+        run: npm run plugins:setup
+
+      - name: Check TypeScript
+        run: npm run typecheck
+
+      - name: Build LearnHarness
+        run: npm run build
+
+      - name: Test model provider runtime
+        run: node scripts/smoke-provider-runtime.mjs
+
+      - name: Package application server
+        run: node scripts/build-server.mjs
+
+      - name: Test Electron server
+        run: node scripts/smoke-server.mjs --electron
+
+      - name: Create Windows installer
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LearnHarness-Custom-Windows
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 1
