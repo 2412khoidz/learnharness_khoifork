@@ -1,142 +1,72 @@
-name: LearnHarness Terra Minimal Backport
+name: LearnHarness Custom Windows Build
 
 on:
   workflow_dispatch:
+    inputs:
+      copilot_student:
+        description: "Include experimental Copilot Student fix PR 223"
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  verify-linux:
-    name: Verify clean v0.6.1 with minimal Terra backport
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout fork for workflow
-        uses: actions/checkout@v4
-
-      - name: Switch to clean upstream v0.6.1
-        shell: bash
-        run: |
-          git fetch --depth=1 https://github.com/amosblomqvist/learnharness.git refs/tags/v0.6.1
-          git checkout --detach FETCH_HEAD
-          git status --short
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '26'
-          cache: npm
-
-      - name: Install original dependencies
-        run: npm ci
-
-      - name: Prepare original plugins
-        run: npm run plugins:setup
-
-      - name: Add Terra only to the ChatGPT subscription catalog intersection
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          file = Path('src/agent/chatgpt-bridge.ts')
-          source = file.read_text(encoding='utf-8')
-          pat = re.compile(
-              r'(?P<indent>^[ \t]*)const\s+known\s*=\s*supported\.find\([\s\S]*?\);',
-              flags=re.M
-          )
-          matches = list(pat.finditer(source))
-          matches = [m for m in matches if all(x in m.group(0) for x in (
-              'entry.id', 'openai-responses', 'supported.find'))]
-          if len(matches) != 1:
-              raise SystemExit(
-                  'STOP: expected exactly one ChatGPT model-catalog intersection. '
-                  'Source differs from the previously inspected version; do not apply blindly. '
-                  f'Matches: {len(matches)}.'
-              )
-          m = matches[0]
-          old = m.group(0)
-          if 'gpt-6.1-terra' in old:
-              raise SystemExit('STOP: Terra already handled at this location; inspect source first.')
-          pad = m.group('indent')
-          extra = (
-              '\n' + pad + '  ?? (entry.id === "gpt-6.1-terra"\n'
-              + pad + '    ? (() => {\n'
-              + pad + '        const sol = supported.find((m) => m.id === "gpt-6.1-sol" && m.api === "openai-responses");\n'
-              + pad + '        return sol ? { ...sol, id: entry.id, name: "GPT-6.1 Terra" } : undefined;\n'
-              + pad + '      })()\n'
-              + pad + '    : undefined);'
-          )
-          patched = old[:-1] + extra  # Remove original semicolon, append fallback.
-          file.write_text(source[:m.start()] + patched + source[m.end():], encoding='utf-8')
-          print('Minimal ChatGPT subscription-model fallback inserted at model intersection.')
-          print('No Pi package versions or API-key/custom providers changed.')
-          PY
-
-      - name: Verify original Pi versions
-        run: |
-          node -e "const p=require('./package.json'); if(p.dependencies['@earendil-works/pi-ai']!=='1.4.0'||p.dependencies['@earendil-works/pi-agent-core']!=='1.4.0') process.exit(1)"
-          npm ls @earendil-works/pi-ai @earendil-works/pi-agent-core
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test on Linux (original project script)
-        run: npm test
-
-      - name: Build application
-        run: npm run build
-
-      - name: Upload verified single-file patch
-        uses: actions/upload-artifact@v4
-        with:
-          name: verified-terra-bridge
-          path: src/agent/chatgpt-bridge.ts
-          if-no-files-found: error
-          retention-days: 1
-
   build-windows:
-    name: Package Windows from verified clean source
-    needs: verify-linux
+    name: Build Windows x64
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+
     steps:
-      - name: Checkout fork for workflow
+      - name: Get source code
         uses: actions/checkout@v4
-
-      - name: Switch to clean upstream v0.6.1
-        shell: bash
-        run: |
-          git fetch --depth=1 https://github.com/amosblomqvist/learnharness.git refs/tags/v0.6.1
-          git checkout --detach FETCH_HEAD
-
-      - name: Apply verified Terra bridge
-        uses: actions/download-artifact@v4
-        with:
-          name: verified-terra-bridge
-          path: src/agent
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '26'
+          node-version: "26"
           cache: npm
 
-      - name: Install original dependencies
+      - name: Install dependencies
         run: npm ci
 
-      - name: Prepare original plugins
+      - name: Prepare plugins
         run: npm run plugins:setup
 
-      - name: Typecheck patched bridge
+      - name: Apply Copilot Student patch (optional)
+        if: ${{ inputs.copilot_student }}
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/amosblomqvist/learnharness/pull/223.patch" `
+            -OutFile "copilot-student.patch"
+
+          git apply --check --exclude="tests/subscription-stream.test.ts" copilot-student.patch
+          if ($LASTEXITCODE -ne 0) {
+            throw "Copilot patch still has conflicts"
+          }
+
+          git apply --exclude="tests/subscription-stream.test.ts" copilot-student.patch
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to apply Copilot patch"
+          }
+
+          Remove-Item copilot-student.patch
+          git diff --stat
+
+      - name: Check TypeScript
         run: npm run typecheck
 
-      - name: Build application
+      - name: Run Windows native tests
+        env:
+          NODE_ENV: test
+        run: node --import=tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
+
+      - name: Build LearnHarness
         run: npm run build
 
-      - name: Check provider runtime
+      - name: Test model provider runtime
         run: node scripts/smoke-provider-runtime.mjs
 
       - name: Package application server
@@ -148,10 +78,10 @@ jobs:
       - name: Create Windows installer
         run: npx electron-builder --win --x64 --publish never
 
-      - name: Upload installer
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: LearnHarness-Terra-Minimal-Windows
+          name: LearnHarness-Custom-Windows
           path: dist/*.exe
           if-no-files-found: error
           retention-days: 1
