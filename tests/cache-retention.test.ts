@@ -1,12 +1,15 @@
+
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Type, createProvider, createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall, normalizeContext, type CacheRetention, type SimpleStreamOptions, type StreamFunction } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import { createProvider, createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall, normalizeContext, type CacheRetention, type SimpleStreamOptions, type StreamFunction } from "@earendil-works/pi-ai";
 import { CACHE_RETENTIONS, sanitizeUserSettings, ROLE_SLOT, type UserSettings } from "../src/core/settings.ts";
 import { resolveSettings, resolveConversationSpec, resolveRoleSpec } from "../src/core/settings-resolution.ts";
 import { parseModelsSettingsBody, parseAgentSettingsBody, parseSettingsBody } from "../src/server/settings-body.ts";
+
 
 // All runtime/store imports follow isolation. No ambient auth, profiles, models,
 // data, provider/CLI calls or network: real adapters stop at payload capture.
