@@ -38,37 +38,36 @@ jobs:
           npm install @earendil-works/pi-ai@1.5.2 @earendil-works/pi-agent-core@1.5.2 --save-exact
           npm ls @earendil-works/pi-ai @earendil-works/pi-agent-core
 
-      - name: Regenerate plugin lockfiles
+
+      - name: Reinstall plugin dependencies after Pi upgrade
         shell: pwsh
         run: |
           Get-ChildItem -Path plugins -Directory | ForEach-Object {
             $plugin = $_.FullName
-            $manifest = Join-Path $plugin "package.json"
+            $manifestPath = Join-Path $plugin "package.json"
 
-            if (Test-Path $manifest) {
-              Write-Host "Regenerating lockfile for $($_.Name)"
+            if (Test-Path $manifestPath) {
+              Write-Host "Preparing plugin: $($_.Name)"
 
-              $lock = Join-Path $plugin "package-lock.json"
-              if (Test-Path $lock) {
-                Remove-Item $lock -Force
-              }
+              $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
 
-              Push-Location $plugin
-              try {
-                npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-
+              if ($manifest.scripts.sdk) {
+                npm run sdk --prefix "$plugin"
                 if ($LASTEXITCODE -ne 0) {
-                  throw "Lockfile regeneration failed"
+                  throw "SDK generation failed: $($_.Name)"
                 }
               }
-              finally {
-                Pop-Location
+
+              npm install --prefix "$plugin" --no-audit --no-fund
+              if ($LASTEXITCODE -ne 0) {
+                throw "Dependency installation failed: $($_.Name)"
               }
             }
           }
 
       - name: Prepare plugins
         run: npm run plugins:setup
+
 
       - name: Apply Copilot Student patch (optional)
         if: ${{ inputs.copilot_student }}
