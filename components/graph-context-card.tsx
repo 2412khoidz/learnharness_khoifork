@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ChevronRightIcon } from "lucide-react";
 import { ToolContentResponse } from "@/components/ai-elements/message";
-import { formatMathForPlainText } from "@/src/core";
+import { formatMathForPlainText, wrapBareMathForDisplay } from "@/src/core";
 import { cn } from "@/lib/utils";
 
 /**
@@ -49,10 +49,10 @@ export function GraphContextCard({ data, defaultOpen = false }: { data: GraphCon
 					{propositions.map((p) => (
 						<div key={p.id} data-testid={`graph-context-prop-${p.id}`} className="space-y-0.5 leading-relaxed">
 							<ToolContentResponse mode="static" className={`${CONTEXT_PROSE} font-medium text-foreground/85`}>
-								{p.name}
+								{wrapBareMathForDisplay(p.name)}
 							</ToolContentResponse>
 							<ToolContentResponse mode="static" className={`${CONTEXT_PROSE} text-muted-foreground`}>
-								{p.statement}
+								{wrapBareMathForDisplay(p.statement)}
 							</ToolContentResponse>
 						</div>
 					))}

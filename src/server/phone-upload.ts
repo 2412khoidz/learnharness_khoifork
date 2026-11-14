@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import http from "node:http";
 import os from "node:os";
 import type {
 	LanAddressCandidate,
+	PhoneTunnelStatus,
 	PhoneUploadEntry,
 	PhoneUploadPollResponse,
 	PhoneUploadSessionInfo,
@@ -10,6 +12,102 @@ import type {
 import { AttachmentError, MAX_ATTACHMENT_IMAGE_BYTES, saveAttachmentImage } from "./attachments.ts";
 
 const SESSION_TTL_MS = 15 * 60 * 1000;
+const TUNNEL_STARTUP_TIMEOUT_MS = 12_000;
+const ANSI_CSI_RE = new RegExp("\\x1b\\[[0-9;]*[A-Za-z]", "g");
+const LHR_URL_RE = /https:\/\/[a-z0-9.-]+\.lhr\.life\b/i;
+
+export interface TunnelSpawnerCallbacks {
+	onReady: (url: string) => void;
+	onError: (message: string) => void;
+}
+
+export type PhoneTunnelSpawner = (
+	port: number,
+	callbacks: TunnelSpawnerCallbacks,
+) => { close: () => void };
+
+function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbacks): { close: () => void } {
+	const child = spawn(
+		"ssh",
+		[
+			"-o", "StrictHostKeyChecking=no",
+			"-o", `UserKnownHostsFile=${os.devNull}`,
+			"-o", "ServerAliveInterval=30",
+			"-o", "ConnectTimeout=10",
+			"-T",
+			"-R", `80:127.0.0.1:${port}`,
+			"nokey@localhost.run",
+		],
+		{ stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+	);
+
+	let settled = false;
+	let closed = false;
+	let stdoutBuf = "";
+	let stderrTail = "";
+
+	const killChild = () => {
+		try {
+			child.kill();
+		} catch {
+			// ignore child kill errors
+		}
+	};
+
+	const timer = setTimeout(() => {
+		if (settled || closed) return;
+		settled = true;
+		killChild();
+		callbacks.onError("Cross-network tunnel timed out while starting");
+	}, TUNNEL_STARTUP_TIMEOUT_MS);
+	timer.unref?.();
+
+	const handleOutput = (chunk: Buffer | string, isStderr: boolean) => {
+		if (closed) return;
+		const clean = (typeof chunk === "string" ? chunk : chunk.toString("utf8")).replace(ANSI_CSI_RE, "");
+		if (isStderr) {
+			stderrTail = (stderrTail + clean).slice(-512);
+		}
+		if (!settled) {
+			stdoutBuf = (stdoutBuf + clean).slice(-8192);
+			const match = LHR_URL_RE.exec(stdoutBuf);
+			if (match) {
+				settled = true;
+				clearTimeout(timer);
+				callbacks.onReady(match[0]);
+			}
+		}
+	};
+
+	child.stdout?.on("data", (d) => handleOutput(d, false));
+	child.stderr?.on("data", (d) => handleOutput(d, true));
+	child.on("error", (err) => {
+		if (closed || settled) return;
+		settled = true;
+		clearTimeout(timer);
+		callbacks.onError(err.message || "Failed to launch SSH tunnel");
+	});
+	child.on("close", (code) => {
+		if (closed) return;
+		clearTimeout(timer);
+		if (!settled) {
+			settled = true;
+			const detail = stderrTail.trim().split(/\r?\n/).pop();
+			callbacks.onError(detail || `SSH tunnel exited (${code ?? "unknown"})`);
+		} else {
+			callbacks.onError("Cross-network tunnel disconnected");
+		}
+	});
+
+	return {
+		close() {
+			if (closed) return;
+			closed = true;
+			clearTimeout(timer);
+			killChild();
+		},
+	};
+}
 const VIRTUAL_IFACE_RE = /vethernet|wsl|hyper-v|docker|br-|veth|vmware|virtualbox|vbox|tailscale|zerotier|utun|\btun\b|\btap\b|\bwg\b|hamachi|radmin|loopback/i;
 const PHYSICAL_IFACE_RE = /wi-fi|wifi|wlan|wireless|ethernet|\beth\d*\b|\ben\d+\b/i;
 
@@ -78,6 +176,10 @@ interface InternalPhoneSession {
 	server: http.Server;
 	timer: ReturnType<typeof setTimeout> | null;
 	closed: boolean;
+	tunnelStatus: PhoneTunnelStatus;
+	tunnelUrl: string | null;
+	tunnelError: string | null;
+	tunnelHandle: { close: () => void } | null;
 }
 
 const ACTIVE_SESSION_KEY = Symbol.for("learnharness.phoneUploadSession");
@@ -146,7 +248,7 @@ function buildMobileHtml(uploadEndpoint: string): string {
       </label>
     </div>
     <div id="list" class="list" aria-live="polite"></div>
-    <p class="muted foot">Keep phone and computer on the same Wi-Fi.</p>
+    <p class="muted foot">Works over 4G/5G, any Wi-Fi, or local network.</p>
   </main>
 <script>
 (() => {
@@ -302,6 +404,14 @@ async function closeSession(session: InternalPhoneSession | null): Promise<void>
 		clearTimeout(session.timer);
 		session.timer = null;
 	}
+	if (session.tunnelHandle) {
+		try {
+			session.tunnelHandle.close();
+		} catch {
+			// ignore tunnel shutdown errors
+		}
+		session.tunnelHandle = null;
+	}
 	if (getActiveSession() === session) setActiveSession(null);
 	session.server.closeAllConnections?.();
 	await new Promise<void>((resolve) => {
@@ -383,6 +493,9 @@ export interface CreatePhoneSessionOptions {
 	host?: string;
 	attachmentsDir?: string;
 	interfaces?: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
+	/** Open a public HTTPS reverse tunnel (`localhost.run`) so phones work off-Wi-Fi. */
+	enableTunnel?: boolean;
+	tunnelSpawner?: PhoneTunnelSpawner;
 }
 
 /** Start an ephemeral tokenized LAN HTTP server for phone camera uploads (closes any prior session). */
@@ -395,6 +508,7 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 	const tokenBuf = Buffer.from(token, "utf8");
 	const addresses = rankLanAddresses(options.interfaces);
 	const defaultAddress = addresses[0]?.address ?? null;
+	const enableTunnel = options.enableTunnel ?? false;
 
 	const session: InternalPhoneSession = {
 		id,
@@ -409,6 +523,10 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 		server: null as unknown as http.Server,
 		timer: null,
 		closed: false,
+		tunnelStatus: enableTunnel ? "starting" : "off",
+		tunnelUrl: null,
+		tunnelError: null,
+		tunnelHandle: null,
 	};
 
 	const server = http.createServer((req, res) => {
@@ -444,6 +562,39 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 	setActiveSession(session);
 	touchExpiry(session);
 
+	if (enableTunnel) {
+		const spawner = options.tunnelSpawner ?? defaultPhoneTunnelSpawner;
+		try {
+			const handle = spawner(session.port, {
+				onReady: (url) => {
+					if (session.closed || getActiveSession() !== session) return;
+					session.tunnelStatus = "ready";
+					session.tunnelUrl = url;
+					session.tunnelError = null;
+				},
+				onError: (message) => {
+					if (session.closed || getActiveSession() !== session) return;
+					session.tunnelStatus = "error";
+					session.tunnelUrl = null;
+					session.tunnelError = message;
+				},
+			});
+			if (session.closed || getActiveSession() !== session) {
+				try {
+					handle.close();
+				} catch {
+					// ignore
+				}
+			} else {
+				session.tunnelHandle = handle;
+			}
+		} catch (err) {
+			session.tunnelStatus = "error";
+			session.tunnelUrl = null;
+			session.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
+		}
+	}
+
 	return {
 		sessionId: session.id,
 		token: session.token,
@@ -451,13 +602,24 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 		addresses: session.addresses,
 		defaultAddress: session.defaultAddress,
 		expiresAt: session.expiresAt,
+		tunnelStatus: session.tunnelStatus,
+		tunnelUrl: session.tunnelUrl,
+		tunnelError: session.tunnelError,
 	};
 }
 
 export function pollPhoneUploadSession(sessionId: string, since = 0): PhoneUploadPollResponse {
 	const session = getActiveSession();
 	if (!session || session.closed || session.id !== sessionId) {
-		return { active: false, expiresAt: 0, uploads: [], nextIndex: since };
+		return {
+			active: false,
+			expiresAt: 0,
+			uploads: [],
+			nextIndex: since,
+			tunnelStatus: "off",
+			tunnelUrl: null,
+			tunnelError: null,
+		};
 	}
 	const start = Number.isFinite(since) && since > 0 ? Math.min(Math.floor(since), session.uploads.length) : 0;
 	const uploads = session.uploads.slice(start);
@@ -466,6 +628,9 @@ export function pollPhoneUploadSession(sessionId: string, since = 0): PhoneUploa
 		expiresAt: session.expiresAt,
 		uploads,
 		nextIndex: session.uploads.length,
+		tunnelStatus: session.tunnelStatus,
+		tunnelUrl: session.tunnelUrl,
+		tunnelError: session.tunnelError,
 	};
 }
 

@@ -77,4 +77,6 @@ export {
 	pollPhoneUploadSession,
 	rankLanAddresses,
 	type CreatePhoneSessionOptions,
+	type PhoneTunnelSpawner,
+	type TunnelSpawnerCallbacks,
 } from "./phone-upload.ts";

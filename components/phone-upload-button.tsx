@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { CheckCircle2Icon, CopyIcon, RefreshCwIcon, SmartphoneIcon, XIcon } from "lucide-react";
 import {
+	buildPhoneTunnelUploadUrl,
 	buildPhoneUploadUrl,
 	encodeQrMatrix,
 	qrSvgPath,
 	type AttachmentUploadResult,
+	type PhoneTunnelStatus,
 	type PhoneUploadEntry,
 	type PhoneUploadPollResponse,
 	type PhoneUploadSessionInfo,
@@ -95,6 +97,10 @@ function PhoneUploadDialogBody({
 }) {
 	const [session, setSession] = useState<PhoneUploadSessionInfo | null>(null);
 	const [selectedAddress, setSelectedAddress] = useState("");
+	const [connectionMode, setConnectionMode] = useState<"tunnel" | "lan">("tunnel");
+	const [tunnelStatus, setTunnelStatus] = useState<PhoneTunnelStatus>("off");
+	const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
+	const [tunnelError, setTunnelError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
 	const [received, setReceived] = useState<PhoneUploadEntry[]>([]);
@@ -109,6 +115,10 @@ function PhoneUploadDialogBody({
 		setLoading(true);
 		setError("");
 		setReceived([]);
+		setConnectionMode("tunnel");
+		setTunnelStatus("off");
+		setTunnelUrl(null);
+		setTunnelError(null);
 		sinceRef.current = 0;
 		receivedCountRef.current = 0;
 
@@ -132,6 +142,9 @@ function PhoneUploadDialogBody({
 			sessionIdRef.current = info.sessionId;
 			setSession(info);
 			setSelectedAddress(info.defaultAddress ?? info.addresses[0]?.address ?? "");
+			setTunnelStatus(info.tunnelStatus ?? "off");
+			setTunnelUrl(info.tunnelUrl ?? null);
+			setTunnelError(info.tunnelError ?? null);
 		} catch (err) {
 			if (signal.aborted) return;
 			setError(err instanceof Error ? err.message : "Could not start phone upload server.");
@@ -181,6 +194,9 @@ function PhoneUploadDialogBody({
 					setError("Phone upload session expired. Click Refresh QR to start a new one.");
 					return;
 				}
+				if (data.tunnelStatus !== undefined) setTunnelStatus(data.tunnelStatus);
+				if (data.tunnelUrl !== undefined) setTunnelUrl(data.tunnelUrl);
+				if (data.tunnelError !== undefined) setTunnelError(data.tunnelError);
 				if (data.uploads.length > 0) {
 					sinceRef.current = data.nextIndex;
 					receivedCountRef.current += data.uploads.length;
@@ -201,10 +217,16 @@ function PhoneUploadDialogBody({
 		};
 	}, [session, editorRef]);
 
+	const hasTunnel = tunnelStatus === "ready" && Boolean(tunnelUrl);
+	const hasLan = Boolean(session && selectedAddress);
+	const useTunnel = hasTunnel && (connectionMode === "tunnel" || !hasLan);
+
 	const activeUrl = useMemo(() => {
-		if (!session || !selectedAddress) return "";
+		if (!session) return "";
+		if (useTunnel && tunnelUrl) return buildPhoneTunnelUploadUrl(tunnelUrl, session.token);
+		if (!selectedAddress) return "";
 		return buildPhoneUploadUrl(selectedAddress, session.port, session.token);
-	}, [session, selectedAddress]);
+	}, [session, useTunnel, tunnelUrl, selectedAddress]);
 
 	const qr = useMemo(() => {
 		if (!activeUrl) return null;
@@ -220,7 +242,7 @@ function PhoneUploadDialogBody({
 				<div>
 					<h2 className="text-base font-semibold leading-tight">Upload photos from phone</h2>
 					<p className="mt-1 text-xs text-muted-foreground">
-						Scan with your phone camera (same Wi-Fi). Captured photos insert straight into your draft.
+						Scan with your phone camera (4G/5G, any Wi-Fi, or local network). Captured photos insert straight into your draft.
 					</p>
 				</div>
 				<button
@@ -245,12 +267,57 @@ function PhoneUploadDialogBody({
 						Refresh QR
 					</Button>
 				</div>
-			) : session && !selectedAddress ? (
-				<div className="rounded-xl border border-border/80 bg-muted/40 p-4 text-sm text-muted-foreground">
-					No LAN Wi-Fi or Ethernet IPv4 address was detected on this computer. Connect both devices to the same network, then click Refresh QR.
+			) : session && !activeUrl && tunnelStatus === "starting" ? (
+				<div
+					data-testid="phone-tunnel-starting"
+					className="flex h-52 items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted-foreground"
+				>
+					Opening cross-network link (4G / any Wi-Fi)…
+				</div>
+			) : session && !activeUrl ? (
+				<div className="flex flex-col gap-2 rounded-xl border border-border/80 bg-muted/40 p-4 text-sm text-muted-foreground">
+					<p>
+						No LAN Wi-Fi or Ethernet IPv4 address was detected on this computer{tunnelStatus === "error" && tunnelError ? ` (${tunnelError})` : ""}. Connect both devices to the same network, then click Refresh QR.
+					</p>
+					<div>
+						<Button type="button" variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
+							<RefreshCwIcon className="size-3.5" aria-hidden />
+							Refresh QR
+						</Button>
+					</div>
 				</div>
 			) : (
 				<div className="flex flex-col items-center gap-3">
+					{hasTunnel && hasLan && (
+						<div
+							data-testid="phone-mode-toggle"
+							className="inline-flex w-full rounded-lg border border-border bg-muted/40 p-0.5 text-xs"
+						>
+							<button
+								type="button"
+								data-testid="phone-mode-tunnel"
+								aria-pressed={useTunnel}
+								onClick={() => setConnectionMode("tunnel")}
+								className={`flex-1 rounded-md px-2.5 py-1 font-medium transition-colors ${
+									useTunnel ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"
+								}`}
+							>
+								Any network (HTTPS)
+							</button>
+							<button
+								type="button"
+								data-testid="phone-mode-lan"
+								aria-pressed={!useTunnel}
+								onClick={() => setConnectionMode("lan")}
+								className={`flex-1 rounded-md px-2.5 py-1 font-medium transition-colors ${
+									!useTunnel ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"
+								}`}
+							>
+								Same Wi-Fi (LAN)
+							</button>
+						</div>
+					)}
+
 					{qr && (
 						<div className="rounded-xl border border-border bg-white p-3 shadow-xs">
 							<svg
@@ -266,7 +333,19 @@ function PhoneUploadDialogBody({
 						</div>
 					)}
 
-					{session && session.addresses.length > 1 && (
+					{tunnelStatus === "starting" && (
+						<p data-testid="phone-tunnel-starting" className="text-center text-[11px] text-muted-foreground">
+							Opening cross-network link (4G / any Wi-Fi)…
+						</p>
+					)}
+
+					{tunnelStatus === "error" && (
+						<p data-testid="phone-tunnel-error" className="text-center text-[11px] text-muted-foreground">
+							Cross-network link unavailable{tunnelError ? ` (${tunnelError})` : ""} — using local Wi-Fi.
+						</p>
+					)}
+
+					{session && !useTunnel && session.addresses.length > 1 && (
 						<label className="flex w-full items-center gap-2 text-xs text-muted-foreground">
 							<span className="shrink-0">Network IP</span>
 							<select

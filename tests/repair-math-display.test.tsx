@@ -12,9 +12,11 @@ import { PracticeDock } from "../components/practice-dock.tsx";
 import { QuestionDock } from "../components/question-dock.tsx";
 import { LatexGlyph } from "../components/latex-glyph.tsx";
 import { ProblemCard, ConcludeCard } from "../components/practice-cards.tsx";
+import { NodeCardText } from "../components/graph-view.tsx";
 import { MessageResponse, ToolContentResponse } from "../components/ai-elements/message.tsx";
 import {
 	formatMathForPlainText,
+	wrapBareMathForDisplay,
 	repairMathForDisplay, healOverescapedCommands, restoreMathEscapes,
 	parseQuizInput, parseAskInput, parseExplainInput, activeProblemOf, projectView,
 	toLlmMessages, type LhMessage, type ArtifactPartProps,
@@ -270,5 +272,53 @@ describe("practice display surfaces", () => {
 			formatMathForPlainText("Tổng $\\sum_{i=1}^n a_i \\implies c$"),
 			"Tổng ∑ᵢ₌₁ⁿ aᵢ ⟹ c",
 		);
+	});
+});
+
+
+describe("bare LaTeX display wrapping for legacy graph nodes", () => {
+	it("wraps bare LaTeX and script formulas without modifying code, URLs, paths, or hyphenated prose", () => {
+		assert.equal(
+			wrapBareMathForDisplay("IQR outlier fences: Q_1 - 1.5 \\times IQR and Q_3 + 1.5 \\times IQR"),
+			"IQR outlier fences: $Q_1 - 1.5 \\times IQR$ and $Q_3 + 1.5 \\times IQR$",
+		);
+		assert.equal(
+			wrapBareMathForDisplay("|f'(x)| \\le q < 1 with x \\in \\mathbb{R}"),
+			"$|f'(x)| \\le q < 1$ with $x \\in \\mathbb{R}$",
+		);
+		assert.equal(
+			wrapBareMathForDisplay("Cauchy-Schwarz using (a - tb)^2 ≥ 0 and f(x_1 + 1) = 0"),
+			"Cauchy-Schwarz using $(a - tb)^2 ≥ 0$ and $f(x_1 + 1) = 0$",
+		);
+		assert.equal(
+			wrapBareMathForDisplay("user_id step_1 https://example.com/a_b C:\\Users\\admin\\temp `x_1 + 1` $100"),
+			"user_id step_1 https://example.com/a_b C:\\Users\\admin\\temp `x_1 + 1` $100",
+		);
+	});
+
+	it("formats bare formulas in plain text card labels without corrupting identifiers", () => {
+		assert.equal(
+			formatMathForPlainText("IQR: Q_1 - 1.5 \\times IQR and |f'(x)| \\le q < 1"),
+			"IQR: Q₁ - 1.5 × IQR and |f′(x)| ≤ q < 1",
+		);
+		assert.equal(formatMathForPlainText("user_id and `x_1 + 1`"), "user_id and `x_1 + 1`");
+	});
+
+	it("renders legacy bare LaTeX inside NodeCardText through KaTeX", () => {
+		const html = renderToStaticMarkup(
+			<NodeCardText
+				name="Cauchy-Schwarz: (a - tb)^2 ≥ 0"
+				statement={"Statistical fences use Q_1 - 1.5 \\times IQR and |f'(x)| \\le q < 1 for x \\in \\mathbb{R}."}
+			/>,
+		);
+		const actual = math(html);
+		assert.equal(actual.errors, 0);
+		assert.ok(actual.annotations.some((a) => a.includes("Q_1") && a.includes("\\times")));
+		assert.ok(actual.annotations.some((a) => a.includes("\\le") && a.includes("f'(x)")));
+		assert.ok(actual.annotations.some((a) => a.includes("\\in") && a.includes("\\mathbb{R}")));
+		assert.ok(actual.glyphs.includes("×"));
+		assert.ok(actual.glyphs.includes("≤"));
+		assert.ok(actual.glyphs.includes("∈"));
+		assert.ok(html.includes("Cauchy-Schwarz"));
 	});
 });

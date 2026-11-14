@@ -69,7 +69,7 @@ import { PluginGraphActions } from "@/components/plugin-chrome";
 import { SettingsSlider as SettingSlider } from "@/components/settings/controls";
 import Link from "next/link";
 import { FileTextIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, WaypointsIcon } from "lucide-react";
-import { formatMathForPlainText, incrementalLayout, propositionSessionHref, type GraphCostSummary, type GraphNode, type GraphSnapshot } from "@/src/core";
+import { formatMathForPlainText, incrementalLayout, propositionSessionHref, wrapBareMathForDisplay, type GraphCostSummary, type GraphNode, type GraphSnapshot } from "@/src/core";
 import { planCostLabel } from "@/components/usage-format";
 import { CLUSTER_LIGHTNESS, GraphCanvasRenderer, type GraphRenderSettings } from "./graph-canvas.ts";
 import { useAppearance } from "@/components/settings/appearance";
@@ -907,13 +907,13 @@ export function NodeCardText({ name, statement }: Pick<GraphNode, "name" | "stat
 				mode="static"
 				className={`${NODE_CARD_TYPE} font-medium [--lh-prose-size:var(--text-sm)] [--lh-prose-leading:1.375]`}
 			>
-				{name}
+				{wrapBareMathForDisplay(name)}
 			</ToolContentResponse>
 			<ToolContentResponse
 				mode="static"
 				className={`${NODE_CARD_TYPE} mt-1 text-muted-foreground [--lh-prose-size:var(--text-xs)] [--lh-prose-leading:1.625]`}
 			>
-				{statement}
+				{wrapBareMathForDisplay(statement)}
 			</ToolContentResponse>
 		</>
 	);

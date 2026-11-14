@@ -9,7 +9,9 @@ export const runtime = "nodejs";
 
 export async function POST(): Promise<Response> {
 	try {
-		const session = await createPhoneUploadSession();
+		const session = await createPhoneUploadSession({
+			enableTunnel: process.env.NODE_ENV !== "test",
+		});
 		return NextResponse.json(session);
 	} catch {
 		return NextResponse.json({ error: "Failed to start phone upload listener" }, { status: 500 });

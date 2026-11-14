@@ -286,4 +286,98 @@ describe("PhoneUploadButton QR modal and docks", () => {
 		);
 		assert.ok(pMount.host.querySelector('[data-testid="phone-upload"]'));
 	});
+
+	it("transitions from tunnel starting to ready on poll and lets the user toggle HTTPS vs LAN mode", async () => {
+		let pollCount = 0;
+		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url === "/api/attachments/phone" && init?.method === "POST") {
+				return new Response(JSON.stringify({
+					sessionId: "sess-tun",
+					token: "tok-tun",
+					port: 49999,
+					defaultAddress: "192.168.1.42",
+					addresses: [
+						{ address: "192.168.1.42", interfaceName: "Wi-Fi", recommended: true },
+						{ address: "10.0.0.9", interfaceName: "Ethernet", recommended: false },
+					],
+					expiresAt: Date.now() + 60_000,
+					tunnelStatus: "starting",
+					tunnelUrl: null,
+					tunnelError: null,
+				}), { status: 200 });
+			}
+			if (url.startsWith("/api/attachments/phone?sessionId=sess-tun") && (!init?.method || init.method === "GET")) {
+				pollCount++;
+				if (pollCount === 1) {
+					return new Response(JSON.stringify({
+						active: true,
+						expiresAt: Date.now() + 60_000,
+						uploads: [],
+						nextIndex: 0,
+						tunnelStatus: "ready",
+						tunnelUrl: "https://demo123.lhr.life",
+						tunnelError: null,
+					}), { status: 200 });
+				}
+				return new Response(JSON.stringify({
+					active: true,
+					expiresAt: Date.now() + 60_000,
+					uploads: [],
+					nextIndex: 0,
+					tunnelStatus: "ready",
+					tunnelUrl: "https://demo123.lhr.life",
+					tunnelError: null,
+				}), { status: 200 });
+			}
+			if (url.startsWith("/api/attachments/phone?sessionId=sess-tun") && init?.method === "DELETE") {
+				return new Response(JSON.stringify({ closed: true }), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		}) as typeof fetch;
+
+		const { dom, host } = await mount(<InputHarness />);
+		const button = host.querySelector<HTMLButtonElement>('[data-testid="phone-upload"]')!;
+
+		await act(async () => {
+			button.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
+
+		const dialog = dom.document.body.querySelector('[data-testid="phone-upload-dialog"]')!;
+		assert.ok(dialog.querySelector('[data-testid="phone-tunnel-starting"]'));
+		assert.equal(dialog.querySelector('[data-testid="phone-mode-toggle"]'), null);
+		assert.match(dialog.textContent ?? "", /http:\/\/192\.168\.1\.42:49999\/p\/tok-tun/);
+
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 950));
+		});
+
+		assert.equal(dialog.querySelector('[data-testid="phone-tunnel-starting"]'), null);
+		assert.ok(dialog.querySelector('[data-testid="phone-mode-toggle"]'));
+		assert.match(dialog.textContent ?? "", /https:\/\/demo123\.lhr\.life\/p\/tok-tun/);
+		assert.equal(dialog.querySelector('select[aria-label="Network IP"]'), null);
+
+		const lanBtn = dialog.querySelector<HTMLButtonElement>('[data-testid="phone-mode-lan"]')!;
+		const tunnelBtn = dialog.querySelector<HTMLButtonElement>('[data-testid="phone-mode-tunnel"]')!;
+		assert.equal(tunnelBtn.getAttribute("aria-pressed"), "true");
+
+		await act(async () => {
+			lanBtn.click();
+		});
+		assert.match(dialog.textContent ?? "", /http:\/\/192\.168\.1\.42:49999\/p\/tok-tun/);
+		assert.ok(dialog.querySelector('select[aria-label="Network IP"]'));
+
+		await act(async () => {
+			tunnelBtn.click();
+		});
+		assert.match(dialog.textContent ?? "", /https:\/\/demo123\.lhr\.life\/p\/tok-tun/);
+
+		const doneBtn = Array.from(dialog.querySelectorAll("button")).find((b) => b.textContent?.includes("Done"))!;
+		await act(async () => {
+			doneBtn.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
+		assert.equal(dom.document.body.querySelector('[data-testid="phone-upload-dialog"]'), null);
+	});
 });

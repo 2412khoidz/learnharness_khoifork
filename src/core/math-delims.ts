@@ -4,6 +4,9 @@ import {
 	canParseTex, knownTexCommand, mapMathContent, numericPercentEscape, outsideTexComments,
 	readContentSpans, recoverDocumentLayout, texRanges,
 } from "./content-reader.ts";
+import { wrapBareMathForDisplay } from "./bare-math.ts";
+
+export { wrapBareMathForDisplay };
 
 const escaped = (text: string, i: number) => {
 	let n = 0; while (i > 0 && text[--i] === "\\") n++;
@@ -433,7 +436,7 @@ function texToPlainText(expr: string): string {
  *  code spans untouched. */
 export function formatMathForPlainText(text: string): string {
 	if (!text) return text;
-	const repaired = repairMathForDisplay(text);
+	const repaired = repairMathForDisplay(wrapBareMathForDisplay(text));
 	return readContentSpans(repaired)
 		.map((span) => (span.kind === "math" ? texToPlainText(span.body) : span.raw))
 		.join("");

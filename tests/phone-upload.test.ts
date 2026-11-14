@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
+	buildPhoneTunnelUploadUrl,
 	buildPhoneUploadUrl,
 	encodeQrMatrix,
 	extractClipboardImageFiles,
@@ -16,6 +17,7 @@ import {
 	pollPhoneUploadSession,
 	rankLanAddresses,
 	saveAttachmentImage,
+	type PhoneTunnelSpawner,
 } from "../src/server/index.ts";
 import { POST as postAttachmentRoute } from "../app/api/attachments/route.ts";
 import {
@@ -211,5 +213,62 @@ describe("attachment Next API route handlers", () => {
 		assert.equal(delRes.status, 200);
 		const delJson = await delRes.json() as { closed: boolean };
 		assert.equal(delJson.closed, true);
+	});
+});
+
+
+describe("phone upload cross-network tunnel support", () => {
+	it("builds clean HTTPS tunnel URLs", () => {
+		assert.equal(
+			buildPhoneTunnelUploadUrl("https://abc123.lhr.life/", "tok+1/2"),
+			"https://abc123.lhr.life/p/tok%2B1%2F2",
+		);
+	});
+
+	it("manages tunnel spawner starting -> ready -> error transitions and closes tunnel handle on teardown", async () => {
+		let capturedPort = 0;
+		let callbacksRef: Parameters<PhoneTunnelSpawner>[1] | null = null;
+		let tunnelClosed = false;
+		const spawner: PhoneTunnelSpawner = (port, callbacks) => {
+			capturedPort = port;
+			callbacksRef = callbacks;
+			return {
+				close() {
+					tunnelClosed = true;
+				},
+			};
+		};
+
+		const session = await createPhoneUploadSession({
+			host: "127.0.0.1",
+			enableTunnel: true,
+			tunnelSpawner: spawner,
+		});
+		assert.equal(capturedPort, session.port);
+		assert.equal(session.tunnelStatus, "starting");
+		assert.equal(session.tunnelUrl, null);
+
+		callbacksRef!.onReady("https://demo-test.lhr.life");
+		const readyPoll = pollPhoneUploadSession(session.sessionId, 0);
+		assert.equal(readyPoll.tunnelStatus, "ready");
+		assert.equal(readyPoll.tunnelUrl, "https://demo-test.lhr.life");
+		assert.equal(readyPoll.tunnelError, null);
+
+		callbacksRef!.onError("Tunnel dropped");
+		const errPoll = pollPhoneUploadSession(session.sessionId, 0);
+		assert.equal(errPoll.tunnelStatus, "error");
+		assert.equal(errPoll.tunnelUrl, null);
+		assert.equal(errPoll.tunnelError, "Tunnel dropped");
+
+		assert.equal(await closePhoneUploadSession(session.sessionId), true);
+		assert.equal(tunnelClosed, true);
+	});
+
+	it("keeps tunnel off under NODE_ENV=test route calls", async () => {
+		const startRes = await postPhoneRoute();
+		assert.equal(startRes.status, 200);
+		const session = await startRes.json() as { sessionId: string; tunnelStatus?: string };
+		assert.equal(session.tunnelStatus, "off");
+		await deletePhoneRoute(new Request(`http://localhost/api/attachments/phone?sessionId=${session.sessionId}`, { method: "DELETE" }));
 	});
 });

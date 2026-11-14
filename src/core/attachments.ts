@@ -16,6 +16,8 @@ export interface LanAddressCandidate {
 	recommended: boolean;
 }
 
+export type PhoneTunnelStatus = "off" | "starting" | "ready" | "error";
+
 export interface PhoneUploadEntry extends AttachmentUploadResult {
 	index: number;
 	receivedAt: number;
@@ -28,6 +30,9 @@ export interface PhoneUploadSessionInfo {
 	addresses: LanAddressCandidate[];
 	defaultAddress: string | null;
 	expiresAt: number;
+	tunnelStatus?: PhoneTunnelStatus;
+	tunnelUrl?: string | null;
+	tunnelError?: string | null;
 }
 
 export interface PhoneUploadPollResponse {
@@ -35,11 +40,19 @@ export interface PhoneUploadPollResponse {
 	expiresAt: number;
 	uploads: PhoneUploadEntry[];
 	nextIndex: number;
+	tunnelStatus?: PhoneTunnelStatus;
+	tunnelUrl?: string | null;
+	tunnelError?: string | null;
 }
 
 /** Build the mobile capture URL for a given LAN IPv4 host. */
 export function buildPhoneUploadUrl(address: string, port: number, token: string): string {
 	return `http://${address}:${port}/p/${encodeURIComponent(token)}`;
+}
+
+/** Build the mobile capture URL over a public HTTPS tunnel base URL. */
+export function buildPhoneTunnelUploadUrl(tunnelBaseUrl: string, token: string): string {
+	return `${tunnelBaseUrl.replace(/\/+$/, "")}/p/${encodeURIComponent(token)}`;
 }
 
 /** Extract real uploaded image Files/Blobs from a DataTransfer without touching mock text-only paste events. */

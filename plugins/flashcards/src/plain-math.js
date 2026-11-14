@@ -34,9 +34,38 @@ function renderTex(body) {
     .trim();
 }
 
+function formatBareProse(segment) {
+  if (!/[\\^_]/.test(segment)) return segment;
+  // Preserve URLs/paths verbatim while converting standalone bare TeX/scripts.
+  return segment.replace(/https?:\/\/[^\s)<>\]"']+|(?:[A-Za-z]:\\|\\\\)\S+|\\mathbb\{([A-Za-z])\}|\\(?:d|t)?frac\{([^{}]+)\}\{([^{}]+)\}|\\sqrt\{([^{}]+)\}|\\([A-Za-z]{2,})|(\([^()\n]+\))\^(\{[^{}]+\}|-?\d+|[A-Za-z])|\b([A-Za-z\u0391-\u03c9])_(\{[^{}]+\}|\d+|[A-Za-z])(?![A-Za-z0-9_])|\b([A-Za-z0-9\u0391-\u03c9]+)\^(\{[^{}]+\}|-?\d+)(?![A-Za-z0-9_])/g,
+    (whole, bb, fa, fb, sq, cmd, pBase, pExp, sBase, sSub, pwBase, pwExp) => {
+      if (/^(?:https?:|[A-Za-z]:\\|\\\\)/.test(whole)) return whole;
+      if (bb) return BLACKBOARD[bb] || bb;
+      if (fa !== undefined) return `${renderTex(fa)}/${renderTex(fb)}`;
+      if (sq !== undefined) return `√(${renderTex(sq)})`;
+      if (cmd) {
+        if (INFIX[cmd]) return INFIX[cmd];
+        if (SYMBOLS[cmd]) return SYMBOLS[cmd];
+        return whole;
+      }
+      if (pBase !== undefined) return `${pBase}${mapScript(pExp, SUPER, '^')}`;
+      if (sBase !== undefined) return `${sBase}${mapScript(sSub, SUB, '_')}`;
+      if (pwBase !== undefined) return `${pwBase}${mapScript(pwExp, SUPER, '^')}`;
+      return whole;
+    });
+}
+
 export function formatPlainMath(text) {
-  if (typeof text !== 'string' || (!text.includes('$') && !text.includes('\\('))) return text;
-  return text
-    .replace(/\\\((.+?)\\\)/gs, (_, body) => renderTex(body))
-    .replace(/\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g, (_, display, inline) => renderTex(display ?? inline));
+  if (typeof text !== 'string' || (!text.includes('$') && !text.includes('\\(') && !/[\\^_]/.test(text))) return text;
+  const token = /(`[^`\n]+`|\\\((.+?)\\\)|\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$)/gs;
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(token)) {
+    if (m.index > last) out += formatBareProse(text.slice(last, m.index));
+    if (m[0].startsWith('`')) out += m[0];
+    else out += renderTex(m[2] ?? m[3] ?? m[4] ?? '');
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out += formatBareProse(text.slice(last));
+  return out;
 }

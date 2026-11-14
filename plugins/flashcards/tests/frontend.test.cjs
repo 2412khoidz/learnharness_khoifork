@@ -1342,6 +1342,24 @@ test('activation reports missing public host capabilities clearly', async () => 
   }
 });
 
+test('bare LaTeX in proposition titles renders cleanly in Unicode without touching code or snake_case', async () => {
+  const { pathToFileURL } = require('node:url');
+  const { formatPlainMath } = await import(pathToFileURL(path.join(__dirname, '../src/plain-math.js')).href);
+  assert.equal(formatPlainMath("IQR: Q_1 - 1.5 \\times IQR"), "IQR: Q₁ - 1.5 × IQR");
+  assert.equal(formatPlainMath("|f'(x)| \\le q < 1, (a - tb)^2 ≥ 0"), "|f'(x)| ≤ q < 1, (a - tb)² ≥ 0");
+  assert.equal(formatPlainMath("user_id `x_1 + 1` C:\\Users\\admin\\temp"), "user_id `x_1 + 1` C:\\Users\\admin\\temp");
+
+  const h = await setup(fx => {
+    fx.state.propositions[0].name = "IQR fence Q_1 - 1.5 \\times IQR";
+  });
+  try {
+    openAll(h);
+    await flush();
+    const label = rowNode(h, 'deck:d1:p:p1').textContent;
+    assert.ok(label.includes("Q₁ - 1.5 × IQR"), `expected Unicode bare math in tree label, got: ${label}`);
+  } finally { h.dispose(); }
+});
+
 if (process.env.FLASHCARDS_BROWSER_FIXTURE) {
   const html = '<!doctype html><html><head><meta charset="utf-8"><style>' + fs.readFileSync(path.join(__dirname, '../src/styles.css'), 'utf8') + '</style></head><body><script type="module">' + source + '\nwindow.h = (' + fixture.toString() + ')(document); activate(window.h.ctx); window.h.mount();</script></body></html>';
   fs.writeFileSync(process.env.FLASHCARDS_BROWSER_FIXTURE, html);
