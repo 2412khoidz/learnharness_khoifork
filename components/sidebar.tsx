@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { MenuShell } from "@/components/menu-shell";
 import { DeleteSessionDialog } from "@/components/delete-session-dialog";
 import type { ChatDeleteMode, ThemeMode } from "@/src/core";
-import { DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveRestoreIcon, DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PinIcon, PinOffIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
 import { ActivitySection } from "@/components/activity-dock";
 import { CoverageMenuBlock } from "@/components/extraction-coverage";
 import { LhMark } from "@/components/lh-mark";
@@ -340,6 +340,9 @@ export function SessionRow({
 			{(chat.kind ?? "teach") === "practice" && (
 				<DumbbellIcon className="size-3.5 shrink-0 text-muted-foreground/70" aria-label="Practice session" />
 			)}
+			{chat.pinned && (
+				<PinIcon className="size-3 shrink-0 text-amber-500/80" aria-label="Pinned session" />
+			)}
 		</button>
 	);
 }
@@ -409,6 +412,7 @@ function SessionsSidebar() {
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
 	const [query, setQuery] = useState("");
 	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
+	const [showArchived, setShowArchived] = useState(false);
 	useEffect(() => {
 		const stored = window.localStorage.getItem(KIND_FILTER_KEY);
 		if (stored === "teach" || stored === "all" || stored === "practice") setKindFilter(stored);
@@ -429,12 +433,22 @@ function SessionsSidebar() {
 		router.push("/chat/new");
 	}, [router]);
 
+	const archivedCount = useMemo(
+		() => (chats ? chats.filter((c) => c.archived).length : 0),
+		[chats],
+	);
+
 	/* FUZZY (owner round 8, 2026-10-05): subsequence match ranked by
 	 * fuzzyScore — prefix beats word-boundary beats scattered. Empty query
 	 * keeps the natural list order (scores are all 0, sort is stable). */
 	const shown = useMemo(() => {
 		const q = query.trim();
 		let list = chats;
+		if (list && !showArchived && !q) {
+			list = list.filter((c) => !c.archived);
+		} else if (list && showArchived && !q) {
+			list = list.filter((c) => Boolean(c.archived));
+		}
 		if (list && kindFilter !== "all") {
 			list = list.filter((c) => (c.kind ?? "teach") === kindFilter);
 		}
@@ -445,7 +459,7 @@ function SessionsSidebar() {
 			.filter((r): r is { c: (typeof list)[number]; score: number } => r.score !== null)
 			.sort((a, b) => b.score - a.score)
 			.map((r) => r.c);
-	}, [chats, query, kindFilter]);
+	}, [chats, query, kindFilter, showArchived]);
 
 	const refreshInFlightRef = useRef(false);
 	const refresh = useCallback(async () => {
@@ -610,6 +624,31 @@ function SessionsSidebar() {
 			console.error("rename failed:", err); // keep the old title
 		}
 	}, []);
+
+	const updateMeta = useCallback(async (id: string, patch: { pinned?: boolean; archived?: boolean }) => {
+		setChats((prev) =>
+			prev
+				? prev
+						.map((c) => (c.id === id ? { ...c, ...patch } : c))
+						.sort((a, b) => {
+							const pinDelta = (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+							if (pinDelta !== 0) return pinDelta;
+							return b.updatedAt.localeCompare(a.updatedAt);
+						})
+				: prev,
+		);
+		try {
+			const res = await fetch(`/api/chats/${id}`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(patch),
+			});
+			if (!res.ok) throw new Error(`meta update failed: ${res.status}`);
+		} catch (err) {
+			console.error("meta update failed:", err);
+			void refresh();
+		}
+	}, [refresh]);
 
 	// Delete success: patch the list instantly (the poll is the backstop),
 	// navigate home if the open session died (the chat view unmounts —
@@ -816,6 +855,27 @@ function SessionsSidebar() {
 					))}
 				</div>
 
+				{(archivedCount > 0 || showArchived) && (
+					<div className="mx-3 mt-1.5 flex items-center justify-between">
+						<button
+							type="button"
+							data-testid="toggle-archived-sessions"
+							onClick={() => setShowArchived((v) => !v)}
+							className={cn(
+								"flex w-full items-center justify-between rounded-md px-2 py-1 text-[11px] transition-colors",
+								showArchived
+									? "bg-accent text-foreground"
+									: "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+							)}
+						>
+							<span className="flex items-center gap-1.5">
+								{showArchived ? <ArchiveRestoreIcon className="size-3" /> : <ArchiveIcon className="size-3" />}
+								{showArchived ? "Back to Active Sessions" : `Archived (${archivedCount})`}
+							</span>
+						</button>
+					</div>
+				)}
+
 				<div ref={listRef} className="flex-1 overflow-y-auto p-2">
 					{shown === null ? (
 						<div className="px-2 py-4 text-xs text-muted-foreground">Loading…</div>
@@ -902,6 +962,42 @@ function SessionsSidebar() {
 						>
 							Rename
 						</button>
+						{(() => {
+							const target = chats?.find((c) => c.id === ctxChatId);
+							if (!target) return null;
+							return (
+								<>
+									<button
+										type="button"
+										data-testid="ctx-pin"
+										onClick={() => {
+											const nextPinned = !target.pinned;
+											const id = target.id;
+											setCtxChatId(null);
+											void updateMeta(id, { pinned: nextPinned });
+										}}
+										className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+									>
+										{target.pinned ? <PinOffIcon className="size-3.5 text-muted-foreground" /> : <PinIcon className="size-3.5 text-muted-foreground" />}
+										{target.pinned ? "Unpin" : "Pin to Top"}
+									</button>
+									<button
+										type="button"
+										data-testid="ctx-archive"
+										onClick={() => {
+											const nextArchived = !target.archived;
+											const id = target.id;
+											setCtxChatId(null);
+											void updateMeta(id, { archived: nextArchived });
+										}}
+										className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+									>
+										{target.archived ? <ArchiveRestoreIcon className="size-3.5 text-muted-foreground" /> : <ArchiveIcon className="size-3.5 text-muted-foreground" />}
+										{target.archived ? "Unarchive" : "Archive"}
+									</button>
+								</>
+							);
+						})()}
 						{/* Export as Markdown (owner, release polish 2026-10-06): the
 					    session-markdown engine's user-facing debut — same-origin
 						    anchor download; the route's Content-Disposition names the

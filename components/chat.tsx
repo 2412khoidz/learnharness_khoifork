@@ -67,7 +67,9 @@ import { PlanBlock, PlanPopup, latestTree } from "@/components/plan-block";
 import { PlanMarginalia, planExists } from "@/components/plan-window";
 import { MermaidOverlay, SessionMermaidContext, type SessionImage } from "@/components/session-overlay";
 import { AbortTurnDialog, type AbortMode } from "@/components/abort-turn-dialog";
-import { ArrowRightIcon, DumbbellIcon, MessageCircleQuestionIcon, WaypointsIcon } from "lucide-react";
+import { ArrowRightIcon, DumbbellIcon, MessageCircleQuestionIcon, RotateCcwIcon, StickyNoteIcon, WaypointsIcon } from "lucide-react";
+import { LessonNotesPanel, type PendingNoteQuote } from "@/components/lesson-notes-panel";
+import type { SelectionAction } from "@/components/selection-toolbar";
 import type { PlanBlockData } from "@/src/core";
 import { QuestionDock } from "@/components/question-dock";
 import { PluginQuestionDock } from "./plugin-question-dock";
@@ -273,6 +275,7 @@ export function Chat({
 	initiallyCompacting = false,
 	initialConfigured = false,
 	kind = "teach",
+	initialNotes = "",
 }: {
 	chatId: string;
 	title: string;
@@ -284,6 +287,8 @@ export function Chat({
 	 *  tag rides the header instead. */
 	kind?: "teach" | "practice";
 	initialPrompt?: string;
+	/** Optional persisted per-lesson notes. */
+	initialNotes?: string;
 	/** A teacher turn is running server-side but attached to no client
 	 * (navigated away mid-turn, returned while in flight). */
 	initiallyInFlight?: boolean;
@@ -1057,10 +1062,54 @@ export function Chat({
 	}, [toggleQuestionThread]);
 	// Advancing the lesson does not close or disable an old conversation.
 	const sideActions = useMemo(() => createSideQuestionActions({ open: openSideThread }), [openSideThread]);
-	const selectionActions = useMemo(() => [citeAction, ...sideActions], [citeAction, sideActions]);
+	const [notesOpen, setNotesOpen] = useState(false);
+	const latestNotesRef = useRef(initialNotes);
+	const [hasNotes, setHasNotes] = useState(() => Boolean(initialNotes && initialNotes.trim().length > 0));
+	const [pendingQuote, setPendingQuote] = useState<PendingNoteQuote | null>(null);
+	const [copiedLatexToast, setCopiedLatexToast] = useState<string | null>(null);
+	const [rewinding, setRewinding] = useState(false);
+	const quoteToNotesAction = useMemo<SelectionAction>(() => ({
+		id: "quote-note",
+		label: "Note",
+		ariaLabel: "Add selection to lesson notes",
+		icon: StickyNoteIcon,
+		visible: (capture) => (capture.selector.text.trim() || capture.range.toString().trim()).length > 0,
+		onSelect: (capture) => {
+			const quoted = capture.selector.text.trim() || capture.range.toString().trim();
+			if (!quoted) return false;
+			setNotesOpen(true);
+			setPendingQuote({ text: quoted, seq: Date.now() });
+			return true;
+		},
+	}), []);
+	const selectionActions = useMemo(() => [citeAction, quoteToNotesAction, ...sideActions], [citeAction, quoteToNotesAction, sideActions]);
 	const router = useRouter();
 	const transcriptElementRef = useRef<HTMLElement | null>(null);
 	transcriptElementRef.current = transcriptElement;
+	useEffect(() => {
+		if (!transcriptElement) return;
+		let toastTimer: ReturnType<typeof setTimeout> | undefined;
+		const onClick = (event: MouseEvent) => {
+			const target = event.target instanceof Element ? event.target : null;
+			if (!target) return;
+			const sel = window.getSelection();
+			if (sel && !sel.isCollapsed) return;
+			const katexEl = target.closest(".katex");
+			if (!katexEl) return;
+			const tex = katexEl.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
+			if (!tex) return;
+			void navigator.clipboard?.writeText(tex).then(() => {
+				setCopiedLatexToast(tex.length > 42 ? `${tex.slice(0, 42)}...` : tex);
+				if (toastTimer) clearTimeout(toastTimer);
+				toastTimer = setTimeout(() => setCopiedLatexToast(null), 1800);
+			}).catch(() => {});
+		};
+		transcriptElement.addEventListener("click", onClick);
+		return () => {
+			transcriptElement.removeEventListener("click", onClick);
+			if (toastTimer) clearTimeout(toastTimer);
+		};
+	}, [transcriptElement]);
 	const citationActions = useMemo<CitationActions>(() => ({
 		editComment: (citation, source) => setCitationEdit({ citation, link: source.link, start: source.start, host: source.host, input: source.host.closest<HTMLElement>("[data-file-path-input]") ?? undefined }),
 		openSource: (citation) => {
@@ -1114,6 +1163,27 @@ export function Chat({
 	// recovers from it. Later compaction requires new input instead.
 	const retryable = !pluginOwnsDock && (status === "ready" || status === "error") && !busy && !compacting && endsInFailedTurn(nativeMessages);
 	const retryFailedTurn = () => retryFailedResponse(send, draftRef);
+	const canRewindLastTurn = !busy && !compacting && !rewinding && nativeMessages.some((m) => m.role === "user");
+	const handleRewindLastTurn = useCallback(async () => {
+		if (!canRewindLastTurn) return;
+		setRewinding(true);
+		try {
+			const res = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ action: "rewind" }),
+			});
+			if (!res.ok) return;
+			const data = (await res.json()) as { ok?: boolean; restoredText?: string };
+			await readRecord();
+			if (typeof data.restoredText === "string" && data.restoredText.length > 0) {
+				applyText(data.restoredText);
+				requestAnimationFrame(() => composerInputRef.current?.focus());
+			}
+		} finally {
+			setRewinding(false);
+		}
+	}, [applyText, canRewindLastTurn, chatId, readRecord]);
 	const sendAllowed = !pluginOwnsDock && reconciliation === "ready" && !pending && !activeProblem && !compacting && !submissionRunner.occupied;
 	const pendingTextTarget = textTarget();
 	const pendingTextInput = !!pendingTextTarget && !!pluginManager?.hasPendingSubmissionInput(pendingTextTarget);
@@ -1708,6 +1778,43 @@ export function Chat({
 					{/* The plan chip (owner, plan-placement round): session-level
 					    structure beside the phase chip — access to the full-DAG popup
 					    at every width; the marginalia is the wide-screen glance view. */}
+					{nativeMessages.some((m) => m.role === "user") && (
+						<Hint label="Rewind & edit last message" side="bottom">
+							<button
+								type="button"
+								data-testid="rewind-last-turn-button"
+								disabled={!canRewindLastTurn}
+								onClick={(e) => {
+									blurAfterPointerClick(e);
+									void handleRewindLastTurn();
+								}}
+								className="lh-no-drag flex shrink-0 cursor-pointer items-center gap-1 rounded-full border border-border/80 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground transition-colors hover:border-border hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+							>
+								<RotateCcwIcon className="size-3" aria-hidden />
+								Edit Last
+							</button>
+						</Hint>
+					)}
+					<Hint label={notesOpen ? "Hide lesson notes" : "Open lesson notes"} side="bottom">
+						<button
+							type="button"
+							data-testid="lesson-notes-button"
+							aria-pressed={notesOpen}
+							onClick={(e) => {
+								blurAfterPointerClick(e);
+								setNotesOpen((v) => !v);
+							}}
+							className={cn(
+								"lh-no-drag flex shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium uppercase tracking-wide transition-colors",
+								notesOpen
+									? "border-primary/60 bg-primary/10 text-foreground"
+									: "border-border/80 text-muted-foreground hover:border-border hover:text-foreground",
+							)}
+						>
+							<StickyNoteIcon className={cn("size-3", hasNotes && "text-amber-500")} aria-hidden />
+							Notes
+						</button>
+					</Hint>
 					{planTree && (
 						<Hint label="Open the full plan" side="bottom">
 <button
@@ -2159,6 +2266,15 @@ export function Chat({
 					}}
 				/>
 				</Conversation>
+				{copiedLatexToast && (
+					<div
+						role="status"
+						data-testid="copied-latex-toast"
+						className="pointer-events-none absolute right-4 top-3 z-50 rounded-full border border-border bg-popover/95 px-3 py-1 font-mono text-xs text-foreground shadow-md backdrop-blur-sm"
+					>
+						Copied LaTeX: {copiedLatexToast}
+					</div>
+				)}
 				{sideThread.state?.mode === "panel" && (
 					<SideThreadPanel>
 						<SideThreadBody
@@ -2177,6 +2293,21 @@ export function Chat({
 							onCurrentStep={goToCurrentSideStep}
 						/>
 					</SideThreadPanel>
+				)}
+
+				{notesOpen && (
+					<LessonNotesPanel
+						chatId={chatId}
+						title={titleText}
+						initialNotes={latestNotesRef.current}
+						pendingQuote={pendingQuote}
+						onNotesChange={(n) => {
+							latestNotesRef.current = n;
+							const nonempty = n.trim().length > 0;
+							setHasNotes((prev) => (prev === nonempty ? prev : nonempty));
+						}}
+						onClose={() => setNotesOpen(false)}
+					/>
 				)}
 
 				{sideThread.state?.mode === "popover" && (

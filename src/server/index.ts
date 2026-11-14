@@ -11,6 +11,7 @@ export * from "./graph.ts";
 export * from "./graph-fsrs.ts";
 export * from "./exam-prep.ts";
 export * from "./backup.ts";
+export * from "./epub-import.ts";
 export * from "./phone-companion.ts";
 export * from "./source-organization.ts";
 export * from "./source-deletion.ts";

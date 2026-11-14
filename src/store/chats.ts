@@ -16,7 +16,7 @@ import type { ChatStore } from "../core/ports.ts";
 import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, ImageSnapshot, PlanTree, SideChatThread, TurnUsage } from "../core/contracts.ts";
 import { CURRENT_CHAT_VERSION } from "../core/contracts.ts";
 import type { LhMessage } from "../core/native-messages.ts";
-import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts";
+import { activeProblemOf, danglingQuestionOf, userFacingTextOf } from "../core/native-messages.ts";
 import { phaseAt3Lh } from "../core/phases.ts";
 import { removeLeftoverTemps, writeFileAtomicSync } from "./atomic-write.ts";
 
@@ -82,7 +82,7 @@ function getChat(id: string): ChatRecord | null {
 function summaryOf(id: string): ChatSummary | null {
 	const record = getChat(id);
 	if (!record) return null;
-	const { messages, tree, turns, extractions, imageSnapshots: _imageSnapshots, sideChats: _sideChats, ...summary } = record;
+	const { messages, tree, turns, extractions, imageSnapshots: _imageSnapshots, sideChats: _sideChats, notes: recordNotes, ...summary } = record;
 	// Per-record isolation (Wave B): a record whose messages fail the
 	// projection (e.g. pre-Wave-B UIMessage-format scratch — the
 	// zero-back-compat wipe makes these "corrupt") must not blank the
@@ -91,7 +91,7 @@ function summaryOf(id: string): ChatSummary | null {
 		return {
 			// turns and extractions stay out of the list payload (list =
 			// summaries; usage aggregates ride the full record, the picker
-			// never needs them).
+			// never needs them). Full lesson notes also stay out of list payloads.
 			...summary,
 			// Normalized kind: absent record field reads as teach.
 			kind: summary.kind ?? "teach",
@@ -109,6 +109,7 @@ function summaryOf(id: string): ChatSummary | null {
 			// "Problem waiting"); false on teaching sessions, which
 			// have no problem tool.
 			pendingProblem: activeProblemOf(messages) !== null,
+			...(typeof recordNotes === "string" && recordNotes.trim().length > 0 ? { hasNotes: true } : {}),
 		} as ChatSummary;
 	} catch (err) {
 		console.error(`[chat ${summary.id}] summary projection failed:`, err);
@@ -153,7 +154,11 @@ function listChats(): ChatSummary[] {
 			summaryCache.set(file, { signature, summary });
 			summaries.push({ ...summary });
 		}
-		return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+		return summaries.sort((a, b) => {
+			const pinDelta = (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+			if (pinDelta !== 0) return pinDelta;
+			return b.updatedAt.localeCompare(a.updatedAt);
+		});
 	} catch {
 		return [];
 	}
@@ -276,6 +281,52 @@ function updateSideChats(id: string, update: (threads: SideChatThread[]) => Side
 	return next;
 }
 
+/** Update session metadata (pin, archive, lesson notes) without bumping updatedAt. */
+function updateChatMeta(id: string, patch: { pinned?: boolean; archived?: boolean; notes?: string }): ChatRecord {
+	const record = getChat(id);
+	if (!record) throw new Error(`Chat not found: ${id}`);
+	let listShapeChanged = false;
+	if (typeof patch.pinned === "boolean") {
+		if (patch.pinned) record.pinned = true;
+		else delete record.pinned;
+		listShapeChanged = true;
+	}
+	if (typeof patch.archived === "boolean") {
+		if (patch.archived) record.archived = true;
+		else delete record.archived;
+		listShapeChanged = true;
+	}
+	if (typeof patch.notes === "string") {
+		if (patch.notes.length > 0) record.notes = patch.notes;
+		else delete record.notes;
+	}
+	writeChat(record);
+	if (listShapeChanged) emit("chats-changed", {});
+	return record;
+}
+
+/** Rewind the transcript back to just before the last learner user turn
+ * and return its plain text so it can be edited and re-submitted. */
+function rewindLastUserTurn(id: string): { record: ChatRecord; restoredText: string } | null {
+	const record = getChat(id);
+	if (!record) return null;
+	let lastUserIdx = -1;
+	for (let i = record.messages.length - 1; i >= 0; i--) {
+		if (record.messages[i]?.role === "user") {
+			lastUserIdx = i;
+			break;
+		}
+	}
+	if (lastUserIdx < 0) return null;
+	const lastUserMsg = record.messages[lastUserIdx]!;
+	const restoredText = userFacingTextOf(lastUserMsg.content).join("\n");
+	record.messages = record.messages.slice(0, lastUserIdx);
+	record.updatedAt = new Date().toISOString();
+	writeChat(record);
+	emit("chats-changed", {});
+	return { record, restoredText };
+}
+
 export const chatStore: ChatStore = {
 	createChat,
 	getChat,
@@ -289,4 +340,6 @@ export const chatStore: ChatStore = {
 	appendTurnUsage,
 	appendExtractionUsage,
 	updateSideChats,
+	updateChatMeta,
+	rewindLastUserTurn,
 };

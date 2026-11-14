@@ -11,6 +11,8 @@ import type {
 } from "../core/attachments.ts";
 import { AttachmentError, MAX_ATTACHMENT_IMAGE_BYTES, saveAttachmentImage } from "./attachments.ts";
 import {
+	appendMobileCompanionSessionNoteOrReply,
+	getMobileCompanionSessionDetail,
 	getMobileCompanionState,
 	MobileCompanionError,
 	rateMobileCompanionCard,
@@ -667,8 +669,14 @@ function buildMobileHtml(uploadEndpoint: string): string {
   .pill-btn.active { background: #2563eb !important; color: #fff !important; border-color: #2563eb !important; }
   .bar-wrap { width: 100%; height: 8px; border-radius: 999px; background: #27272a; overflow: hidden; margin: 8px 0 12px; }
   .bar-fill { height: 100%; background: #22c55e; transition: width 0.25s ease; }
-  .session-item { padding: 10px; border-radius: 10px; border: 1px solid #27272a; background: #111114; margin-top: 8px; }
+  .session-item { padding: 10px; border-radius: 10px; border: 1px solid #27272a; background: #111114; margin-top: 8px; cursor: pointer; width: 100%; text-align: left; color: inherit; }
   .session-snip { margin-top: 4px; font-size: 12px; color: #a1a1aa; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .msg-list { max-height: 290px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin: 10px 0; padding-right: 2px; }
+  .msg-bubble { padding: 8px 10px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; border: 1px solid #27272a; }
+  .msg-user { background: #1e293b; border-color: #334155; align-self: flex-end; max-width: 90%; }
+  .msg-assistant { background: #111114; align-self: flex-start; max-width: 96%; }
+  .msg-role { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #94a3b8; margin-bottom: 3px; }
+  .m-textarea { width: 100%; min-height: 68px; border-radius: 10px; border: 1px solid #3f3f46; background: #09090b; color: inherit; padding: 8px 10px; font-size: 13px; font-family: inherit; resize: vertical; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -714,28 +722,57 @@ function buildMobileHtml(uploadEndpoint: string): string {
     </section>
 
     <section id="panel-exam" class="panel">
-      <div class="subcard" style="margin-bottom: 12px;">
-        <div class="row-between">
-          <strong id="exam-title" style="font-size: 14px;">Study Mode</strong>
-          <span id="exam-readiness" class="badge">Readiness --%</span>
+      <div id="exam-overview">
+        <div class="subcard" style="margin-bottom: 12px;">
+          <div class="row-between">
+            <strong id="exam-title" style="font-size: 14px;">Study Mode</strong>
+            <span id="exam-readiness" class="badge">Readiness --%</span>
+          </div>
+          <div class="bar-wrap"><div id="exam-bar" class="bar-fill" style="width: 4%;"></div></div>
+          <div class="muted" style="font-size: 11px;">Study Mode</div>
+          <div class="pill-row">
+            <button type="button" id="mode-long-term" class="pill-btn">Long-Term</button>
+            <button type="button" id="mode-exam" class="pill-btn">Exam Prep</button>
+          </div>
+          <div class="muted" style="font-size: 11px; margin-top: 10px;">Teaching Pace</div>
+          <div class="pill-row">
+            <button type="button" id="pace-thorough" class="pill-btn">Thorough</button>
+            <button type="button" id="pace-efficient" class="pill-btn">Efficient</button>
+            <button type="button" id="pace-crash" class="pill-btn">Crash</button>
+          </div>
+          <div id="exam-weak" class="muted" style="font-size: 12px; margin-top: 10px;"></div>
         </div>
-        <div class="bar-wrap"><div id="exam-bar" class="bar-fill" style="width: 4%;"></div></div>
-        <div class="muted" style="font-size: 11px;">Study Mode</div>
-        <div class="pill-row">
-          <button type="button" id="mode-long-term" class="pill-btn">Long-Term</button>
-          <button type="button" id="mode-exam" class="pill-btn">Exam Prep</button>
+        <div>
+          <strong style="font-size: 13px;">Recent Sessions (Tap to Read &amp; Reply)</strong>
+          <div id="recent-sessions"><p class="muted" style="margin-top:6px;">Loading...</p></div>
         </div>
-        <div class="muted" style="font-size: 11px; margin-top: 10px;">Teaching Pace</div>
-        <div class="pill-row">
-          <button type="button" id="pace-thorough" class="pill-btn">Thorough</button>
-          <button type="button" id="pace-efficient" class="pill-btn">Efficient</button>
-          <button type="button" id="pace-crash" class="pill-btn">Crash</button>
-        </div>
-        <div id="exam-weak" class="muted" style="font-size: 12px; margin-top: 10px;"></div>
       </div>
-      <div>
-        <strong style="font-size: 13px;">Recent Sessions on Desktop</strong>
-        <div id="recent-sessions"><p class="muted" style="margin-top:6px;">Loading...</p></div>
+
+      <div id="session-reader" style="display: none;">
+        <div class="row-between" style="margin-bottom: 8px;">
+          <button type="button" id="session-back-btn" class="pill-btn" style="flex: 0 0 auto; padding: 5px 10px;">&larr; Sessions</button>
+          <span id="session-reader-mode" class="badge">Teach</span>
+          <button type="button" id="session-refresh-btn" class="pill-btn" style="flex: 0 0 auto; padding: 5px 10px;">Refresh</button>
+        </div>
+        <strong id="session-reader-title" style="font-size: 14px; display: block; margin-bottom: 6px;">Session</strong>
+        <div id="session-pending" class="subcard" style="display: none; border-color: #f59e0b; margin-bottom: 8px; font-size: 12.5px;"></div>
+        <div id="session-messages" class="msg-list"></div>
+        <div class="subcard" style="margin-top: 8px;">
+          <strong style="font-size: 12px;">Reply to Tutor / Practice</strong>
+          <textarea id="session-reply-input" class="m-textarea" placeholder="Type your answer or question from phone..."></textarea>
+          <div class="row-between" style="margin-top: 6px;">
+            <span id="session-reply-status" class="muted" style="font-size: 11px;"></span>
+            <button type="button" id="session-reply-send" class="pill-btn active" style="flex: 0 0 auto; padding: 7px 14px;">Send Reply</button>
+          </div>
+        </div>
+        <div class="subcard" style="margin-top: 8px;">
+          <div class="row-between">
+            <strong style="font-size: 12px;">Lesson Notes (Synced to PC)</strong>
+            <span id="session-note-status" class="muted" style="font-size: 11px;"></span>
+          </div>
+          <textarea id="session-notes-input" class="m-textarea" placeholder="Quick notes from phone..."></textarea>
+          <button type="button" id="session-note-save" class="pill-btn" style="margin-top: 6px; width: 100%;">Save Note</button>
+        </div>
       </div>
     </section>
 
@@ -924,8 +961,10 @@ function buildMobileHtml(uploadEndpoint: string): string {
       return;
     }
     for (const s of sessions) {
-      const box = document.createElement("div");
+      const box = document.createElement("button");
+      box.type = "button";
       box.className = "session-item";
+      box.onclick = () => void openSessionReader(s.id);
       const top = document.createElement("div");
       top.className = "row-between";
       const name = document.createElement("strong");
@@ -933,7 +972,7 @@ function buildMobileHtml(uploadEndpoint: string): string {
       name.textContent = s.title;
       const modeTag = document.createElement("span");
       modeTag.className = "badge";
-      modeTag.textContent = s.mode === "practice" ? "Practice" : "Teach";
+      modeTag.textContent = (s.mode === "practice" ? "Practice" : "Teach") + " · Open";
       top.append(name, modeTag);
       box.append(top);
       if (s.lastAssistantSnippet) {
@@ -943,6 +982,101 @@ function buildMobileHtml(uploadEndpoint: string): string {
         box.append(snip);
       }
       sessionsEl.append(box);
+    }
+  }
+
+  let activeSessionId = null;
+
+  function closeSessionReader() {
+    activeSessionId = null;
+    document.getElementById("session-reader").style.display = "none";
+    document.getElementById("exam-overview").style.display = "block";
+  }
+
+  function renderSessionDetail(detail) {
+    document.getElementById("exam-overview").style.display = "none";
+    document.getElementById("session-reader").style.display = "block";
+    document.getElementById("session-reader-title").textContent = detail.title || "Session";
+    document.getElementById("session-reader-mode").textContent = detail.mode === "practice" ? "Practice" : "Teach";
+
+    const pendingEl = document.getElementById("session-pending");
+    if (detail.pendingQuestionPrompt) {
+      pendingEl.style.display = "block";
+      pendingEl.textContent = detail.pendingQuestionPrompt;
+    } else {
+      pendingEl.style.display = "none";
+      pendingEl.textContent = "";
+    }
+
+    const msgList = document.getElementById("session-messages");
+    msgList.innerHTML = "";
+    const msgs = detail.messages || [];
+    if (!msgs.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "No messages in this session yet.";
+      msgList.append(empty);
+    } else {
+      for (const m of msgs) {
+        const bubble = document.createElement("div");
+        bubble.className = "msg-bubble " + (m.role === "user" ? "msg-user" : "msg-assistant");
+        const role = document.createElement("div");
+        role.className = "msg-role";
+        role.textContent = m.role === "user" ? "You" : "Tutor";
+        const body = document.createElement("div");
+        body.textContent = m.text;
+        bubble.append(role, body);
+        msgList.append(bubble);
+      }
+      msgList.scrollTop = msgList.scrollHeight;
+    }
+    document.getElementById("session-notes-input").value = detail.notes || "";
+  }
+
+  async function openSessionReader(chatId) {
+    activeSessionId = chatId;
+    document.getElementById("session-reply-status").textContent = "";
+    document.getElementById("session-note-status").textContent = "";
+    try {
+      const res = await fetch(COMPANION_URL + "/session?chatId=" + encodeURIComponent(chatId), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const detail = await res.json();
+      renderSessionDetail(detail);
+    } catch {
+      document.getElementById("session-reply-status").textContent = "Failed to load session";
+    }
+  }
+
+  async function sendMobileSessionAction(payload, statusElId, btnEl) {
+    if (!activeSessionId) return;
+    const statusEl = document.getElementById(statusElId);
+    statusEl.textContent = "Sending...";
+    if (btnEl) btnEl.disabled = true;
+    try {
+      const res = await fetch(COMPANION_URL + "/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatId: activeSessionId, ...payload }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        statusEl.textContent = data.error || ("HTTP " + res.status);
+        return;
+      }
+      if (data.session) renderSessionDetail(data.session);
+      if (payload.replyText) {
+        document.getElementById("session-reply-input").value = "";
+        statusEl.textContent = data.triggeredAiTurn ? "Sent · Tutor replying..." : "Saved to session";
+        if (data.triggeredAiTurn) {
+          setTimeout(() => { if (activeSessionId === data.session?.id) void openSessionReader(activeSessionId); }, 2500);
+        }
+      } else {
+        statusEl.textContent = "Note saved";
+      }
+    } catch {
+      statusEl.textContent = "Network error";
+    } finally {
+      if (btnEl) btnEl.disabled = false;
     }
   }
 
@@ -1002,6 +1136,17 @@ function buildMobileHtml(uploadEndpoint: string): string {
   document.getElementById("pace-thorough").addEventListener("click", () => void patchExamPrep({ pace: "thorough" }));
   document.getElementById("pace-efficient").addEventListener("click", () => void patchExamPrep({ pace: "efficient" }));
   document.getElementById("pace-crash").addEventListener("click", () => void patchExamPrep({ pace: "crash-course" }));
+  document.getElementById("session-back-btn").addEventListener("click", closeSessionReader);
+  document.getElementById("session-refresh-btn").addEventListener("click", () => { if (activeSessionId) void openSessionReader(activeSessionId); });
+  document.getElementById("session-reply-send").addEventListener("click", () => {
+    const val = document.getElementById("session-reply-input").value.trim();
+    if (!val) return;
+    void sendMobileSessionAction({ replyText: val }, "session-reply-status", document.getElementById("session-reply-send"));
+  });
+  document.getElementById("session-note-save").addEventListener("click", () => {
+    const val = document.getElementById("session-notes-input").value;
+    void sendMobileSessionAction({ note: val }, "session-note-status", document.getElementById("session-note-save"));
+  });
   void loadCompanionState();
 
   function formatBytes(bytes) {
@@ -1294,6 +1439,62 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 					return;
 				}
 				sendJson(res, 400, { error: "Invalid companion rating payload" });
+			}
+		})();
+		return;
+	}
+
+	if (req.method === "GET" && segments.length === 4 && segments[2] === "companion" && segments[3] === "session") {
+		try {
+			const chatId = url.searchParams.get("chatId") ?? "";
+			const detail = getMobileCompanionSessionDetail(chatId, {
+				chatsDir: session.chatsDir,
+			});
+			touchExpiry(session);
+			sendJson(res, 200, detail);
+		} catch (err) {
+			if (err instanceof MobileCompanionError) {
+				sendJson(res, err.status, { error: err.message });
+				return;
+			}
+			sendJson(res, 500, { error: "Failed to load session" });
+		}
+		return;
+	}
+
+	if (req.method === "POST" && segments.length === 4 && segments[2] === "companion" && segments[3] === "session") {
+		void (async () => {
+			try {
+				const bytes = await readRequestBytes(req, 256 * 1024);
+				const body = JSON.parse(bytes.toString("utf8")) as {
+					chatId?: unknown;
+					replyText?: unknown;
+					note?: unknown;
+				};
+				const result = await appendMobileCompanionSessionNoteOrReply(
+					{
+						chatId: typeof body.chatId === "string" ? body.chatId : "",
+						replyText: typeof body.replyText === "string" ? body.replyText : undefined,
+						note: typeof body.note === "string" ? body.note : undefined,
+					},
+					{
+						flashcardsFile: session.flashcardsFile,
+						examPrepFile: session.examPrepFile,
+						chatsDir: session.chatsDir,
+					},
+				);
+				touchExpiry(session);
+				sendJson(res, 200, result);
+			} catch (err) {
+				if (err instanceof MobileCompanionError) {
+					sendJson(res, err.status, { error: err.message });
+					return;
+				}
+				if (err instanceof AttachmentError) {
+					sendJson(res, err.status, { error: err.message });
+					return;
+				}
+				sendJson(res, 400, { error: "Invalid session action payload" });
 			}
 		})();
 		return;

@@ -95,6 +95,12 @@ export interface ChatStore {
 	 *  side-chat service announces its own changes. Not conversation
 	 *  activity — updatedAt stays put. */
 	updateSideChats(id: string, update: (threads: SideChatThread[]) => SideChatThread[]): SideChatThread[] | null;
+	/** Update lightweight session metadata (pin, archive, lesson notes).
+	 * Not conversation activity — updatedAt stays put. */
+	updateChatMeta?(id: string, patch: { pinned?: boolean; archived?: boolean; notes?: string }): ChatRecord;
+	/** Rewind the transcript to just before the last learner user turn and
+	 * return that user turn's plain text so it can be edited & re-sent. */
+	rewindLastUserTurn?(id: string): { record: ChatRecord; restoredText: string } | null;
 }
 
 // ─── GraphStore — the append-only evidence ledgers (data/graph) ──────────────

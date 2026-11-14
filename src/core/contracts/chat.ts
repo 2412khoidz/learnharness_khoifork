@@ -47,6 +47,12 @@ export interface ChatRecord {
 	 * shares one thread. Every main request appends new raw exchanges across
 	 * all threads; already-recorded teacher history is never rewritten. */
 	sideChats?: SideChatThread[];
+	/** Whether the learner pinned this session to the top of the sidebar. */
+	pinned?: boolean;
+	/** Whether the learner archived this session from the main sidebar list. */
+	archived?: boolean;
+	/** Per-lesson Markdown notes captured by the learner in the Notes drawer. */
+	notes?: string;
 	/** Schema version. Absence denotes version 1; writes stamp the current
 	 * supported version. Reads refuse records stamped newer than this build
 	 * so a downgraded app cannot rewrite an unsupported record. */
@@ -310,6 +316,12 @@ export interface ChatSummary {
 	pendingProblem: boolean;
 	/** Saved per-session model/thinking choices included in the list payload. */
 	settings?: ChatSettings;
+	/** Pinned to the top of the sidebar when true. */
+	pinned?: boolean;
+	/** Hidden behind the Archived filter in the sidebar when true. */
+	archived?: boolean;
+	/** True when this session has non-empty lesson notes. */
+	hasNotes?: boolean;
 }
 
 /** Session-list row combining a saved summary with live server state.

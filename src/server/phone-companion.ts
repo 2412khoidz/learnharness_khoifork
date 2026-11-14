@@ -3,8 +3,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PATHS } from "../../config.ts";
 import type { ChatRecord } from "../core/contracts.ts";
+import { emit } from "../core/events.ts";
 import type { ExamPrepConfig, ExamPrepStatus } from "../core/exam-prep.ts";
-import { userFacingTextOf } from "../core/native-messages.ts";
+import {
+	activeProblemOf,
+	danglingQuestionOf,
+	newUserMessage,
+	userFacingTextOf,
+} from "../core/native-messages.ts";
 import type { GraphStore } from "../core/ports.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
 import { readExamPrepStatus, writeExamPrepConfig } from "./exam-prep.ts";
@@ -33,6 +39,23 @@ export interface MobileCompanionSessionItem {
 	updatedAt: string;
 	messageCount: number;
 	lastAssistantSnippet: string;
+}
+
+export interface MobileCompanionMessageItem {
+	id: string;
+	role: "user" | "assistant";
+	text: string;
+	timestamp?: number;
+}
+
+export interface MobileCompanionSessionDetail {
+	id: string;
+	title: string;
+	mode: "teach" | "practice";
+	notes: string;
+	pendingQuestionPrompt: string | null;
+	messageCount: number;
+	messages: MobileCompanionMessageItem[];
 }
 
 export interface MobileCompanionState {
@@ -387,4 +410,182 @@ export function updateMobileCompanionExamPrep(
 		now: opts.now,
 	});
 	return { ok: true, examPrep };
+}
+
+function resolveChatJsonPath(chatsDir: string, chatId: string): string {
+	if (!/^[A-Za-z0-9_-]+$/.test(chatId)) {
+		throw new MobileCompanionError(`Invalid chatId: ${chatId}`, 400);
+	}
+	return path.join(/* turbopackIgnore: true */ chatsDir, `${chatId}.json`);
+}
+
+function readChatRecord(chatsDir: string, chatId: string): ChatRecord {
+	const file = resolveChatJsonPath(chatsDir, chatId);
+	if (!fs.existsSync(file)) {
+		throw new MobileCompanionError("Session not found", 404);
+	}
+	try {
+		const raw = fs.readFileSync(/* turbopackIgnore: true */ file, "utf8");
+		const parsed = JSON.parse(raw) as ChatRecord;
+		if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.messages)) {
+			throw new MobileCompanionError("Session record is corrupt", 500);
+		}
+		return parsed;
+	} catch (err) {
+		if (err instanceof MobileCompanionError) throw err;
+		throw new MobileCompanionError("Failed to read session", 500);
+	}
+}
+
+function extractPromptFromToolBlock(block: unknown): string | null {
+	if (!block || typeof block !== "object") return null;
+	const b = block as { type?: unknown; name?: unknown; arguments?: unknown };
+	if (b.type !== "toolCall" || !b.arguments || typeof b.arguments !== "object") return null;
+	const args = b.arguments as Record<string, unknown>;
+	if (typeof args.question === "string" && args.question.trim()) {
+		return `[Question] ${args.question.trim()}`;
+	}
+	if (typeof args.problem === "string" && args.problem.trim()) {
+		return `[Problem] ${args.problem.trim()}`;
+	}
+	if (typeof args.statement === "string" && args.statement.trim()) {
+		return `[Problem] ${args.statement.trim()}`;
+	}
+	if (typeof args.prompt === "string" && args.prompt.trim()) {
+		return `[Prompt] ${args.prompt.trim()}`;
+	}
+	return null;
+}
+
+export function getMobileCompanionSessionDetail(
+	chatId: string,
+	opts: MobileCompanionOptions = {},
+): MobileCompanionSessionDetail {
+	const chatsDir = opts.chatsDir ?? PATHS.chats;
+	const record = readChatRecord(chatsDir, chatId);
+
+	const items: MobileCompanionMessageItem[] = [];
+	for (const msg of record.messages) {
+		if (!msg) continue;
+		if (msg.role === "user") {
+			const text = userFacingTextOf(msg.content).join("\n").trim();
+			if (text) {
+				items.push({ id: msg.id, role: "user", text, timestamp: msg.timestamp });
+			}
+		} else if (msg.role === "assistant") {
+			const parts = [...userFacingTextOf(msg.content)];
+			if (Array.isArray(msg.content)) {
+				for (const block of msg.content) {
+					const prompt = extractPromptFromToolBlock(block);
+					if (prompt) parts.push(prompt);
+				}
+			}
+			const text = parts.join("\n\n").trim();
+			if (text) {
+				items.push({ id: msg.id, role: "assistant", text, timestamp: msg.timestamp });
+			}
+		}
+	}
+
+	let pendingQuestionPrompt: string | null = null;
+	const dangling = danglingQuestionOf(record.messages);
+	const activeProb = activeProblemOf(record.messages);
+	const targetCallId = dangling?.toolCallId ?? activeProb?.toolCallId;
+	if (targetCallId) {
+		for (let i = record.messages.length - 1; i >= 0; i--) {
+			const msg = record.messages[i];
+			if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+			const block = msg.content.find((c) => c && typeof c === "object" && (c as { id?: unknown }).id === targetCallId);
+			const extracted = extractPromptFromToolBlock(block);
+			if (extracted) {
+				pendingQuestionPrompt = extracted;
+				break;
+			}
+		}
+	}
+
+	return {
+		id: record.id || chatId,
+		title: record.title || "Untitled session",
+		mode: record.kind === "practice" ? "practice" : "teach",
+		notes: typeof record.notes === "string" ? record.notes : "",
+		pendingQuestionPrompt,
+		messageCount: items.length,
+		messages: items.slice(-24),
+	};
+}
+
+export async function appendMobileCompanionSessionNoteOrReply(
+	input: { chatId: string; note?: string; replyText?: string },
+	opts: MobileCompanionOptions = {},
+): Promise<{
+	ok: boolean;
+	triggeredAiTurn: boolean;
+	session: MobileCompanionSessionDetail;
+}> {
+	const chatsDir = opts.chatsDir ?? PATHS.chats;
+	const chatId = typeof input.chatId === "string" ? input.chatId.trim() : "";
+	if (!chatId) throw new MobileCompanionError("chatId is required", 400);
+
+	const record = readChatRecord(chatsDir, chatId);
+	let modifiedRecord = false;
+
+	if (typeof input.note === "string") {
+		if (input.note.length > 0) record.notes = input.note;
+		else delete record.notes;
+		modifiedRecord = true;
+	}
+
+	const reply = typeof input.replyText === "string" ? input.replyText.trim() : "";
+	if (modifiedRecord) {
+		writeFileAtomicSync(resolveChatJsonPath(chatsDir, chatId), JSON.stringify(record, null, "\t"), {
+			allowInPlaceFallback: true,
+		});
+	}
+
+	let triggeredAiTurn = false;
+	if (reply) {
+		// In live desktop mode (no custom test chatsDir), ask the conversation agent to respond.
+		if (!opts.chatsDir) {
+			try {
+				const [{ handleChatInput }, { isTurnRunning }] = await Promise.all([
+					import("./chat-handler.ts"),
+					import("./turn-liveness.ts"),
+				]);
+				if (!isTurnRunning(chatId)) {
+					const activeProb = activeProblemOf(record.messages);
+					const turnInput = activeProb
+						? ({ type: "thinking", problemCallId: activeProb.toolCallId, text: reply } as const)
+						: !danglingQuestionOf(record.messages)
+							? ({ type: "text", text: reply } as const)
+							: null;
+					if (turnInput) {
+						const res = await handleChatInput(chatId, turnInput);
+						if (res.ok) {
+							triggeredAiTurn = true;
+							void res.arrayBuffer().catch(() => {});
+						}
+					}
+				}
+			} catch {
+				// Fall back to persisting the learner's message directly on disk.
+			}
+		}
+
+		if (!triggeredAiTurn) {
+			const fresh = readChatRecord(chatsDir, chatId);
+			fresh.messages.push(newUserMessage(reply));
+			fresh.updatedAt = new Date().toISOString();
+			writeFileAtomicSync(resolveChatJsonPath(chatsDir, chatId), JSON.stringify(fresh, null, "\t"), {
+				allowInPlaceFallback: true,
+			});
+			emit("chats-changed", {});
+		}
+	}
+
+	return {
+		ok: true,
+		triggeredAiTurn,
+		session: getMobileCompanionSessionDetail(chatId, opts),
+	};
 }

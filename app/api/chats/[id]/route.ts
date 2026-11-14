@@ -64,7 +64,54 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
 	const { id } = await params;
 	if (!getChat(id)) return Response.json({ error: "Not found" }, { status: 404 });
-	const body = (await req.json().catch(() => null)) as { title?: unknown } | null;
+	const body = (await req.json().catch(() => null)) as {
+		title?: unknown;
+		pinned?: unknown;
+		archived?: unknown;
+		notes?: unknown;
+		action?: unknown;
+	} | null;
+	if (body?.action === "rewind") {
+		if (isTurnRunning(id) || compactionInFlight(id)) {
+			return Response.json({ error: "Cannot rewind while a turn or compaction is running" }, { status: 409 });
+		}
+		const rewound = stores.chatStore.rewindLastUserTurn?.(id);
+		if (!rewound) {
+			return Response.json({ error: "No user turn to rewind" }, { status: 400 });
+		}
+		return Response.json({
+			ok: true,
+			restoredText: rewound.restoredText,
+			messageCount: rewound.record.messages.length,
+		});
+	}
+	const hasMetaPatch =
+		typeof body?.pinned === "boolean" ||
+		typeof body?.archived === "boolean" ||
+		typeof body?.notes === "string";
+	if (hasMetaPatch) {
+		const record = stores.chatStore.updateChatMeta?.(id, {
+			...(typeof body?.pinned === "boolean" ? { pinned: body.pinned } : {}),
+			...(typeof body?.archived === "boolean" ? { archived: body.archived } : {}),
+			...(typeof body?.notes === "string" ? { notes: body.notes } : {}),
+		});
+		if (!record) return Response.json({ error: "Not found" }, { status: 404 });
+		if (typeof body?.title === "string" && body.title.trim() !== "") {
+			const renamed = stores.chatStore.renameChat(id, body.title.trim());
+			return Response.json({
+				title: renamed.title,
+				pinned: Boolean(renamed.pinned),
+				archived: Boolean(renamed.archived),
+				notes: renamed.notes ?? "",
+			});
+		}
+		return Response.json({
+			title: record.title,
+			pinned: Boolean(record.pinned),
+			archived: Boolean(record.archived),
+			notes: record.notes ?? "",
+		});
+	}
 	if (typeof body?.title !== "string" || body.title.trim() === "") {
 		return Response.json({ error: "title must be a non-empty string" }, { status: 400 });
 	}

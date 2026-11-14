@@ -20,7 +20,7 @@
  * healthy. The dock's chips + graph refetch track progress live through
  * /api/graph/status, as with session runs.
  */
-import { convertPdf, extraction, joinPages, NotesImportError, sourceDirectory } from "@/src/server";
+import { buildOutlineDigestIfNeeded, convertPdf, extractEpubText, extraction, joinPages, NotesImportError, sourceDirectory } from "@/src/server";
 import { IMPORT_EXTENSIONS, MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES, UNSUPPORTED_TYPE_MESSAGE, validNotesPath } from "@/lib/notes-import-limits.ts";
 import { FormBodyLimitError, readBoundedFormData } from "@/lib/bounded-form-data.ts";
 import {
@@ -57,13 +57,29 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // "%PDF-"
 
 type NotesFile = { kind: "notes"; text: string; notice?: string } | { kind: "refused"; error: string };
 
-/** A PDF becomes page-marked Markdown; any other accepted file is read as text. */
+/** A PDF or EPUB becomes structured Markdown; other accepted files are read as UTF-8 text. */
 async function readNotesFile(file: File): Promise<NotesFile> {
 	if (!IMPORT_EXTENSIONS.test(file.name)) return { kind: "refused", error: UNSUPPORTED_TYPE_MESSAGE };
 	const bytes = new Uint8Array(await file.arrayBuffer());
+	if (/\.epub$/i.test(file.name)) {
+		const epub = extractEpubText(bytes);
+		if (epub.kind === "unreadable") return { kind: "refused", error: epub.error };
+		const digested = buildOutlineDigestIfNeeded(epub.text);
+		return {
+			kind: "notes",
+			text: digested.text,
+			notice: `Imported EPUB (${epub.chapterCount} ${epub.chapterCount === 1 ? "section" : "sections"}).`,
+		};
+	}
 	if (!PDF_MAGIC.every((byte, i) => bytes[i] === byte)) {
 		if (bytes.subarray(0, 8192).includes(0)) return { kind: "refused", error: "This file isn't plain text." };
-		return { kind: "notes", text: new TextDecoder().decode(bytes) };
+		const rawText = new TextDecoder().decode(bytes);
+		const digested = buildOutlineDigestIfNeeded(rawText);
+		return {
+			kind: "notes",
+			text: digested.text,
+			...(digested.outlined ? { notice: `Generated Outline Digest (${digested.sectionCount} sections).` } : {}),
+		};
 	}
 	const pdf = await convertPdf(bytes, MAX_PDF_PAGES);
 	switch (pdf.kind) {
@@ -74,9 +90,10 @@ async function readNotesFile(file: File): Promise<NotesFile> {
 		case "converted": {
 			const text = joinPages(pdf.pages);
 			if (!text) return { kind: "refused", error: "OCR not supported yet." };
+			const digested = buildOutlineDigestIfNeeded(text);
 			const skipped = pdf.pages.filter((page) => page.kind === "image-only").length;
 			const omission = skipped > 0 ? ` Skipped ${skipped} image-only ${skipped === 1 ? "page" : "pages"}; OCR is not supported.` : "";
-			return { kind: "notes", text, notice: `Scanned pages may have errors.${omission}` };
+			return { kind: "notes", text: digested.text, notice: `Scanned pages may have errors.${omission}` };
 		}
 	}
 }
