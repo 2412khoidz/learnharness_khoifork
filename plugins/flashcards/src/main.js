@@ -2,6 +2,9 @@ import { mountLibraryTree } from './library-tree.js';
 import { createReviewController } from './review.js';
 import { mountDashboard } from './dashboard.js';
 import { buildPracticeCards } from './practice-queue.js';
+import languageCatalog from './languages.cjs';
+
+const { LANGUAGE_OPTIONS } = languageCatalog;
 
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
@@ -374,6 +377,10 @@ export function activate(ctx) {
         row('relearningSteps', 'Relearning steps (minutes)', settings.relearningSteps.map(value => `${value}m`).join(' '), 'text', parseSteps),
         row('dayStart', 'Day starts at (hour)', settings.dayStart, 'number', Number, { min: 0, max: 23, step: 1 }),
         row('chunkBudget', 'Generation chunk budget (estimated tokens)', settings.chunkBudget, 'number', Number, { min: 1, step: 1 }),
+        row('language', 'Generation language', settings.language ?? 'auto', 'dropdown', value => value, {
+          description: 'Auto matches the session notes or proposition language',
+          options: LANGUAGE_OPTIONS.map(({ value, label }) => ({ value, label })),
+        }),
       ];
     };
     const changeModels = async patch => {

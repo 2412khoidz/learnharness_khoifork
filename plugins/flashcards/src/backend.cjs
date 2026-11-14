@@ -5,6 +5,7 @@ const { openStore } = require('./store.cjs');
 const scheduler = require('./scheduler.cjs');
 const { statistics } = require('./statistics.cjs');
 const fileGeneration = require('./file-generation.cjs');
+const { isSupportedLanguage } = require('./languages.cjs');
 
 const { graphInstructions: instructions, graphPromptFor: promptFor } = require('./generation-prompts.cjs');
 const resultSchema = {
@@ -14,7 +15,7 @@ const resultSchema = {
     } } },
   },
 };
-const estimate = (input) => Math.ceil(Buffer.byteLength(instructions + JSON.stringify(resultSchema) + promptFor(input), 'utf8') / 3) + 256;
+const estimate = (input, language = 'auto') => Math.ceil(Buffer.byteLength(instructions + JSON.stringify(resultSchema) + promptFor(input, language), 'utf8') / 3) + 256;
 const fingerprint = (input) => createHash('sha256').update(JSON.stringify(input)).digest('hex');
 const activeBatch = (s) => s.batches.findLast(b => ['running', 'cancelling'].includes(b.status));
 const memberships = (s, id) => s.decks.filter(d => d.propositionIds.includes(id)).map(d => d.id);
@@ -23,7 +24,7 @@ const reviewConfiguration = s => fingerprint({ retention: s.retention, learningS
 const fail = (message) => { throw new Error(message); };
 function requiredText(value, label) { if (typeof value !== 'string' || !value.trim()) fail(`${label} must not be blank.`); return value; }
 function validateSettings(patch, old) {
-  const allowed = new Set(['retention', 'learningSteps', 'relearningSteps', 'dayStart', 'chunkBudget', 'modelOverride', 'thinkingOverride']);
+  const allowed = new Set(['retention', 'learningSteps', 'relearningSteps', 'dayStart', 'chunkBudget', 'modelOverride', 'thinkingOverride', 'language']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) fail(`Unsupported setting: ${key}`);
   const s = { ...old, ...patch };
   if (s.thinkingOverride === null) delete s.thinkingOverride;
@@ -35,6 +36,7 @@ function validateSettings(patch, old) {
   if (!Number.isSafeInteger(s.chunkBudget) || s.chunkBudget < 1) fail('Input budget must be a positive safe whole number.');
   if (s.modelOverride !== null && (!s.modelOverride || typeof s.modelOverride.provider !== 'string' || typeof s.modelOverride.id !== 'string')) fail('Invalid model override.');
   if (s.thinkingOverride !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(s.thinkingOverride)) fail('Invalid thinking level.');
+  if (s.language !== undefined && !isSupportedLanguage(s.language)) fail('Invalid generation language.');
   return s;
 }
 function validateResult(result, context) {
@@ -368,11 +370,12 @@ function activate(ctx) {
     if (activeBatch(store.get())) fail('A generation batch is already active.');
     const resolved = await resolveModel(store.get().settings);
     const state = store.get(), chunks = pack(graphNow(), propositionIds, state);
+    const language = state.settings.language || 'auto';
     const plans = chunks.map(input => {
-      const tokens = estimate(input);
+      const tokens = estimate(input, language);
       const maxTokens = Math.min(8192, resolved.entry.maxTokens ?? 8192, (resolved.entry.contextWindow ?? Infinity) - tokens - 256);
       if (maxTokens < 1024) fail('The selected model cannot fit this context and an output allowance. Reduce the chunk budget or choose another model.');
-      return { input, prompt: promptFor(input), maxTokens, tokens };
+      return { input, prompt: promptFor(input, language), maxTokens, tokens };
     });
     const id = randomUUID();
     preflights.set(id, { kind: 'graph', revision: state.revision, settingsHash: fingerprint(state.settings), model: resolved.spec, plans, createdAt: Date.now() });
@@ -380,7 +383,7 @@ function activate(ctx) {
     return { id, chunkCount: plans.length, propositionCount: new Set(propositionIds).size, estimatedTokens: plans.reduce((n, p) => n + p.tokens, 0), modelLabel: resolved.entry.name };
   });
   function rememberFilePlan(file, resolved, state, source, ranges, retryOf) {
-    const plans = fileGeneration.prepareFileChunks({ name: file.name, markdown: file.markdown, chunkBudget: state.settings.chunkBudget, entry: resolved.entry, ...(ranges ? { ranges } : {}) });
+    const plans = fileGeneration.prepareFileChunks({ name: file.name, markdown: file.markdown, chunkBudget: state.settings.chunkBudget, language: state.settings.language || 'auto', entry: resolved.entry, ...(ranges ? { ranges } : {}) });
     const id = randomUUID(), sourceId = source?.id ?? randomUUID(), deckId = source?.deckId ?? randomUUID();
     preflights.set(id, { kind: 'file', file, sourceId, deckId, retryOf, revision: state.revision, settingsHash: fingerprint(state.settings), model: resolved.spec, plans, createdAt: Date.now() });
     for (const [key, value] of preflights) if (Date.now() - value.createdAt > 600000) preflights.delete(key);

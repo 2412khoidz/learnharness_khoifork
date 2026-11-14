@@ -1,4 +1,6 @@
 // Plugin-owned data/actions inside the shared native tree. No host implementation imports.
+import { formatPlainMath } from './plain-math.js';
+
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -123,9 +125,9 @@ export function mountLibraryTree({ ctx, container, signal, button, onReview, onP
         button(more, actionsLabel, () => { ctx.ui.openMenu(more, { label: actionsLabel, items: menuItems(record) }, { signal: mountSignal }); }, mountSignal, { icon: settingsIcon, iconOnly: true, size: 'icon-sm', variant: 'ghost', title: actionsLabel });
       }
       function refresh() {
-        const title = record.kind === 'deck' ? record.deck.name : record.kind === 'proposition' ? record.p.name : record.kind === 'cue' ? record.cue.question.replace(/\s+/g, ' ').trim() || 'Cue' : 'Archive';
+        const title = record.kind === 'deck' ? record.deck.name : record.kind === 'proposition' ? formatPlainMath(record.p.name) : record.kind === 'cue' ? formatPlainMath(record.cue.question.replace(/\s+/g, ' ').trim()) || 'Cue' : 'Archive';
         label.textContent = title;
-        label.title = record.kind === 'proposition' ? record.p.statement || title : record.kind === 'deck' ? 'Rename deck' : title;
+        label.title = record.kind === 'proposition' ? formatPlainMath(record.p.statement) || title : record.kind === 'deck' ? 'Rename deck' : title;
         metadata.textContent = record.kind === 'proposition' ? `${record.p.cues.filter(c => !c.deleted).length} cues` : '';
         if (draft) {
           label.hidden = draft.editing;

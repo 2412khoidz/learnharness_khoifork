@@ -14,6 +14,7 @@ import { LatexGlyph } from "../components/latex-glyph.tsx";
 import { ProblemCard, ConcludeCard } from "../components/practice-cards.tsx";
 import { MessageResponse, ToolContentResponse } from "../components/ai-elements/message.tsx";
 import {
+	formatMathForPlainText,
 	repairMathForDisplay, healOverescapedCommands, restoreMathEscapes,
 	parseQuizInput, parseAskInput, parseExplainInput, activeProblemOf, projectView,
 	toLlmMessages, type LhMessage, type ArtifactPartProps,
@@ -248,5 +249,26 @@ describe("practice display surfaces", () => {
 		assertMath(revealHtml, [tex, tex]);
 		assert.deepEqual(concluded, before);
 		assert.deepEqual(toLlmMessages(concluded), history);
+	});
+
+	it("formatMathForPlainText turns LaTeX math into clean Unicode while preserving prose", () => {
+		assert.equal(formatMathForPlainText("Practice fact one"), "Practice fact one");
+		assert.equal(formatMathForPlainText("Giá là $100"), "Giá là $100");
+		assert.equal(
+			formatMathForPlainText("Bất đẳng thức $(a - tb)^2 \\ge 0$ với $t \\in \\mathbb{R}$"),
+			"Bất đẳng thức (a - tb)² ≥ 0 với t ∈ ℝ",
+		);
+		assert.equal(
+			formatMathForPlainText("Giới hạn $\\lim_{n \\to \\infty} x_n = \\frac{1}{2}$"),
+			"Giới hạn lim_(n → ∞) xₙ = 1/2",
+		);
+		assert.equal(
+			formatMathForPlainText("Đạo hàm $\\nabla f(x)$ và $e^{-x^2}$"),
+			"Đạo hàm ∇ f(x) và e^(-x²)",
+		);
+		assert.equal(
+			formatMathForPlainText("Tổng $\\sum_{i=1}^n a_i \\implies c$"),
+			"Tổng ∑ᵢ₌₁ⁿ aᵢ ⟹ c",
+		);
 	});
 });

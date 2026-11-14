@@ -32,6 +32,7 @@ import { BACKGROUND_MODEL_ROLES, CACHE_RETENTIONS, COMPACTION_THRESHOLD_FLOOR, C
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
 import { isSearchEngineId, SEARCH_ENGINES } from "../core/search.ts";
 import { isDictationLanguage } from "../core/dictation.ts";
+import { isExtractionLanguage } from "../core/output-language.ts";
 import { parseFileAccessSettings } from "../core/file-access.ts";
 
 /** Parsed-or-rejected — `ok: false` carries the 400's error message. */
@@ -365,6 +366,12 @@ export function parseGraphSettingsBody(body: unknown): SettingsBodyResult<GraphS
 			};
 		}
 		settings.extractionChunkTokens = floored;
+	}
+	if (raw.extractionLanguage !== undefined) {
+		if (!isExtractionLanguage(raw.extractionLanguage)) {
+			return { ok: false, error: "extractionLanguage must be a supported language code" };
+		}
+		settings.extractionLanguage = raw.extractionLanguage;
 	}
 	return { ok: true, settings };
 }

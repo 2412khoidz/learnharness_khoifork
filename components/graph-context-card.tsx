@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { ChevronRightIcon } from "lucide-react";
+import { ToolContentResponse } from "@/components/ai-elements/message";
+import { formatMathForPlainText } from "@/src/core";
 import { cn } from "@/lib/utils";
 
 /**
@@ -20,8 +22,11 @@ export interface GraphContextData {
 	chains: string[];
 }
 
-export function GraphContextCard({ data }: { data: GraphContextData }) {
-	const [open, setOpen] = useState(false);
+const CONTEXT_PROSE = "[--font-prose:var(--font-ui)] [--lh-prose-size:var(--text-xs)] [--lh-prose-leading:1.625] " +
+	"[&_.katex]:[font-size:1.1em] [&_.katex-display]:my-1 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden";
+
+export function GraphContextCard({ data, defaultOpen = false }: { data: GraphContextData; defaultOpen?: boolean }) {
+	const [open, setOpen] = useState(defaultOpen);
 	const { propositions = [], chains = [] } = data ?? {};
 	const noun = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 	return (
@@ -40,18 +45,22 @@ export function GraphContextCard({ data }: { data: GraphContextData }) {
 				</span>
 			</button>
 			{open && (
-				<div data-testid="graph-context-body" className="mt-1 space-y-1 rounded-lg border border-dashed border-border/70 px-4 py-3 text-xs">
+				<div data-testid="graph-context-body" className="mt-1 space-y-2 rounded-lg border border-dashed border-border/70 px-4 py-3 text-xs">
 					{propositions.map((p) => (
-						<div key={p.id} data-testid={`graph-context-prop-${p.id}`} className="leading-relaxed">
-							<span className="font-medium text-foreground/80">{p.name}</span>
-							<span className="text-muted-foreground"> — {p.statement}</span>
+						<div key={p.id} data-testid={`graph-context-prop-${p.id}`} className="space-y-0.5 leading-relaxed">
+							<ToolContentResponse mode="static" className={`${CONTEXT_PROSE} font-medium text-foreground/85`}>
+								{p.name}
+							</ToolContentResponse>
+							<ToolContentResponse mode="static" className={`${CONTEXT_PROSE} text-muted-foreground`}>
+								{p.statement}
+							</ToolContentResponse>
 						</div>
 					))}
 					{chains.length > 0 && (
 						<div className="pt-1">
 							{chains.map((c, i) => (
 								<div key={i} className="font-mono text-[11px] text-muted-foreground">
-									{c}
+									{formatMathForPlainText(c)}
 								</div>
 							))}
 						</div>

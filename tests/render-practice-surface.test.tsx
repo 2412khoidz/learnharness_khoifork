@@ -14,6 +14,7 @@ import React from "react";
 (globalThis as Record<string, unknown>).React = React;
 
 import assert from "node:assert/strict";
+import { parseHTML } from "linkedom";
 import { renderWithInteractionLayers as renderToStaticMarkup } from "./interaction-layer-render.tsx";
 import { describe, it } from "node:test";
 
@@ -260,5 +261,24 @@ describe("GraphContextCard", () => {
 			[{ id: "n1", name: "A", statement: "S." }], [],
 		) as unknown as LhMessage]);
 		assert.equal((view[0]!.parts[0] as { type: string }).type, "data-graph-context");
+	});
+
+	it("expanded: renders KaTeX math in proposition names/statements and formats chain labels cleanly", () => {
+		const html = renderToStaticMarkup(
+			<GraphContextCard
+				defaultOpen
+				data={{
+					propositions: [
+						{ id: "n1", name: "Bất đẳng thức $x^2 \\ge 0$", statement: "Với mọi $x \\in \\mathbb{R}$, $x^2 \\ge 0$." },
+					],
+					chains: ["$x^2 \\ge 0$ → Cauchy-Schwarz"],
+				}}
+			/>,
+		);
+		const { document } = parseHTML(html);
+		assert.ok(html.includes('data-testid="graph-context-body"'));
+		assert.equal(document.querySelectorAll(".katex-error").length, 0);
+		assert.ok(document.querySelectorAll(".katex-html").length >= 3);
+		assert.ok(html.includes("x² ≥ 0 → Cauchy-Schwarz"));
 	});
 });

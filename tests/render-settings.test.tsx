@@ -350,6 +350,16 @@ describe("GraphSection — master switch + chunk budget (wave 7 + 2026-10-02)", 
 		assert.ok(tagOf(html, "input-chunk-tokens").includes('value="6000"'));
 		assert.ok(html.includes(">6000 tok</"));
 	});
+
+	it("the extraction-language row defaults to Auto and reflects a stored language", () => {
+		const html = renderToStaticMarkup(<GraphSection graph={undefined} onSectionChange={() => true} />);
+		assert.ok(html.includes('data-testid="graph-row-language"'));
+		assert.ok(tagOf(html, "select-extraction-language").includes("select"));
+		const viHtml = renderToStaticMarkup(
+			<GraphSection graph={{ extractionLanguage: "vi" }} onSectionChange={() => true} />,
+		);
+		assert.ok(viHtml.includes('value="vi" selected'));
+	});
 });
 
 describe("KeysSection (thin SSR)", () => {

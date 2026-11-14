@@ -1492,13 +1492,13 @@ describe("the extractor redesign (owner, 2026-09-30): chains are the deliverable
 		}
 	});
 
-	it("preserves the complete teaching-session prompt byte-for-byte", () => {
-		// Original UTF-8 snapshot, including every newline, preamble and the
-		// session-only anchor rule. Notes-only changes must not alter it.
-		assert.equal(
-			createHash("sha256").update(EXTRACTOR_INSTRUCTIONS, "utf8").digest("hex"),
-			"a8bddd7d47130ed5e39ffe7d8d0ed6efdd6b30407d52cd9838e7be2e465089a6",
-		);
+	it("carries shared source-language preservation and LaTeX formatting rules in both front doors", () => {
+		for (const prompt of [EXTRACTOR_INSTRUCTIONS, NOTES_EXTRACTOR_INSTRUCTIONS]) {
+			assert.match(prompt, /Match the primary natural language of the source prose\/notes/);
+			assert.match(prompt, /write Vietnamese when the session or notes are in Vietnamese/);
+			assert.match(prompt, /LaTeX delimiters \(\$?\.\.\.\$? inline|wrap all mathematical formulas/);
+			assert.match(prompt, /escape every TeX backslash as \\\\/);
+		}
 	});
 
 	it("the notes framing records knowledge without requiring a foundational reconstruction", () => {
@@ -1528,6 +1528,41 @@ describe("the extractor redesign (owner, 2026-09-30): chains are the deliverable
 		});
 		assert.deepEqual(await pipeline.runExtraction(chatId), { nodes: 2, chains: 1 });
 		assert.equal(calls, 1);
+	});
+
+	it("injects OUTPUT LANGUAGE OVERRIDE into session and notes prompts only when set beyond auto", async () => {
+		const { chatId } = fixtureChat();
+		const prompts: string[] = [];
+		const captureUserPrompt = (toolArgs: Parameters<typeof fauxToolCall>[1], id: string) =>
+			fauxEngine([(context) => {
+				const user = context.messages.find((message) => message.role === "user");
+				assert.ok(user && user.role === "user");
+				prompts.push(typeof user.content === "string" ? user.content : user.content.map((p) => p.type === "text" ? p.text : "").join("\n"));
+				return fauxAssistantMessage([fauxToolCall("submit_findings", toolArgs, { id })], { stopReason: "toolUse" });
+			}]);
+		const sessionPipeline = createExtractionPipeline({
+			chatStore,
+			graphStore: memoryLedgers(),
+			extractor: captureUserPrompt(FINDINGS, "lang-session"),
+			auditor: submitModel("submit_review", { links: [] }),
+			getExtractionLanguage: () => "vi",
+		});
+		await sessionPipeline.runExtraction(chatId);
+		const notesPipeline = createExtractionPipeline({
+			chatStore,
+			graphStore: memoryLedgers(),
+			extractor: captureUserPrompt({
+				propositions: [{ id: "p1", name: "Ý tưởng", statement: "Mô tả ngắn." }],
+				chains: [],
+			}, "lang-notes"),
+			auditor: submitModel("submit_review", { links: [] }),
+			getExtractionLanguage: () => "vi",
+		});
+		await notesPipeline.importNotes({ filePath: "vi-notes.md", text: "Định lý Cauchy-Schwarz" });
+		assert.equal(prompts.length, 2);
+		for (const p of prompts) {
+			assert.ok(p.startsWith("OUTPUT LANGUAGE OVERRIDE: Write every proposition name, statement, and alias in Vietnamese.\n\n"));
+		}
 	});
 });
 

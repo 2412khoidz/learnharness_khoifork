@@ -249,6 +249,14 @@ describe("parseGraphSettingsBody", () => {
 		assert.ok(r.ok);
 		assert.deepEqual(r.settings, { enabled: false });
 	});
+
+	it("extractionLanguage: accepts supported codes and rejects unknown values", () => {
+		const vi = parseGraphSettingsBody({ extractionLanguage: "vi" });
+		assert.ok(vi.ok);
+		assert.deepEqual(vi.settings, { extractionLanguage: "vi" });
+		assert.equal(parseGraphSettingsBody({ extractionLanguage: "klingon" }).ok, false);
+		assert.equal(parseGraphSettingsBody({ extractionLanguage: 123 }).ok, false);
+	});
 });
 
 describe("parseCompactionSettingsBody (owner round 14)", () => {

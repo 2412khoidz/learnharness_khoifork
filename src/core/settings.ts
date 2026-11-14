@@ -36,6 +36,7 @@ import type { ModelRole } from "../../config.ts";
 import type { ChatSettings } from "./contracts/chat.ts";
 import { isSearchEngineId, type SearchEngineId } from "./search.ts";
 import { isDictationLanguage, type DictationLanguage } from "./dictation.ts";
+import { isExtractionLanguage, type ExtractionLanguage } from "./output-language.ts";
 import { parseFileAccessSettings, type FileAccessSettings } from "./file-access.ts";
 import { COLOR_OVERRIDE_KEYS, isThemeId, type AppearanceColorOverrides } from "./themes.ts";
 
@@ -465,6 +466,9 @@ export interface GraphSettings {
 	 *  delays extraction — the user's stated cost/thoroughness tradeoff,
 	 *  not a misconfiguration to police. */
 	extractionChunkTokens?: number;
+	/** Output language for extracted graph propositions and chains. `"auto"`
+	 *  keeps the primary language of the teaching session or imported notes. */
+	extractionLanguage?: ExtractionLanguage;
 }
 
 /**
@@ -550,7 +554,7 @@ export const FACTORY_SETTINGS: FactorySettings = {
 		sessionNameSerif: true,
 		mdRendering: { headingWeight: 900, boldColor: null, italicColor: null },
 	},
-	graph: { enabled: true, rendering: true, extractionChunkTokens: 4096 },
+	graph: { enabled: true, rendering: true, extractionChunkTokens: 4096, extractionLanguage: "auto" },
 	compaction: { thresholdTokens: 150_000, includeReasoning: false },
 };
 
@@ -830,6 +834,7 @@ function sanitizeGraph(raw: Record<string, unknown>): GraphSettings {
 	if (typeof rawTokens === "number" && Number.isFinite(rawTokens) && rawTokens > 0) {
 		out.extractionChunkTokens = Math.max(EXTRACTION_CHUNK_TOKENS_FLOOR, Math.floor(rawTokens));
 	}
+	if (isExtractionLanguage(raw.extractionLanguage)) out.extractionLanguage = raw.extractionLanguage;
 	return out;
 }
 

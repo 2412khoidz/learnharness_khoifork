@@ -140,6 +140,13 @@ describe("node detail card text", () => {
 		assert.match(html, /class="[^"]*font-medium[^"]*\[--lh-prose-size:var\(--text-sm\)\][^"]*"/, "the name keeps its size and weight");
 		assert.match(html, /class="[^"]*text-muted-foreground[^"]*\[--lh-prose-size:var\(--text-xs\)\][^"]*"/, "the statement keeps its size and colour");
 	});
+
+	it("renders inline and display LaTeX inside NodeCardText through KaTeX without errors", () => {
+		const html = render("Bất đẳng thức $(a - tb)^2 \\ge 0$", "Với mọi $t \\in \\mathbb{R}$, ta có $a^2 - 2tab + t^2 b^2 \\ge 0$.");
+		const { document } = parseHTML(html);
+		assert.equal(document.querySelectorAll(".katex-error").length, 0);
+		assert.ok(document.querySelectorAll(".katex-html").length >= 3);
+	});
 });
 
 describe("node detail card placement", () => {

@@ -17,7 +17,7 @@ const result = (...rows) => ({ propositions: rows });
 // persistent tasks, explicit accepted-result validation, and no model execution.
 function workerService() {
   const tasks = new Map(), subscriptions = new Map(), waiters = new Map();
-  const definitions = new Map(); let starts = 0;
+  const definitions = new Map(), prompts = new Map(); let starts = 0;
   const terminal = task => ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task.status);
   const emit = task => {
     for (const listener of subscriptions.get(task.id) ?? []) listener(structuredClone(task));
@@ -34,6 +34,7 @@ function workerService() {
       starts++;
       const task = { id: randomUUID(), workerId, requestId: options.requestId, input: structuredClone(options.input), status: 'running', turns: 0, activity: 'waiting' };
       tasks.set(task.id, task);
+      prompts.set(task.id, options.prompt);
       return structuredClone(task);
     },
     list: () => structuredClone([...tasks.values()]),
@@ -57,7 +58,7 @@ function workerService() {
     cancel(id) { tasks.get(id).cancelRequested = true; },
   };
   return {
-    service, tasks, get starts() { return starts; },
+    service, tasks, prompts, get starts() { return starts; },
     stage(id, value) {
       const task = tasks.get(id);
       definitions.get(task.workerId).validateResult(value, { input: task.input });
@@ -1189,7 +1190,7 @@ test('settings validate atomically and model resolution fails explicitly without
   const h = harness(t);
   const before = h.state();
   for (const patch of [{ retention: .69 }, { retention: 1 }, { learningSteps: [] }, { relearningSteps: [10, 5] },
-    { learningSteps: [1440] }, { dayStart: 24 }, { chunkBudget: 0 }, { modelOverride: {} }, { thinkingOverride: 'invented' }, { unknown: true }]) {
+    { learningSteps: [1440] }, { dayStart: 24 }, { chunkBudget: 0 }, { modelOverride: {} }, { thinkingOverride: 'invented' }, { language: 'klingon' }, { unknown: true }]) {
     await assert.rejects(h.call('save-settings', patch));
     assert.deepEqual(h.state(), before);
   }
@@ -1197,4 +1198,19 @@ test('settings validate atomically and model resolution fails explicitly without
   await assert.rejects(h.call('preflight', { propositionIds: ['p1'] }), /Configure the cheap model slot/);
   assert.equal(h.workers.starts, 0);
   assert.deepEqual(h.state().propositions, []);
+});
+
+test('configured generation language flows into both graph and file preflight prompts', async t => {
+  const h = harness(t, graph('p1'));
+  await h.call('save-settings', { language: 'vi' });
+  const graphPlan = await h.call('preflight', { propositionIds: ['p1'] });
+  await h.call('start-generation', { preflightId: graphPlan.id, requestId: 'lang-graph' });
+  const graphTask = h.workers.service.list()[0];
+  assert.match(h.workers.prompts.get(graphTask.id), /^Output language override:.*Vietnamese\.\nGenerate additive/);
+  const hFile = harness(t, graph('p1'));
+  await hFile.call('save-settings', { language: 'vi' });
+  const filePlan2 = await hFile.call('preflight-file', { name: 'vi.md', markdown: '# Đạo hàm\n\nKhái niệm.' });
+  await hFile.call('start-generation', { preflightId: filePlan2.id, requestId: 'lang-file' });
+  const fileTask = hFile.workers.service.list()[0];
+  assert.match(hFile.workers.prompts.get(fileTask.id), /^Output language override:.*Vietnamese\.\nExtract supported/);
 });

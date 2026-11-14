@@ -119,3 +119,14 @@ test('graph and file full-request estimates still account for composed instructi
   const expectedFile = Math.ceil(Buffer.byteLength(prompts.fileInstructions + JSON.stringify(files.resultSchema) + prompts.filePromptFor(file), 'utf8') / 3) + 256;
   assert.equal(plan.prompt, prompts.filePromptFor(file)); assert.equal(plan.tokens, expectedFile);
 });
+
+test('flashcards prompts preserve source language by default and inject explicit language overrides when configured', () => {
+  assert.match(prompts.cardWriting, /LANGUAGE/);
+  assert.match(prompts.cardWriting, /same primary natural language as the supplied source material/);
+  assert.match(prompts.cardWriting, /write Vietnamese when the source notes or graph propositions are in Vietnamese/);
+  const input = { targets: ['p'], propositions: [{ id: 'p', name: 'Định lý', statement: 'Nội dung' }], chains: [], cards: [{ propositionId: 'p', active: [] }] };
+  assert.match(prompts.graphPromptFor(input, 'vi'), /^Output language override:.*Vietnamese\.\nGenerate additive/);
+  const file = { name: 'notes.md', markdown: '# Kiến thức\n\nNội dung.' };
+  const [viPlan] = files.prepareFileChunks({ ...file, chunkBudget: 4000, language: 'vi', entry: { contextWindow: 100000, maxTokens: 8192 } });
+  assert.match(viPlan.prompt, /^Output language override:.*Vietnamese\.\nExtract supported atomic facts/);
+});

@@ -972,6 +972,9 @@ test('settings parse minutes/hours, retain failed drafts and use acknowledged va
     assert.deepEqual(h.calls.find(([op]) => op === 'save-settings')[1].learningSteps, [1, 60]);
     assert.equal(find('learningSteps').value, '1m 60m');
     await find('retention').onChange(95); assert.equal(h.state.settings.retention, .95);
+    assert.equal(find('language').type, 'dropdown');
+    assert.equal(find('language').value, 'auto');
+    await find('language').onChange('vi'); assert.equal(h.state.settings.language, 'vi');
     const before = h.calls.filter(([op]) => op === 'save-settings').length;
     await assert.rejects(find('learningSteps').onChange('10m 1m'), /increasing/);
     assert.equal(h.calls.filter(([op]) => op === 'save-settings').length, before);

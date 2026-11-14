@@ -1,6 +1,7 @@
 'use strict';
 const { createHash } = require('node:crypto');
 
+const { isSupportedLanguage } = require('./languages.cjs');
 const { fileInstructions: instructions, filePromptFor: promptFor } = require('./generation-prompts.cjs');
 const textSchema = { type: 'string', minLength: 1, pattern: '\\S' };
 const resultSchema = {
@@ -69,7 +70,8 @@ function validateFileInput(input) {
 const estimate = prompt => Math.ceil(Buffer.byteLength(instructions + JSON.stringify(resultSchema) + prompt, 'utf8') / 3) + 256;
 function prepareFileChunks(options) {
   const { name, markdown } = validateFileInput(options);
-  const { chunkBudget, entry, ranges } = options;
+  const { chunkBudget, entry, ranges, language = 'auto' } = options;
+  if (!isSupportedLanguage(language)) fail('Invalid generation language.');
   if (!Number.isSafeInteger(chunkBudget) || chunkBudget < 1) fail('Input budget must be a positive safe whole number.');
   if (!entry || typeof entry !== 'object') fail('A model catalog entry is required.');
   const outputLimit = entry.maxTokens ?? 8192, contextLimit = entry.contextWindow ?? Infinity;
@@ -83,7 +85,7 @@ function prepareFileChunks(options) {
   const ordered = [...spans].sort((a, b) => a.start - b.start);
   if (ordered.some((span, index) => index && span.start < ordered[index - 1].end)) fail('Source ranges must not overlap.');
   const plan = (start, end) => {
-    const input = { name, markdown: markdown.slice(start, end) }, prompt = promptFor(input);
+    const input = { name, markdown: markdown.slice(start, end) }, prompt = promptFor(input, language);
     const tokens = estimate(prompt);
     const maxTokens = Math.min(8192, outputLimit, contextLimit - tokens - 256);
     return { start, end, input, prompt, tokens, maxTokens };

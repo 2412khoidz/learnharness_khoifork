@@ -34,6 +34,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
 	EXTRACTION_CHUNK_TOKENS_FLOOR,
+	EXTRACTION_LANGUAGES,
+	isExtractionLanguage,
 	resolveSettings,
 	THEME_COLOR_KEYS,
 	type AppearanceSettings,
@@ -46,7 +48,7 @@ import { Hint } from "@/components/ui/hint";
 import { BUNDLED_READING_FONTS, useAppearance } from "./appearance.tsx";
 import { FontMenuList } from "./model-menu";
 import { ThemeCards } from "./theme-cards.tsx";
-import { CommitInput, SettingsMenuTrigger, SettingsRow, Toggle } from "./controls.tsx";
+import { CommitInput, SettingsMenuTrigger, SettingsRow, ThinSelect, Toggle } from "./controls.tsx";
 
 /** The factory reading family — the DEFAULT row's identity (unset =
  *  this). Exported for tests. */
@@ -521,6 +523,30 @@ export function GraphSection({
 						});
 					}}
 				/>
+			</SettingsRow>
+			<SettingsRow
+				label="Extraction language"
+				hint="Auto keeps the session or notes language"
+				testid="graph-row-language"
+			>
+				<ThinSelect
+					value={resolved.extractionLanguage}
+					ariaLabel="extraction language"
+					testid="select-extraction-language"
+					onChange={(v) => {
+						if (!isExtractionLanguage(v)) return;
+						void onSectionChange({
+							...graph,
+							extractionLanguage: v === "auto" ? undefined : v,
+						});
+					}}
+				>
+					{EXTRACTION_LANGUAGES.map((lang) => (
+						<option key={lang.value} value={lang.value}>
+							{lang.label}
+						</option>
+					))}
+				</ThinSelect>
 			</SettingsRow>
 		</>
 	);

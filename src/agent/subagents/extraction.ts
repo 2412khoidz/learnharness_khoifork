@@ -12,6 +12,7 @@ import {
 	type ModelSlotName,
 	type ProviderKeyMissing,
 } from "../../core/settings.ts";
+import { extractionLanguagePromptName, type ExtractionLanguage } from "../../core/output-language.ts";
 import type { PiEngine } from "../models.ts";
 import { runSubagent } from "./pi-run.ts";
 import type {
@@ -148,14 +149,16 @@ const propositionProps = {
 	name: Type.String({
 		description:
 			"A very short label — established terminology, the term the discipline itself uses, a glossary " +
-			"headword a textbook would print ('Will to power', 'Divine command theory'). Not a sentence, " +
+			"headword in the source's language (match the teaching session/notes language unless an output " +
+			"language override is given; do not translate non-English concepts into English). Not a sentence, " +
 			"needn't be unique or self-contained: this becomes the node's global label in the graph.",
 	}),
 	statement: Type.String({
 		description:
-			"One true, self-contained, world-facing core idea at full precision. Never about the " +
-			'learner, the teacher, or the reading: not "the learner understands X" but "X". A misconception ' +
-			"enters as its TRUE correction.",
+			"One true, self-contained, world-facing core idea at full precision, in the source's language, " +
+			"using Markdown and LaTeX math ($...$ inline, $$...$$ display) for mathematical expressions. Never " +
+			'about the learner, the teacher, or the reading: not "the learner understands X" but "X". A ' +
+			"misconception enters as its TRUE correction.",
 	}),
 	aliases: Type.Optional(
 		Type.Array(Type.String(), {
@@ -418,6 +421,17 @@ document is organized is not knowledge — drop it.`,
 on it. Reference an existing idea by its id ("n_…") instead of restating it, and prefer chains that
 lean on established conclusions as premises — derive new material from what is already derived. Do
 not re-derive a conclusion the graph already holds unless the route is genuinely different.`,
+	language: `LANGUAGE: Match the primary natural language of the source prose/notes in every proposition's name,
+statement, and aliases (for example, write Vietnamese when the session or notes are in Vietnamese; do not
+translate non-English concepts into English). Ignore English wrapper labels ("TEACHER [...]",
+"# Untitled session", "SOURCE (...)", "THE GRAPH SO FAR") when identifying the source's language. Only
+write in another language when an explicit OUTPUT LANGUAGE OVERRIDE directive appears in the prompt.`,
+	formatting: `FORMATTING & MATH: Write statements in clean Markdown and wrap all mathematical formulas, variables,
+inequalities, limits, integrals, sets, and operators in LaTeX delimiters ($...$ inline, $$...$$ on its own
+lines for display math) — e.g. $(a - tb)^2 \\ge 0$ and $t \\in \\mathbb{R}$, never plain ASCII/Unicode math
+like (a - tb)^2 >= 0. In JSON tool arguments, escape every TeX backslash as \\\\ (e.g. \\\\frac, \\\\ge,
+\\\\in), use \\n for newlines, and escape literal currency as \\$. Keep proposition names concise (use inline
+$...$ only when the concept name itself contains a formula).`,
 	submission: `SUBMIT with one submit_findings call: every NEW core idea with a short name and a precise statement,
 and every chain as premises + conclusion. A chain's premises and conclusion may be ids from this
 submission OR existing ids from THE GRAPH SO FAR, verbatim. Premises within one chain are used
@@ -428,7 +442,7 @@ arguments. The tool's field descriptions carry the details.`,
 } as const;
 
 function composeExtractionInstructions(preamble: string, goal: string, selection: string): string {
-	return `${preamble}\n\n${goal}\n${EXTRACTION_CORE.entailment}\n\n${EXTRACTION_CORE.knowledge}\n\n${selection} ${EXTRACTION_CORE.standalone}\n\n${EXTRACTION_CORE.continuation}\n\n${EXTRACTION_CORE.submission}`;
+	return `${preamble}\n\n${goal}\n${EXTRACTION_CORE.entailment}\n\n${EXTRACTION_CORE.knowledge}\n\n${selection} ${EXTRACTION_CORE.standalone}\n\n${EXTRACTION_CORE.continuation}\n\n${EXTRACTION_CORE.language}\n\n${EXTRACTION_CORE.formatting}\n\n${EXTRACTION_CORE.submission}`;
 }
 
 // Each front door owns its goal and selection wording independently of the
@@ -563,7 +577,8 @@ REVIEW THE PROVIDED RECORDS:
 Your input already contains five ranked candidates per finding (or fewer when fewer exist). matches associates
 finding ids with candidateIds; candidates contains each record once. For each finding, decide whether its main
 knowledge point is already represented by one of these records. Link useful paraphrases, compressions and different
-explanations of that same knowledge point. Otherwise leave the finding new. Shared subject matter alone is not a match.
+explanations of that same knowledge point (even across different phrasings or languages, such as a
+non-English formulation of an existing theorem). Otherwise leave the finding new. Shared subject matter alone is not a match.
 
 A record's statement AND its matched aliases are accepted knowledge already in the graph. Use either as evidence
 of what it represents; its name is just a label. If an accepted alias already states the incoming knowledge point,
@@ -742,6 +757,9 @@ export interface ExtractionPipelineDeps extends GraphDeps, ExtractionModels {
 	 *  callers wire the live effective settings (extraction-UX redesign,
 	 *  2026-09-24). */
 	getChunkTokens?: () => number;
+	/** Output language policy ("auto" keeps session/notes language; explicit
+	 *  codes inject a language override directive into the prompt). */
+	getExtractionLanguage?: () => ExtractionLanguage | undefined;
 }
 
 export interface NotesImportInput {
@@ -796,6 +814,10 @@ export function callUsage(usage: Usage): CallUsage {
 
 export function createExtractionPipeline(deps: ExtractionPipelineDeps): ExtractionPipeline {
 	const { chatStore, graphStore } = deps;
+	const languageOverridePrefix = (): string => {
+		const name = extractionLanguagePromptName(deps.getExtractionLanguage?.());
+		return name ? `OUTPUT LANGUAGE OVERRIDE: Write every proposition name, statement, and alias in ${name}.\n\n` : "";
+	};
 	// Stage-engine resolution: a direct test value wins; otherwise the
 	// engineFor chain (role override → slot → nothing, resolved FRESH per
 	// stage call server-side) — the job runner's exact treatment. undefined
@@ -934,7 +956,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// digest is source-scoped, so only SAME-source order matters).
 		const graph = getGraph(graphStore);
 		const digest = sourceDigest(graph, sourceId);
-		const prompt = digest === "" ? view : `${digest}\n\n${view}`;
+		const basePrompt = digest === "" ? view : `${digest}\n\n${view}`;
+		const prompt = `${languageOverridePrefix()}${basePrompt}`;
 		console.info(
 			`[extraction ${jobKey}] extractor starting (${view.split("\n").length} markdown lines` +
 				`${digest === "" ? "" : `, digest ${digest.split("\n").length} lines`})`,
@@ -1273,7 +1296,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// chunk extractor continues its own source, ids verbatim.
 		const graph = getGraph(graphStore);
 		const digest = sourceDigest(graph, input.id);
-		const prompt = digest === "" ? view : `${digest}\n\n${view}`;
+		const basePrompt = digest === "" ? view : `${digest}\n\n${view}`;
+		const prompt = `${languageOverridePrefix()}${basePrompt}`;
 		console.info(
 			`[extraction ${jobKey}] notes extractor starting (${view.split("\n").length} source lines` +
 				`${digest === "" ? "" : `, digest ${digest.split("\n").length} lines`})`,
