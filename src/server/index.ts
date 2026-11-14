@@ -76,6 +76,8 @@ export {
 	createPhoneUploadSession,
 	pollPhoneUploadSession,
 	rankLanAddresses,
+	stopPhoneUploadTunnel,
+	warmPhoneUploadTunnel,
 	type CreatePhoneSessionOptions,
 	type PhoneTunnelSpawner,
 	type TunnelSpawnerCallbacks,

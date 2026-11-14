@@ -45,6 +45,18 @@ export function PhoneUploadButton({
 	disabled?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
+	const prewarmRequestedRef = useRef(false);
+
+	useEffect(() => {
+		if (disabled || prewarmRequestedRef.current || typeof fetch !== "function") return;
+		if (typeof window === "undefined" || typeof window.ResizeObserver !== "function") return;
+		prewarmRequestedRef.current = true;
+		void fetch("/api/attachments/phone", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ warm: true }),
+		}).catch(() => {});
+	}, [disabled]);
 
 	return (
 		<>
@@ -110,12 +122,14 @@ function PhoneUploadDialogBody({
 	const sessionIdRef = useRef<string | null>(null);
 	const sinceRef = useRef(0);
 	const receivedCountRef = useRef(0);
+	const refreshTunnelRef = useRef(false);
 
 	const startSession = useCallback(async (signal: AbortSignal) => {
+		const refreshTunnel = refreshTunnelRef.current;
+		refreshTunnelRef.current = false;
 		setLoading(true);
 		setError("");
 		setReceived([]);
-		setConnectionMode("tunnel");
 		setTunnelStatus("off");
 		setTunnelUrl(null);
 		setTunnelError(null);
@@ -129,7 +143,17 @@ function PhoneUploadDialogBody({
 		}
 
 		try {
-			const response = await fetch("/api/attachments/phone", { method: "POST", signal });
+			const response = await fetch(
+				"/api/attachments/phone",
+				refreshTunnel
+					? {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ refreshTunnel: true }),
+						signal,
+					}
+					: { method: "POST", signal },
+			);
 			const payload = await response.json().catch(() => ({})) as Partial<PhoneUploadSessionInfo> & { error?: string };
 			if (!response.ok || !payload.sessionId || !payload.token || !payload.port) {
 				throw new Error(payload.error || "Could not start phone upload server.");
@@ -139,12 +163,16 @@ function PhoneUploadDialogBody({
 				return;
 			}
 			const info = payload as PhoneUploadSessionInfo;
+			const nextLan = info.defaultAddress ?? info.addresses[0]?.address ?? "";
 			sessionIdRef.current = info.sessionId;
 			setSession(info);
-			setSelectedAddress(info.defaultAddress ?? info.addresses[0]?.address ?? "");
+			setSelectedAddress(nextLan);
 			setTunnelStatus(info.tunnelStatus ?? "off");
 			setTunnelUrl(info.tunnelUrl ?? null);
 			setTunnelError(info.tunnelError ?? null);
+			if (info.tunnelStatus === "error" && nextLan) {
+				setConnectionMode("lan");
+			}
 		} catch (err) {
 			if (signal.aborted) return;
 			setError(err instanceof Error ? err.message : "Could not start phone upload server.");
@@ -217,16 +245,20 @@ function PhoneUploadDialogBody({
 		};
 	}, [session, editorRef]);
 
-	const hasTunnel = tunnelStatus === "ready" && Boolean(tunnelUrl);
+	const tunnelSupported = tunnelStatus !== "off";
+	const hasReadyTunnel = tunnelStatus === "ready" && Boolean(tunnelUrl);
 	const hasLan = Boolean(session && selectedAddress);
-	const useTunnel = hasTunnel && (connectionMode === "tunnel" || !hasLan);
+	const effectiveMode: "tunnel" | "lan" = tunnelSupported ? (hasLan ? connectionMode : "tunnel") : "lan";
+	const useTunnel = effectiveMode === "tunnel";
 
 	const activeUrl = useMemo(() => {
 		if (!session) return "";
-		if (useTunnel && tunnelUrl) return buildPhoneTunnelUploadUrl(tunnelUrl, session.token);
+		if (useTunnel) {
+			return hasReadyTunnel && tunnelUrl ? buildPhoneTunnelUploadUrl(tunnelUrl, session.token) : "";
+		}
 		if (!selectedAddress) return "";
 		return buildPhoneUploadUrl(selectedAddress, session.port, session.token);
-	}, [session, useTunnel, tunnelUrl, selectedAddress]);
+	}, [session, useTunnel, hasReadyTunnel, tunnelUrl, selectedAddress]);
 
 	const qr = useMemo(() => {
 		if (!activeUrl) return null;
@@ -267,28 +299,9 @@ function PhoneUploadDialogBody({
 						Refresh QR
 					</Button>
 				</div>
-			) : session && !activeUrl && tunnelStatus === "starting" ? (
-				<div
-					data-testid="phone-tunnel-starting"
-					className="flex h-52 items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted-foreground"
-				>
-					Opening cross-network link (4G / any Wi-Fi)…
-				</div>
-			) : session && !activeUrl ? (
-				<div className="flex flex-col gap-2 rounded-xl border border-border/80 bg-muted/40 p-4 text-sm text-muted-foreground">
-					<p>
-						No LAN Wi-Fi or Ethernet IPv4 address was detected on this computer{tunnelStatus === "error" && tunnelError ? ` (${tunnelError})` : ""}. Connect both devices to the same network, then click Refresh QR.
-					</p>
-					<div>
-						<Button type="button" variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
-							<RefreshCwIcon className="size-3.5" aria-hidden />
-							Refresh QR
-						</Button>
-					</div>
-				</div>
 			) : (
 				<div className="flex flex-col items-center gap-3">
-					{hasTunnel && hasLan && (
+					{tunnelSupported && hasLan && (
 						<div
 							data-testid="phone-mode-toggle"
 							className="inline-flex w-full rounded-lg border border-border bg-muted/40 p-0.5 text-xs"
@@ -318,70 +331,136 @@ function PhoneUploadDialogBody({
 						</div>
 					)}
 
-					{qr && (
-						<div className="rounded-xl border border-border bg-white p-3 shadow-xs">
-							<svg
-								role="img"
-								aria-label="QR code for phone photo upload"
-								viewBox={`-4 -4 ${qr.size + 8} ${qr.size + 8}`}
-								className="size-48"
-								shapeRendering="crispEdges"
+					{useTunnel && !hasReadyTunnel ? (
+						tunnelStatus === "starting" ? (
+							<div
+								data-testid="phone-tunnel-starting"
+								className="flex h-52 w-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border px-4 text-center text-sm text-muted-foreground"
 							>
-								<rect x={-4} y={-4} width={qr.size + 8} height={qr.size + 8} fill="#ffffff" />
-								<path d={qr.path} fill="#09090b" />
-							</svg>
+								<span>Opening cross-network link (4G / any Wi-Fi)…</span>
+								{hasLan && (
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										data-testid="phone-switch-lan-now"
+										onClick={() => setConnectionMode("lan")}
+									>
+										Use Same Wi-Fi (LAN) now
+									</Button>
+								)}
+							</div>
+						) : (
+							<div
+								data-testid="phone-tunnel-error"
+								className="flex w-full flex-col gap-2.5 rounded-xl border border-border/80 bg-muted/40 p-4 text-sm text-muted-foreground"
+							>
+								<p>
+									{hasLan
+										? `Cross-network link unavailable${tunnelError ? ` (${tunnelError})` : ""}. Retry or switch to Same Wi-Fi (LAN).`
+										: `No LAN Wi-Fi or Ethernet IPv4 address was detected on this computer${tunnelError ? ` (${tunnelError})` : ""}. Connect both devices to the same network, then click Refresh QR.`}
+								</p>
+								<div className="flex flex-wrap items-center gap-2">
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										onClick={() => {
+											refreshTunnelRef.current = true;
+											setReloadNonce((n) => n + 1);
+										}}
+									>
+										<RefreshCwIcon className="size-3.5" aria-hidden />
+										{hasLan ? "Retry HTTPS link" : "Refresh QR"}
+									</Button>
+									{hasLan && (
+										<Button type="button" size="sm" onClick={() => setConnectionMode("lan")}>
+											Use Same Wi-Fi (LAN)
+										</Button>
+									)}
+								</div>
+							</div>
+						)
+					) : !useTunnel && !hasLan ? (
+						<div className="flex w-full flex-col gap-2 rounded-xl border border-border/80 bg-muted/40 p-4 text-sm text-muted-foreground">
+							<p>
+								No LAN Wi-Fi or Ethernet IPv4 address was detected on this computer. Connect both devices to the same network, then click Refresh QR.
+							</p>
+							<div>
+								<Button type="button" variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
+									<RefreshCwIcon className="size-3.5" aria-hidden />
+									Refresh QR
+								</Button>
+							</div>
 						</div>
-					)}
+					) : (
+						<>
+							{qr && (
+								<div className="rounded-xl border border-border bg-white p-3 shadow-xs">
+									<svg
+										role="img"
+										aria-label="QR code for phone photo upload"
+										viewBox={`-4 -4 ${qr.size + 8} ${qr.size + 8}`}
+										className="size-48"
+										shapeRendering="crispEdges"
+									>
+										<rect x={-4} y={-4} width={qr.size + 8} height={qr.size + 8} fill="#ffffff" />
+										<path d={qr.path} fill="#09090b" />
+									</svg>
+								</div>
+							)}
 
-					{tunnelStatus === "starting" && (
-						<p data-testid="phone-tunnel-starting" className="text-center text-[11px] text-muted-foreground">
-							Opening cross-network link (4G / any Wi-Fi)…
-						</p>
-					)}
+							{!useTunnel && tunnelStatus === "starting" && (
+								<p data-testid="phone-tunnel-starting" className="text-center text-[11px] text-muted-foreground">
+									Cross-network link (4G / any Wi-Fi) is opening in the background…
+								</p>
+							)}
 
-					{tunnelStatus === "error" && (
-						<p data-testid="phone-tunnel-error" className="text-center text-[11px] text-muted-foreground">
-							Cross-network link unavailable{tunnelError ? ` (${tunnelError})` : ""} — using local Wi-Fi.
-						</p>
-					)}
+							{!useTunnel && tunnelStatus === "error" && (
+								<p data-testid="phone-tunnel-error" className="text-center text-[11px] text-muted-foreground">
+									Cross-network link unavailable{tunnelError ? ` (${tunnelError})` : ""} — using local Wi-Fi.
+								</p>
+							)}
 
-					{session && !useTunnel && session.addresses.length > 1 && (
-						<label className="flex w-full items-center gap-2 text-xs text-muted-foreground">
-							<span className="shrink-0">Network IP</span>
-							<select
-								aria-label="Network IP"
-								value={selectedAddress}
-								onChange={(e) => setSelectedAddress(e.target.value)}
-								className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:border-primary"
-							>
-								{session.addresses.map((cand) => (
-									<option key={cand.address} value={cand.address}>
-										{cand.address} ({cand.interfaceName}){cand.recommended ? " · Recommended" : ""}
-									</option>
-								))}
-							</select>
-						</label>
-					)}
+							{session && !useTunnel && session.addresses.length > 1 && (
+								<label className="flex w-full items-center gap-2 text-xs text-muted-foreground">
+									<span className="shrink-0">Network IP</span>
+									<select
+										aria-label="Network IP"
+										value={selectedAddress}
+										onChange={(e) => setSelectedAddress(e.target.value)}
+										className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:border-primary"
+									>
+										{session.addresses.map((cand) => (
+											<option key={cand.address} value={cand.address}>
+												{cand.address} ({cand.interfaceName}){cand.recommended ? " · Recommended" : ""}
+											</option>
+										))}
+									</select>
+								</label>
+							)}
 
-					{activeUrl && (
-						<div className="flex w-full items-center gap-1.5 rounded-lg border border-border/80 bg-muted/30 px-2.5 py-1.5">
-							<code className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
-								{activeUrl}
-							</code>
-							<button
-								type="button"
-								aria-label="Copy link"
-								onClick={() => {
-									void navigator.clipboard?.writeText(activeUrl).then(() => {
-										setCopied(true);
-										setTimeout(() => setCopied(false), 1500);
-									}).catch(() => {});
-								}}
-								className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-							>
-								{copied ? <CheckCircle2Icon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
-							</button>
-						</div>
+							{activeUrl && (
+								<div className="flex w-full items-center gap-1.5 rounded-lg border border-border/80 bg-muted/30 px-2.5 py-1.5">
+									<code className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+										{activeUrl}
+									</code>
+									<button
+										type="button"
+										aria-label="Copy link"
+										onClick={() => {
+											void navigator.clipboard?.writeText(activeUrl).then(() => {
+												setCopied(true);
+												setTimeout(() => setCopied(false), 1500);
+											}).catch(() => {});
+										}}
+										className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+									>
+										{copied ? <CheckCircle2Icon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
+									</button>
+								</div>
+							)}
+						</>
 					)}
 				</div>
 			)}
@@ -407,7 +486,15 @@ function PhoneUploadDialogBody({
 			)}
 
 			<div className="flex items-center justify-end gap-2 pt-1">
-				<Button type="button" variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					onClick={() => {
+						refreshTunnelRef.current = tunnelStatus === "error";
+						setReloadNonce((n) => n + 1);
+					}}
+				>
 					<RefreshCwIcon className="size-3.5" aria-hidden />
 					New code
 				</Button>

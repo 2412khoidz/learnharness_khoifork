@@ -3,14 +3,33 @@ import {
 	closePhoneUploadSession,
 	createPhoneUploadSession,
 	pollPhoneUploadSession,
+	warmPhoneUploadTunnel,
 } from "@/src/server";
 
 export const runtime = "nodejs";
 
-export async function POST(): Promise<Response> {
+export async function POST(request?: Request): Promise<Response> {
+	let warm = false;
+	let refreshTunnel = false;
+	if (request) {
+		try {
+			const body = (await request.json()) as { warm?: unknown; refreshTunnel?: unknown } | null;
+			warm = body?.warm === true;
+			refreshTunnel = body?.refreshTunnel === true;
+		} catch {
+			// Empty or non-JSON POST body starts a standard phone upload session.
+		}
+	}
 	try {
+		if (warm) {
+			if (process.env.NODE_ENV !== "test") {
+				void warmPhoneUploadTunnel();
+			}
+			return NextResponse.json({ ok: true });
+		}
 		const session = await createPhoneUploadSession({
 			enableTunnel: process.env.NODE_ENV !== "test",
+			refreshTunnel,
 		});
 		return NextResponse.json(session);
 	} catch {

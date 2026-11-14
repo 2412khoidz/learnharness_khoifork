@@ -13,6 +13,7 @@ import { AttachmentError, MAX_ATTACHMENT_IMAGE_BYTES, saveAttachmentImage } from
 import { ensureCloudflaredBinary, waitForTunnelReadiness } from "./tunnel-binary.ts";
 
 const SESSION_TTL_MS = 15 * 60 * 1000;
+const TUNNEL_IDLE_TTL_MS = 30 * 60 * 1000;
 const SSH_TUNNEL_STARTUP_TIMEOUT_MS = 12_000;
 const CF_TUNNEL_STARTUP_TIMEOUT_MS = 20_000;
 const ANSI_CSI_RE = new RegExp("\\x1b\\[[0-9;]*[A-Za-z]", "g");
@@ -321,9 +322,25 @@ interface InternalPhoneSession {
 	tunnelUrl: string | null;
 	tunnelError: string | null;
 	tunnelHandle: { close: () => void } | null;
+	usesStandbyTunnel: boolean;
+}
+
+interface StandbyTunnelState {
+	server: http.Server | null;
+	port: number;
+	probeToken: string;
+	handle: { close: () => void } | null;
+	status: PhoneTunnelStatus;
+	url: string | null;
+	error: string | null;
+	idleTimer: ReturnType<typeof setTimeout> | null;
+	serverPromise: Promise<number> | null;
+	generation: number;
+	exitHookRegistered: boolean;
 }
 
 const ACTIVE_SESSION_KEY = Symbol.for("learnharness.phoneUploadSession");
+const STANDBY_TUNNEL_KEY = Symbol.for("learnharness.phoneTunnelStandby");
 
 function getActiveSession(): InternalPhoneSession | null {
 	return ((globalThis as Record<symbol, unknown>)[ACTIVE_SESSION_KEY] as InternalPhoneSession | null | undefined) ?? null;
@@ -331,6 +348,249 @@ function getActiveSession(): InternalPhoneSession | null {
 
 function setActiveSession(session: InternalPhoneSession | null): void {
 	(globalThis as Record<symbol, unknown>)[ACTIVE_SESSION_KEY] = session;
+}
+
+function getStandbyTunnel(): StandbyTunnelState {
+	const store = globalThis as Record<symbol, unknown>;
+	let state = store[STANDBY_TUNNEL_KEY] as StandbyTunnelState | undefined;
+	if (!state) {
+		state = {
+			server: null,
+			port: 0,
+			probeToken: crypto.randomBytes(12).toString("base64url"),
+			handle: null,
+			status: "off",
+			url: null,
+			error: null,
+			idleTimer: null,
+			serverPromise: null,
+			generation: 0,
+			exitHookRegistered: false,
+		};
+		store[STANDBY_TUNNEL_KEY] = state;
+	}
+	if (!state.exitHookRegistered) {
+		state.exitHookRegistered = true;
+		process.once("exit", () => {
+			if (state?.handle) {
+				try {
+					state.handle.close();
+				} catch {
+					// ignore shutdown errors
+				}
+				state.handle = null;
+			}
+		});
+	}
+	return state;
+}
+
+function syncStandbyToActiveSession(standby: StandbyTunnelState): void {
+	const active = getActiveSession();
+	if (!active || active.closed || !active.usesStandbyTunnel) return;
+	active.tunnelStatus = standby.status;
+	active.tunnelUrl = standby.url;
+	active.tunnelError = standby.error;
+}
+
+function resetStandbyIdleTimer(standby: StandbyTunnelState): void {
+	if (standby.idleTimer) clearTimeout(standby.idleTimer);
+	standby.idleTimer = setTimeout(() => {
+		if (!getActiveSession()) {
+			void stopPhoneUploadTunnel();
+		} else {
+			resetStandbyIdleTimer(standby);
+		}
+	}, TUNNEL_IDLE_TTL_MS);
+	standby.idleTimer.unref?.();
+}
+
+async function ensureStandbyServer(standby: StandbyTunnelState): Promise<number> {
+	if (standby.server && standby.port > 0) return standby.port;
+	if (standby.serverPromise) return standby.serverPromise;
+
+	standby.serverPromise = (async () => {
+		const server = http.createServer((req, res) => {
+			let pathname = "/";
+			try {
+				pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+			} catch {
+				sendJson(res, 400, { error: "Bad request URL" });
+				return;
+			}
+			const probePath = `/__probe/${encodeURIComponent(standby.probeToken)}`;
+			if ((req.method === "GET" || req.method === "HEAD") && pathname === probePath) {
+				res.writeHead(200, {
+					"Content-Type": "text/plain; charset=utf-8",
+					"Cache-Control": "no-store",
+				});
+				res.end(req.method === "HEAD" ? undefined : "ok");
+				return;
+			}
+			const active = getActiveSession();
+			if (!active || active.closed || active.expiresAt <= Date.now()) {
+				res.writeHead(404, {
+					"Content-Type": "text/plain; charset=utf-8",
+					"Cache-Control": "no-store",
+				});
+				res.end("No active upload session.");
+				return;
+			}
+			handlePhoneRequest(active, req, res);
+		});
+		server.requestTimeout = 60_000;
+		server.headersTimeout = 20_000;
+		server.on("clientError", (_err, socket) => {
+			if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+		});
+		await new Promise<void>((resolve, reject) => {
+			const onError = (err: Error) => {
+				server.off("listening", onListening);
+				reject(err);
+			};
+			const onListening = () => {
+				server.off("error", onError);
+				resolve();
+			};
+			server.once("error", onError);
+			server.once("listening", onListening);
+			server.listen(0, "127.0.0.1");
+		});
+		server.unref?.();
+		const addr = server.address();
+		if (!addr || typeof addr === "string") {
+			server.closeAllConnections?.();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			throw new Error("Failed to bind standby phone tunnel gateway");
+		}
+		standby.server = server;
+		standby.port = addr.port;
+		return addr.port;
+	})().finally(() => {
+		standby.serverPromise = null;
+	});
+
+	return standby.serverPromise;
+}
+
+async function ensureStandbyTunnel(options?: {
+	forceRestart?: boolean;
+	tunnelSpawner?: PhoneTunnelSpawner;
+}): Promise<StandbyTunnelState> {
+	const standby = getStandbyTunnel();
+	const forceRestart = Boolean(options?.forceRestart);
+
+	if (
+		!forceRestart &&
+		standby.handle &&
+		(standby.status === "ready" || standby.status === "starting")
+	) {
+		resetStandbyIdleTimer(standby);
+		return standby;
+	}
+
+	const port = await ensureStandbyServer(standby);
+	const gen = ++standby.generation;
+
+	if (standby.handle) {
+		try {
+			standby.handle.close();
+		} catch {
+			// ignore tunnel shutdown errors
+		}
+		standby.handle = null;
+	}
+
+	standby.status = "starting";
+	standby.url = null;
+	standby.error = null;
+	syncStandbyToActiveSession(standby);
+	resetStandbyIdleTimer(standby);
+
+	const spawner = options?.tunnelSpawner ?? defaultPhoneTunnelSpawner;
+	const pingPath = `/__probe/${encodeURIComponent(standby.probeToken)}`;
+	try {
+		const handle = spawner(port, {
+			pingPath,
+			onReady: (url) => {
+				if (standby.generation !== gen) return;
+				standby.status = "ready";
+				standby.url = url;
+				standby.error = null;
+				syncStandbyToActiveSession(standby);
+			},
+			onError: (message) => {
+				if (standby.generation !== gen) return;
+				standby.status = "error";
+				standby.url = null;
+				standby.error = message;
+				syncStandbyToActiveSession(standby);
+			},
+		});
+		if (standby.generation !== gen) {
+			try {
+				handle.close();
+			} catch {
+				// ignore
+			}
+		} else {
+			standby.handle = handle;
+		}
+	} catch (err) {
+		if (standby.generation === gen) {
+			standby.status = "error";
+			standby.url = null;
+			standby.error = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
+			syncStandbyToActiveSession(standby);
+		}
+	}
+
+	return standby;
+}
+
+/** Pre-warm the reusable HTTPS cross-network tunnel in the background with no active upload session. */
+export async function warmPhoneUploadTunnel(options?: {
+	refresh?: boolean;
+	tunnelSpawner?: PhoneTunnelSpawner;
+}): Promise<void> {
+	try {
+		await ensureStandbyTunnel({
+			forceRestart: options?.refresh,
+			tunnelSpawner: options?.tunnelSpawner,
+		});
+	} catch {
+		// Pre-warm errors are surfaced lazily when opening the upload dialog.
+	}
+}
+
+/** Tear down the standby cross-network tunnel and its loopback gateway. */
+export async function stopPhoneUploadTunnel(): Promise<void> {
+	const standby = getStandbyTunnel();
+	standby.generation++;
+	if (standby.idleTimer) {
+		clearTimeout(standby.idleTimer);
+		standby.idleTimer = null;
+	}
+	if (standby.handle) {
+		try {
+			standby.handle.close();
+		} catch {
+			// ignore tunnel shutdown errors
+		}
+		standby.handle = null;
+	}
+	standby.status = "off";
+	standby.url = null;
+	standby.error = null;
+	standby.port = 0;
+	const server = standby.server;
+	standby.server = null;
+	if (server) {
+		server.closeAllConnections?.();
+		await new Promise<void>((resolve) => {
+			server.close(() => resolve());
+		});
+	}
 }
 
 function tokenMatches(actual: string, expectedBuf: Buffer): boolean {
@@ -695,8 +955,10 @@ export interface CreatePhoneSessionOptions {
 	host?: string;
 	attachmentsDir?: string;
 	interfaces?: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
-	/** Open a public HTTPS reverse tunnel (`localhost.run`) so phones work off-Wi-Fi. */
+	/** Open a public HTTPS reverse tunnel (`trycloudflare.com` / `localhost.run`) so phones work off-Wi-Fi. */
 	enableTunnel?: boolean;
+	/** Force restarting the reusable standby tunnel instead of keeping the warm connection. */
+	refreshTunnel?: boolean;
 	tunnelSpawner?: PhoneTunnelSpawner;
 }
 
@@ -729,6 +991,7 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 		tunnelUrl: null,
 		tunnelError: null,
 		tunnelHandle: null,
+		usesStandbyTunnel: false,
 	};
 
 	const server = http.createServer((req, res) => {
@@ -765,37 +1028,54 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 	touchExpiry(session);
 
 	if (enableTunnel) {
-		const spawner = options.tunnelSpawner ?? defaultPhoneTunnelSpawner;
-		const pingPath = `/p/${encodeURIComponent(session.token)}/ping`;
-		try {
-			const handle = spawner(session.port, {
-				pingPath,
-				onReady: (url) => {
-					if (session.closed || getActiveSession() !== session) return;
-					session.tunnelStatus = "ready";
-					session.tunnelUrl = url;
-					session.tunnelError = null;
-				},
-				onError: (message) => {
-					if (session.closed || getActiveSession() !== session) return;
-					session.tunnelStatus = "error";
-					session.tunnelUrl = null;
-					session.tunnelError = message;
-				},
-			});
-			if (session.closed || getActiveSession() !== session) {
-				try {
-					handle.close();
-				} catch {
-					// ignore
+		if (options.tunnelSpawner) {
+			const spawner = options.tunnelSpawner;
+			const pingPath = `/p/${encodeURIComponent(session.token)}/ping`;
+			try {
+				const handle = spawner(session.port, {
+					pingPath,
+					onReady: (url) => {
+						if (session.closed || getActiveSession() !== session) return;
+						session.tunnelStatus = "ready";
+						session.tunnelUrl = url;
+						session.tunnelError = null;
+					},
+					onError: (message) => {
+						if (session.closed || getActiveSession() !== session) return;
+						session.tunnelStatus = "error";
+						session.tunnelUrl = null;
+						session.tunnelError = message;
+					},
+				});
+				if (session.closed || getActiveSession() !== session) {
+					try {
+						handle.close();
+					} catch {
+						// ignore
+					}
+				} else {
+					session.tunnelHandle = handle;
 				}
-			} else {
-				session.tunnelHandle = handle;
+			} catch (err) {
+				session.tunnelStatus = "error";
+				session.tunnelUrl = null;
+				session.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
 			}
-		} catch (err) {
-			session.tunnelStatus = "error";
-			session.tunnelUrl = null;
-			session.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
+		} else {
+			try {
+				session.usesStandbyTunnel = true;
+				const standby = await ensureStandbyTunnel({ forceRestart: Boolean(options.refreshTunnel) });
+				if (!session.closed && getActiveSession() === session) {
+					session.tunnelStatus = standby.status;
+					session.tunnelUrl = standby.url;
+					session.tunnelError = standby.error;
+				}
+			} catch (err) {
+				session.usesStandbyTunnel = false;
+				session.tunnelStatus = "error";
+				session.tunnelUrl = null;
+				session.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
+			}
 		}
 	}
 
@@ -824,6 +1104,12 @@ export function pollPhoneUploadSession(sessionId: string, since = 0): PhoneUploa
 			tunnelUrl: null,
 			tunnelError: null,
 		};
+	}
+	if (session.usesStandbyTunnel) {
+		const standby = getStandbyTunnel();
+		session.tunnelStatus = standby.status;
+		session.tunnelUrl = standby.url;
+		session.tunnelError = standby.error;
 	}
 	const start = Number.isFinite(since) && since > 0 ? Math.min(Math.floor(since), session.uploads.length) : 0;
 	const uploads = session.uploads.slice(start);

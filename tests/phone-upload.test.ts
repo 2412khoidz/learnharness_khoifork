@@ -17,6 +17,8 @@ import {
 	pollPhoneUploadSession,
 	rankLanAddresses,
 	saveAttachmentImage,
+	stopPhoneUploadTunnel,
+	warmPhoneUploadTunnel,
 	type PhoneTunnelSpawner,
 } from "../src/server/index.ts";
 import { POST as postAttachmentRoute } from "../app/api/attachments/route.ts";
@@ -47,6 +49,7 @@ function makeTempDir(): string {
 
 afterEach(async () => {
 	await closePhoneUploadSession();
+	await stopPhoneUploadTunnel();
 	for (const dir of tempDirs.splice(0)) {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
@@ -316,5 +319,56 @@ describe("phone upload cross-network tunnel support", () => {
 		} finally {
 			fs.rmSync(tmpBinDir, { recursive: true, force: true });
 		}
+	});
+
+	it("pre-warms standby tunnel gateway safely and reuses it across sessions", async () => {
+		let gatewayPort = 0;
+		let probePath = "";
+		let spawnCount = 0;
+		await warmPhoneUploadTunnel({
+			tunnelSpawner: (port, callbacks) => {
+				spawnCount++;
+				gatewayPort = port;
+				probePath = callbacks.pingPath ?? "";
+				callbacks.onReady("https://warm-demo.trycloudflare.com");
+				return { close() {} };
+			},
+		});
+		assert.equal(spawnCount, 1);
+		assert.ok(gatewayPort > 0);
+		assert.match(probePath, /^\/__probe\//);
+
+		const probeRes = await fetch(`http://127.0.0.1:${gatewayPort}${probePath}`);
+		assert.equal(probeRes.status, 200);
+		assert.equal(await probeRes.text(), "ok");
+
+		const noSessionRes = await fetch(`http://127.0.0.1:${gatewayPort}/p/fake-token`);
+		assert.equal(noSessionRes.status, 404);
+
+		// Creating a session reuses the warm standby tunnel immediately and rejects old tokens after close.
+		const s1 = await createPhoneUploadSession({ host: "127.0.0.1", enableTunnel: true });
+		assert.equal(s1.tunnelStatus, "ready");
+		assert.equal(s1.tunnelUrl, "https://warm-demo.trycloudflare.com");
+
+		// Warm POST route returns 200 and does not tear down an active session.
+		const warmRes = await postPhoneRoute(new Request("http://localhost/api/attachments/phone", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ warm: true }),
+		}));
+		assert.equal(warmRes.status, 200);
+		assert.equal(pollPhoneUploadSession(s1.sessionId, 0).active, true);
+
+		const livePageRes = await fetch(`http://127.0.0.1:${gatewayPort}/p/${encodeURIComponent(s1.token)}`);
+		assert.equal(livePageRes.status, 200);
+
+		await closePhoneUploadSession(s1.sessionId);
+		const afterCloseRes = await fetch(`http://127.0.0.1:${gatewayPort}/p/${encodeURIComponent(s1.token)}`);
+		assert.equal(afterCloseRes.status, 404);
+
+		const s2 = await createPhoneUploadSession({ host: "127.0.0.1", enableTunnel: true });
+		assert.equal(s2.tunnelStatus, "ready");
+		assert.equal(s2.tunnelUrl, "https://warm-demo.trycloudflare.com");
+		await closePhoneUploadSession(s2.sessionId);
 	});
 });

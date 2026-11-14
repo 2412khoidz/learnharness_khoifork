@@ -346,8 +346,25 @@ describe("PhoneUploadButton QR modal and docks", () => {
 
 		const dialog = dom.document.body.querySelector('[data-testid="phone-upload-dialog"]')!;
 		assert.ok(dialog.querySelector('[data-testid="phone-tunnel-starting"]'));
-		assert.equal(dialog.querySelector('[data-testid="phone-mode-toggle"]'), null);
+		assert.ok(dialog.querySelector('[data-testid="phone-mode-toggle"]'), "mode toggle must appear immediately");
+		assert.equal(dialog.querySelector('svg[role="img"]'), null, "must not show LAN QR while HTTPS mode is selected");
+		assert.equal(dialog.textContent?.includes("http://192.168.1.42:49999/p/tok-tun"), false);
+
+		// User can immediately switch to Same Wi-Fi (LAN) while HTTPS tunnel is still starting.
+		const switchNowBtn = dialog.querySelector<HTMLButtonElement>('[data-testid="phone-switch-lan-now"]')!;
+		assert.ok(switchNowBtn);
+		await act(async () => {
+			switchNowBtn.click();
+		});
 		assert.match(dialog.textContent ?? "", /http:\/\/192\.168\.1\.42:49999\/p\/tok-tun/);
+		assert.ok(dialog.querySelector('svg[role="img"]'));
+		assert.ok(dialog.querySelector('select[aria-label="Network IP"]'));
+
+		// Switch back to HTTPS mode and wait for poll to transition from starting -> ready.
+		await act(async () => {
+			dialog.querySelector<HTMLButtonElement>('[data-testid="phone-mode-tunnel"]')!.click();
+		});
+		assert.ok(dialog.querySelector('[data-testid="phone-tunnel-starting"]'));
 
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 950));
