@@ -10,6 +10,12 @@ import type {
 	PhoneUploadSessionInfo,
 } from "../core/attachments.ts";
 import { AttachmentError, MAX_ATTACHMENT_IMAGE_BYTES, saveAttachmentImage } from "./attachments.ts";
+import {
+	getMobileCompanionState,
+	MobileCompanionError,
+	rateMobileCompanionCard,
+	updateMobileCompanionExamPrep,
+} from "./phone-companion.ts";
 import { ensureCloudflaredBinary, waitForTunnelReadiness } from "./tunnel-binary.ts";
 
 const SESSION_TTL_MS = 15 * 60 * 1000;
@@ -315,6 +321,9 @@ interface InternalPhoneSession {
 	expiresAt: number;
 	uploads: PhoneUploadEntry[];
 	attachmentsDir?: string;
+	flashcardsFile?: string;
+	examPrepFile?: string;
+	chatsDir?: string;
 	server: http.Server;
 	timer: ReturnType<typeof setTimeout> | null;
 	closed: boolean;
@@ -601,71 +610,399 @@ function tokenMatches(actual: string, expectedBuf: Buffer): boolean {
 
 function buildMobileHtml(uploadEndpoint: string): string {
 	const uploadEndpointLiteral = JSON.stringify(uploadEndpoint);
+	const companionEndpointLiteral = JSON.stringify(uploadEndpoint.replace(/\/upload$/, "/companion"));
 	return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>LearnHarness · Phone Photo</title>
+<title>KronoHarness · Mobile Companion</title>
 <style>
   :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 20px; min-height: 100dvh; display: flex; justify-content: center; align-items: flex-start; background: #0f1115; color: #f3f4f6; }
+  body { margin: 0; padding: 16px; min-height: 100dvh; display: flex; justify-content: center; align-items: flex-start; background: #0f1115; color: #f3f4f6; }
   @media (prefers-color-scheme: light) {
     body { background: #f5f5f4; color: #18181b; }
     .card { background: #ffffff !important; border-color: #e4e4e7 !important; }
     .muted { color: #52525b !important; }
-    .btn-secondary { background: #f4f4f5 !important; color: #18181b !important; border-color: #d4d4d8 !important; }
-    .item { background: #fafafa !important; border-color: #e4e4e7 !important; }
+    .btn-secondary, .tab-btn, .pill-btn { background: #f4f4f5 !important; color: #18181b !important; border-color: #d4d4d8 !important; }
+    .item, .subcard { background: #fafafa !important; border-color: #e4e4e7 !important; }
   }
-  .card { width: 100%; max-width: 440px; border: 1px solid #27272a; border-radius: 16px; padding: 20px; background: #18181b; box-shadow: 0 8px 30px rgba(0,0,0,.22); }
-  h1 { margin: 0 0 6px; font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
-  p { margin: 0 0 18px; font-size: 14px; line-height: 1.45; }
+  .card { width: 100%; max-width: 460px; border: 1px solid #27272a; border-radius: 16px; padding: 18px; background: #18181b; box-shadow: 0 8px 30px rgba(0,0,0,.22); }
+  .header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+  h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -0.01em; }
+  .badge { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: #27272a; color: #a1a1aa; font-weight: 600; white-space: nowrap; }
+  .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 16px; }
+  .tab-btn { border: 1px solid #3f3f46; background: #111114; color: #d4d4d8; border-radius: 10px; padding: 9px 6px; font-size: 12px; font-weight: 600; cursor: pointer; text-align: center; }
+  .tab-btn.active { background: #2563eb !important; color: #ffffff !important; border-color: #2563eb !important; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  p { margin: 0 0 14px; font-size: 13px; line-height: 1.45; }
   .muted { color: #a1a1aa; }
-  .actions { display: grid; gap: 12px; }
-  label.btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 54px; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; text-align: center; user-select: none; -webkit-tap-highlight-color: transparent; }
+  .actions { display: grid; gap: 10px; }
+  label.btn, button.btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 48px; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; text-align: center; user-select: none; -webkit-tap-highlight-color: transparent; border: none; }
   .btn-primary { background: #2563eb; color: #ffffff; border: 1px solid #2563eb; }
   .btn-secondary { background: #27272a; color: #f4f4f5; border: 1px solid #3f3f46; }
   input[type="file"] { display: none; }
-  .list { margin-top: 16px; display: grid; gap: 8px; }
-  .item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid #27272a; background: #111114; font-size: 13px; }
+  .list { margin-top: 14px; display: grid; gap: 8px; }
+  .item, .subcard { padding: 12px; border-radius: 12px; border: 1px solid #27272a; background: #111114; font-size: 13px; }
+  .item { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
   .opt { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; cursor: pointer; user-select: none; }
   .ok { color: #22c55e; font-weight: 600; }
   .err { color: #ef4444; font-weight: 600; }
   .foot { margin-top: 14px; font-size: 12px; text-align: center; }
+  .q-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #60a5fa; font-weight: 650; margin-bottom: 6px; }
+  .q-body { font-size: 15px; line-height: 1.5; white-space: pre-wrap; margin-bottom: 12px; }
+  .ans-box { border-top: 1px solid #27272a; padding-top: 12px; margin-top: 12px; }
+  .rate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 12px; }
+  .rate-btn { border: 1px solid #3f3f46; border-radius: 10px; padding: 8px 4px; background: #27272a; color: #f4f4f5; font-size: 12px; font-weight: 600; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .rate-btn small { font-size: 10px; font-weight: 400; opacity: 0.8; }
+  .rate-1 { border-color: #ef4444; color: #fca5a5; }
+  .rate-2 { border-color: #f59e0b; color: #fcd34d; }
+  .rate-3 { border-color: #22c55e; color: #86efac; }
+  .rate-4 { border-color: #3b82f6; color: #93c5fd; }
+  .row-between { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .pill-row { display: flex; gap: 6px; margin-top: 8px; }
+  .pill-btn { flex: 1; padding: 8px 6px; border-radius: 8px; border: 1px solid #3f3f46; background: #27272a; color: #d4d4d8; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .pill-btn.active { background: #2563eb !important; color: #fff !important; border-color: #2563eb !important; }
+  .bar-wrap { width: 100%; height: 8px; border-radius: 999px; background: #27272a; overflow: hidden; margin: 8px 0 12px; }
+  .bar-fill { height: 100%; background: #22c55e; transition: width 0.25s ease; }
+  .session-item { padding: 10px; border-radius: 10px; border: 1px solid #27272a; background: #111114; margin-top: 8px; }
+  .session-snip { margin-top: 4px; font-size: 12px; color: #a1a1aa; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 </style>
 </head>
 <body>
   <main class="card">
-    <h1>Send Photo to LearnHarness</h1>
-    <p class="muted">Snap your work or pick photos from your library. They appear directly in your active input box on desktop.</p>
-    <div class="actions">
-      <label class="btn btn-primary">
-        <span>Take Photo</span>
-        <input id="cam" type="file" accept="image/*" capture="environment" />
-      </label>
-      <label class="btn btn-secondary">
-        <span>Choose Photos</span>
-        <input id="lib" type="file" accept="image/*" multiple />
-      </label>
+    <div class="header">
+      <h1>KronoHarness</h1>
+      <span id="top-badge" class="badge">Mobile Companion</span>
     </div>
-    <label class="opt muted">
-      <input id="hd" type="checkbox" />
-      <span>High detail (2400px &middot; slower over 4G/5G)</span>
-    </label>
-    <div id="list" class="list" aria-live="polite"></div>
-    <p class="muted foot">Works over 4G/5G, any Wi-Fi, or local network.</p>
+
+    <div class="tabs" role="tablist">
+      <button id="tab-photo" type="button" class="tab-btn active" role="tab" aria-selected="true">Photo</button>
+      <button id="tab-cards" type="button" class="tab-btn" role="tab" aria-selected="false">FSRS Cards</button>
+      <button id="tab-exam" type="button" class="tab-btn" role="tab" aria-selected="false">Exam &amp; Chat</button>
+    </div>
+
+    <section id="panel-photo" class="panel active">
+      <p class="muted">Snap your work or pick photos from your library. They appear directly in your active input box on desktop.</p>
+      <div class="actions">
+        <label class="btn btn-primary">
+          <span>Take Photo</span>
+          <input id="cam" type="file" accept="image/*" capture="environment" />
+        </label>
+        <label class="btn btn-secondary">
+          <span>Choose Photos</span>
+          <input id="lib" type="file" accept="image/*" multiple />
+        </label>
+      </div>
+      <label class="opt muted">
+        <input id="hd" type="checkbox" />
+        <span>High detail (2400px &middot; slower over 4G/5G)</span>
+      </label>
+      <div id="list" class="list" aria-live="polite"></div>
+    </section>
+
+    <section id="panel-cards" class="panel">
+      <div class="row-between" style="margin-bottom: 10px;">
+        <span id="cards-stats" class="muted" style="font-size: 12px;">Loading flashcards...</span>
+        <button id="cards-refresh" type="button" class="pill-btn" style="flex: 0 0 auto; padding: 4px 10px;">Refresh</button>
+      </div>
+      <div id="cards-stage" class="subcard">
+        <p class="muted" style="margin:0;">Open this tab to load due FSRS-6 cards.</p>
+      </div>
+    </section>
+
+    <section id="panel-exam" class="panel">
+      <div class="subcard" style="margin-bottom: 12px;">
+        <div class="row-between">
+          <strong id="exam-title" style="font-size: 14px;">Study Mode</strong>
+          <span id="exam-readiness" class="badge">Readiness --%</span>
+        </div>
+        <div class="bar-wrap"><div id="exam-bar" class="bar-fill" style="width: 4%;"></div></div>
+        <div class="muted" style="font-size: 11px;">Study Mode</div>
+        <div class="pill-row">
+          <button type="button" id="mode-long-term" class="pill-btn">Long-Term</button>
+          <button type="button" id="mode-exam" class="pill-btn">Exam Prep</button>
+        </div>
+        <div class="muted" style="font-size: 11px; margin-top: 10px;">Teaching Pace</div>
+        <div class="pill-row">
+          <button type="button" id="pace-thorough" class="pill-btn">Thorough</button>
+          <button type="button" id="pace-efficient" class="pill-btn">Efficient</button>
+          <button type="button" id="pace-crash" class="pill-btn">Crash</button>
+        </div>
+        <div id="exam-weak" class="muted" style="font-size: 12px; margin-top: 10px;"></div>
+      </div>
+      <div>
+        <strong style="font-size: 13px;">Recent Sessions on Desktop</strong>
+        <div id="recent-sessions"><p class="muted" style="margin-top:6px;">Loading...</p></div>
+      </div>
+    </section>
+
+    <p class="muted foot">Synced directly with desktop storage over local Wi-Fi or secure tunnel.</p>
   </main>
 <script>
 (() => {
   const UPLOAD_URL = ${uploadEndpointLiteral};
+  const COMPANION_URL = ${companionEndpointLiteral};
   const cam = document.getElementById("cam");
   const lib = document.getElementById("lib");
   const hd = document.getElementById("hd");
   const list = document.getElementById("list");
+  const topBadge = document.getElementById("top-badge");
   const CONCURRENCY = 2;
   const pending = [];
   let inFlight = 0;
+
+  let companionState = null;
+  let cardRevealed = false;
+  let cardBusy = false;
+
+  const tabs = [
+    { btn: document.getElementById("tab-photo"), panel: document.getElementById("panel-photo") },
+    { btn: document.getElementById("tab-cards"), panel: document.getElementById("panel-cards") },
+    { btn: document.getElementById("tab-exam"), panel: document.getElementById("panel-exam") },
+  ];
+
+  function activateTab(idx) {
+    tabs.forEach((t, i) => {
+      const on = i === idx;
+      t.btn.classList.toggle("active", on);
+      t.btn.setAttribute("aria-selected", on ? "true" : "false");
+      t.panel.classList.toggle("active", on);
+    });
+    if (idx > 0 && !companionState) {
+      void loadCompanionState();
+    }
+  }
+  tabs.forEach((t, i) => t.btn.addEventListener("click", () => activateTab(i)));
+
+  function renderCards() {
+    const statsEl = document.getElementById("cards-stats");
+    const stageEl = document.getElementById("cards-stage");
+    const cardsTabBtn = document.getElementById("tab-cards");
+    if (!companionState) {
+      statsEl.textContent = "Loading flashcards...";
+      return;
+    }
+    const dueCount = companionState.totalDue || 0;
+    const queueLen = companionState.dueCards.length;
+    cardsTabBtn.textContent = dueCount > 0 ? ("FSRS Cards (" + dueCount + ")") : "FSRS Cards";
+    statsEl.textContent = dueCount + " due · " + queueLen + " ready · " + (companionState.totalTracked || 0) + " tracked";
+    stageEl.innerHTML = "";
+
+    const card = companionState.dueCards[0];
+    if (!card) {
+      const done = document.createElement("p");
+      done.className = "muted";
+      done.style.margin = "0";
+      done.textContent = "All FSRS-6 flashcards are caught up!";
+      stageEl.append(done);
+      return;
+    }
+
+    const head = document.createElement("div");
+    head.className = "row-between";
+    const title = document.createElement("div");
+    title.className = "q-title";
+    title.textContent = card.propositionName + (card.isDue ? " · DUE" : " · NEW");
+    const meta = document.createElement("span");
+    meta.className = "badge";
+    meta.textContent = card.isDue ? ("R=" + Math.round((card.retrievability || 0) * 100) + "%") : "New";
+    head.append(title, meta);
+
+    const q = document.createElement("div");
+    q.id = "card-q";
+    q.className = "q-body";
+    q.textContent = card.question;
+    stageEl.append(head, q);
+
+    if (!cardRevealed) {
+      const flipBtn = document.createElement("button");
+      flipBtn.id = "flip-card-btn";
+      flipBtn.type = "button";
+      flipBtn.className = "btn btn-primary";
+      flipBtn.textContent = "Show Answer";
+      flipBtn.onclick = () => {
+        cardRevealed = true;
+        renderCards();
+      };
+      stageEl.append(flipBtn);
+      return;
+    }
+
+    const ansBox = document.createElement("div");
+    ansBox.className = "ans-box";
+    const ansLabel = document.createElement("div");
+    ansLabel.className = "q-title";
+    ansLabel.style.color = "#22c55e";
+    ansLabel.textContent = "Answer";
+    const ansText = document.createElement("div");
+    ansText.id = "card-a";
+    ansText.className = "q-body";
+    ansText.textContent = card.answer;
+    ansBox.append(ansLabel, ansText);
+
+    if (card.statement) {
+      const stmt = document.createElement("div");
+      stmt.id = "card-stmt";
+      stmt.className = "muted";
+      stmt.style.fontSize = "12px";
+      stmt.textContent = "Statement: " + card.statement;
+      ansBox.append(stmt);
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "rate-grid";
+    const ratings = [
+      { id: 1, label: "Again" },
+      { id: 2, label: "Hard" },
+      { id: 3, label: "Good" },
+      { id: 4, label: "Easy" },
+    ];
+    for (const r of ratings) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "rate-btn rate-" + r.id;
+      btn.disabled = cardBusy;
+      const lbl = document.createElement("span");
+      lbl.textContent = r.label;
+      const iv = document.createElement("small");
+      iv.textContent = (card.intervals && card.intervals[String(r.id)]) || "";
+      btn.append(lbl, iv);
+      btn.onclick = () => void submitCardRating(card, r.id);
+      grid.append(btn);
+    }
+    ansBox.append(grid);
+    stageEl.append(ansBox);
+  }
+
+  function renderExam() {
+    if (!companionState || !companionState.examPrep) return;
+    const ep = companionState.examPrep;
+    const cfg = ep.config || {};
+    const titleEl = document.getElementById("exam-title");
+    const readyEl = document.getElementById("exam-readiness");
+    const barEl = document.getElementById("exam-bar");
+    const weakEl = document.getElementById("exam-weak");
+    const sessionsEl = document.getElementById("recent-sessions");
+
+    const dText = ep.daysRemaining == null
+      ? ""
+      : ep.daysRemaining > 0 ? (" · D-" + ep.daysRemaining)
+      : ep.daysRemaining === 0 ? " · Today"
+      : (" · +" + Math.abs(ep.daysRemaining) + "d");
+
+    titleEl.textContent = (cfg.mode === "exam" ? (cfg.examTitle || "Exam Prep") : "Long-Term Mastery") + dText;
+    readyEl.textContent = "Readiness " + (ep.examReadinessPct || 0) + "%";
+    topBadge.textContent = "Readiness " + (ep.examReadinessPct || 0) + "%" + dText;
+    barEl.style.width = Math.min(100, Math.max(4, ep.examReadinessPct || 0)) + "%";
+    barEl.style.background = (ep.examReadinessPct || 0) >= 80 ? "#22c55e" : (ep.examReadinessPct || 0) >= 55 ? "#f59e0b" : "#ef4444";
+
+    document.getElementById("mode-long-term").classList.toggle("active", cfg.mode === "long-term");
+    document.getElementById("mode-exam").classList.toggle("active", cfg.mode === "exam");
+    document.getElementById("pace-thorough").classList.toggle("active", cfg.pace === "thorough");
+    document.getElementById("pace-efficient").classList.toggle("active", cfg.pace === "efficient");
+    document.getElementById("pace-crash").classList.toggle("active", cfg.pace === "crash-course");
+
+    const weakNames = ep.weakFoundationNames || [];
+    const dueNames = ep.duePropositionNames || [];
+    weakEl.textContent = weakNames.length
+      ? ("Weak foundations: " + weakNames.join(", "))
+      : dueNames.length
+      ? ("Due next: " + dueNames.join(", "))
+      : "No overdue foundational concepts right now.";
+
+    sessionsEl.innerHTML = "";
+    const sessions = companionState.recentSessions || [];
+    if (!sessions.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.style.marginTop = "6px";
+      empty.textContent = "No recent desktop sessions yet.";
+      sessionsEl.append(empty);
+      return;
+    }
+    for (const s of sessions) {
+      const box = document.createElement("div");
+      box.className = "session-item";
+      const top = document.createElement("div");
+      top.className = "row-between";
+      const name = document.createElement("strong");
+      name.style.fontSize = "12px";
+      name.textContent = s.title;
+      const modeTag = document.createElement("span");
+      modeTag.className = "badge";
+      modeTag.textContent = s.mode === "practice" ? "Practice" : "Teach";
+      top.append(name, modeTag);
+      box.append(top);
+      if (s.lastAssistantSnippet) {
+        const snip = document.createElement("div");
+        snip.className = "session-snip";
+        snip.textContent = s.lastAssistantSnippet;
+        box.append(snip);
+      }
+      sessionsEl.append(box);
+    }
+  }
+
+  async function loadCompanionState() {
+    try {
+      const res = await fetch(COMPANION_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      companionState = await res.json();
+      cardRevealed = false;
+      renderCards();
+      renderExam();
+    } catch {
+      document.getElementById("cards-stats").textContent = "Could not load companion state.";
+    }
+  }
+
+  async function submitCardRating(card, rating) {
+    if (cardBusy) return;
+    cardBusy = true;
+    renderCards();
+    try {
+      const res = await fetch(COMPANION_URL + "/rate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ propositionId: card.propositionId, cueId: card.cueId, rating }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        companionState = data.state;
+        cardRevealed = false;
+      }
+    } finally {
+      cardBusy = false;
+      renderCards();
+      renderExam();
+    }
+  }
+
+  async function patchExamPrep(patch) {
+    try {
+      const res = await fetch(COMPANION_URL + "/exam-prep", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (companionState) companionState.examPrep = data.examPrep;
+        renderExam();
+      }
+    } catch {}
+  }
+
+  document.getElementById("cards-refresh").addEventListener("click", () => void loadCompanionState());
+  document.getElementById("mode-long-term").addEventListener("click", () => void patchExamPrep({ mode: "long-term" }));
+  document.getElementById("mode-exam").addEventListener("click", () => void patchExamPrep({ mode: "exam" }));
+  document.getElementById("pace-thorough").addEventListener("click", () => void patchExamPrep({ pace: "thorough" }));
+  document.getElementById("pace-efficient").addEventListener("click", () => void patchExamPrep({ pace: "efficient" }));
+  document.getElementById("pace-crash").addEventListener("click", () => void patchExamPrep({ pace: "crash-course" }));
+  void loadCompanionState();
 
   function formatBytes(bytes) {
     if (!bytes || bytes < 1024) return (bytes || 0) + " B";
@@ -687,8 +1024,6 @@ function buildMobileHtml(uploadEndpoint: string): string {
   }
 
   async function normalizeImage(file) {
-    // Re-encode via canvas to bake EXIF orientation, convert HEIC/HEIF,
-    // and compact camera bitmaps so mobile uploads finish fast over 4G/5G.
     const highDetail = Boolean(hd && hd.checked);
     const maxDim = highDetail ? 2400 : 1600;
     const quality = highDetail ? 0.88 : 0.78;
@@ -915,6 +1250,78 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 		return;
 	}
 
+	if (req.method === "GET" && segments.length === 3 && segments[2] === "companion") {
+		try {
+			touchExpiry(session);
+			const state = getMobileCompanionState({
+				flashcardsFile: session.flashcardsFile,
+				examPrepFile: session.examPrepFile,
+				chatsDir: session.chatsDir,
+			});
+			sendJson(res, 200, state);
+		} catch {
+			sendJson(res, 500, { error: "Failed to load mobile companion state" });
+		}
+		return;
+	}
+
+	if (req.method === "POST" && segments.length === 4 && segments[2] === "companion" && segments[3] === "rate") {
+		void (async () => {
+			try {
+				const bytes = await readRequestBytes(req, 64 * 1024);
+				const body = JSON.parse(bytes.toString("utf8")) as {
+					propositionId?: string;
+					cueId?: string;
+					rating?: number;
+				};
+				const result = rateMobileCompanionCard({
+					propositionId: typeof body.propositionId === "string" ? body.propositionId : "",
+					cueId: typeof body.cueId === "string" ? body.cueId : undefined,
+					rating: body.rating as 1 | 2 | 3 | 4,
+					flashcardsFile: session.flashcardsFile,
+					examPrepFile: session.examPrepFile,
+					chatsDir: session.chatsDir,
+				});
+				touchExpiry(session);
+				sendJson(res, 200, result);
+			} catch (err) {
+				if (err instanceof MobileCompanionError) {
+					sendJson(res, err.status, { error: err.message });
+					return;
+				}
+				if (err instanceof AttachmentError) {
+					sendJson(res, err.status, { error: err.message });
+					return;
+				}
+				sendJson(res, 400, { error: "Invalid companion rating payload" });
+			}
+		})();
+		return;
+	}
+
+	if (req.method === "POST" && segments.length === 4 && segments[2] === "companion" && segments[3] === "exam-prep") {
+		void (async () => {
+			try {
+				const bytes = await readRequestBytes(req, 64 * 1024);
+				const body = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+				const result = updateMobileCompanionExamPrep(body, {
+					flashcardsFile: session.flashcardsFile,
+					examPrepFile: session.examPrepFile,
+					chatsDir: session.chatsDir,
+				});
+				touchExpiry(session);
+				sendJson(res, 200, result);
+			} catch (err) {
+				if (err instanceof AttachmentError) {
+					sendJson(res, err.status, { error: err.message });
+					return;
+				}
+				sendJson(res, 400, { error: "Invalid exam prep payload" });
+			}
+		})();
+		return;
+	}
+
 	if (req.method === "POST" && segments.length === 3 && segments[2] === "upload") {
 		void (async () => {
 			try {
@@ -954,6 +1361,9 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 export interface CreatePhoneSessionOptions {
 	host?: string;
 	attachmentsDir?: string;
+	flashcardsFile?: string;
+	examPrepFile?: string;
+	chatsDir?: string;
 	interfaces?: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
 	/** Open a public HTTPS reverse tunnel (`trycloudflare.com` / `localhost.run`) so phones work off-Wi-Fi. */
 	enableTunnel?: boolean;
@@ -984,6 +1394,9 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 		expiresAt: Date.now() + SESSION_TTL_MS,
 		uploads: [],
 		attachmentsDir: options.attachmentsDir,
+		flashcardsFile: options.flashcardsFile,
+		examPrepFile: options.examPrepFile,
+		chatsDir: options.chatsDir,
 		server: null as unknown as http.Server,
 		timer: null,
 		closed: false,

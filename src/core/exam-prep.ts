@@ -19,6 +19,9 @@ export interface ExamPrepStatus {
 	dueCount: number;
 	weakFoundationsCount: number;
 	untrackedFoundationsCount: number;
+	duePropositionNames: string[];
+	weakFoundationNames: string[];
+	untrackedFoundationNames: string[];
 	promptDirective: string | null;
 }
 
@@ -79,12 +82,39 @@ export function computeExamPrepStatus(
 	config: ExamPrepConfig,
 	fsrs: GraphFsrsSummary,
 	now = Date.now(),
+	nodes: ReadonlyArray<{ id: string; name: string }> = [],
 ): ExamPrepStatus {
 	const normalized = sanitizeExamPrepConfig(config);
 	const daysRemaining = computeDaysRemaining(normalized.examDate, now);
 	const dueCount = (fsrs.counts.overdue ?? 0) + (fsrs.counts.decaying ?? 0);
 	const weakFoundationsCount = fsrs.counts.weakFoundations ?? 0;
 	const untrackedFoundationsCount = fsrs.counts.untrackedFoundations ?? 0;
+
+	const nodeNames = new Map<string, string>();
+	for (const n of nodes) {
+		nodeNames.set(n.id, n.name);
+	}
+	const nameOf = (propId: string) => nodeNames.get(propId) || propId;
+
+	const fsrsList = Object.values(fsrs.nodes ?? {});
+
+	const weakFoundationNames = fsrsList
+		.filter((n) => n.isFoundation && (n.memoryBand === "overdue" || n.memoryBand === "decaying"))
+		.sort((a, b) => (b.dependentCount - a.dependentCount) || ((a.retrievability ?? 0) - (b.retrievability ?? 0)))
+		.slice(0, 6)
+		.map((n) => nameOf(n.id));
+
+	const duePropositionNames = fsrsList
+		.filter((n) => n.memoryBand === "overdue" || n.memoryBand === "decaying")
+		.sort((a, b) => (a.retrievability ?? 0) - (b.retrievability ?? 0))
+		.slice(0, 8)
+		.map((n) => nameOf(n.id));
+
+	const untrackedFoundationNames = fsrsList
+		.filter((n) => n.isFoundation && n.state === "untracked")
+		.sort((a, b) => b.dependentCount - a.dependentCount)
+		.slice(0, 6)
+		.map((n) => nameOf(n.id));
 
 	let promptDirective: string | null = null;
 	if (!(normalized.mode === "long-term" && normalized.pace === "thorough")) {
@@ -99,7 +129,15 @@ export function computeExamPrepStatus(
 			: "Active Mode: Long-Term Mastery";
 
 		const metrics = `Current FSRS-6 Metrics: Exam Readiness ${fsrs.examReadinessPct}% · Tracked ${fsrs.counts.tracked} · Due/Decaying ${dueCount} · Weak foundations ${weakFoundationsCount} · Untracked foundations ${untrackedFoundationsCount}.`;
-		promptDirective = `[KronoHarness Study Mode Directive]\n${header}\n${metrics}\n${PACE_DIRECTIVE[normalized.pace]}`;
+		const briefingLines = [
+			header,
+			metrics,
+			weakFoundationNames.length > 0 ? `Priority Weak Foundations (reinforce first): ${weakFoundationNames.join(", ")}.` : "",
+			duePropositionNames.length > 0 ? `Due/Decaying Propositions: ${duePropositionNames.join(", ")}.` : "",
+			untrackedFoundationNames.length > 0 ? `Untracked Foundations (no FSRS cards yet): ${untrackedFoundationNames.join(", ")}.` : "",
+			PACE_DIRECTIVE[normalized.pace],
+		].filter(Boolean);
+		promptDirective = `[KronoHarness Study Mode Directive]\n${briefingLines.join("\n")}`;
 	}
 
 	return {
@@ -110,6 +148,9 @@ export function computeExamPrepStatus(
 		dueCount,
 		weakFoundationsCount,
 		untrackedFoundationsCount,
+		duePropositionNames,
+		weakFoundationNames,
+		untrackedFoundationNames,
 		promptDirective,
 	};
 }

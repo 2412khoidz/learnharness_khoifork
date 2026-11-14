@@ -57,5 +57,5 @@ export function readExamPrepStatus(opts?: {
 		? { nodes: graphStore.readNodes(), chains: graphStore.readChains() }
 		: { nodes: [], chains: [] };
 	const fsrs = readGraphFsrsSummary(snapshot, opts?.flashcardsFile, opts?.now);
-	return computeExamPrepStatus(config, fsrs, opts?.now);
+	return computeExamPrepStatus(config, fsrs, opts?.now, snapshot.nodes);
 }

@@ -12,20 +12,32 @@ import {
 import type { GraphSnapshot } from "../core/contracts.ts";
 import { graphView } from "./graph.ts";
 
-interface FlashcardsSchedulerModule {
+export interface FlashcardsSchedulerModule {
 	rate(
 		schedule: Record<string, unknown>,
 		rating: 1 | 2 | 3 | 4,
 		now: number,
 		settings?: Record<string, unknown>,
 	): Record<string, unknown>;
+	preview(
+		schedule: Record<string, unknown>,
+		now?: number,
+		settings?: Record<string, unknown>,
+	): Record<number, Record<string, unknown> & { state?: number; due?: number; scheduled_days?: number }>;
+	retrievability(
+		schedule: Record<string, unknown>,
+		now?: number,
+		settings?: Record<string, unknown>,
+	): number;
+	chooseCue<T extends { latestRating?: number | null }>(cues: T[]): T | null;
+	isDue(schedule: Record<string, unknown>, now?: number, startHour?: number): boolean;
 	studyDay(now: number, startHour?: number): string;
 }
 
 const require = createRequire(import.meta.url);
 let cachedScheduler: FlashcardsSchedulerModule | undefined;
 
-function loadScheduler(): FlashcardsSchedulerModule {
+export function loadFlashcardsScheduler(): FlashcardsSchedulerModule {
 	if (cachedScheduler) return cachedScheduler;
 	const candidates = [
 		path.join(/* turbopackIgnore: true */ PATHS.root, "plugins", "flashcards", "src", "scheduler.cjs"),
@@ -134,7 +146,7 @@ export function recordPracticeFsrsOutcome(input: PracticeFsrsUpdateInput): Pract
 		return empty;
 	}
 
-	const scheduler = loadScheduler();
+	const scheduler = loadFlashcardsScheduler();
 	const nowMs = input.now ?? Date.now();
 	const updatedPropositionIds: string[] = [];
 	const ratings: Record<string, 1 | 2 | 3 | 4> = {};

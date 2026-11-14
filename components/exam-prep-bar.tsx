@@ -147,6 +147,28 @@ export function ExamPrepSidebarCard() {
 				))}
 			</div>
 
+			{(status?.weakFoundationNames?.length || status?.duePropositionNames?.length) ? (
+				<div
+					data-testid="kronoharness-priority-review"
+					className="mt-1.5 space-y-0.5 border-t pt-1.5 text-[10px] text-muted-foreground"
+				>
+					{status.weakFoundationNames.length > 0 && (
+						<p className="truncate" title={status.weakFoundationNames.join(", ")}>
+							<span className="font-medium text-rose-500">Weak roots:</span>{" "}
+							{status.weakFoundationNames.slice(0, 2).join(", ")}
+							{status.weakFoundationNames.length > 2 ? ` +${status.weakFoundationNames.length - 2}` : ""}
+						</p>
+					)}
+					{status.duePropositionNames.length > 0 && (
+						<p className="truncate" title={status.duePropositionNames.join(", ")}>
+							<span className="font-medium text-amber-500">Due ({status.dueCount}):</span>{" "}
+							{status.duePropositionNames.slice(0, 2).join(", ")}
+							{status.duePropositionNames.length > 2 ? ` +${status.duePropositionNames.length - 2}` : ""}
+						</p>
+					)}
+				</div>
+			) : null}
+
 			{mode === "exam" && (
 				<div className="mt-1.5 border-t pt-1.5">
 					<div className="flex items-center justify-between gap-1.5">
