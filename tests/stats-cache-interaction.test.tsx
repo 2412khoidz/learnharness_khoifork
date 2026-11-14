@@ -19,7 +19,7 @@ test("cache hit rate appears only inside expanded session stats, follows the ses
 	globalThis.fetch = async (input) => {
 		if (input === "/api/models") return Response.json(catalog);
 		if (input === "/api/settings") return Response.json({ settings: { models: {} } });
-		if (input === "/api/chats/fixture") return Response.json({ settings: {} });
+		if (input === "/api/chats/fixture?only=settings") return Response.json({ settings: {} });
 		throw new Error(`unexpected fixture request ${String(input)}`);
 	};
 	const host = document.createElement("div"); document.body.append(host);

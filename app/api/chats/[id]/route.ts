@@ -1,8 +1,17 @@
 import { compactionInFlight, deleteChatSession, getChat, isTurnRunning, sessionCoverage, sessionCost, stores, turnFailure, type ChatDeleteMode, pluginQuestionAvailabilityOf, reconcilePluginQuestionCompatibility, type QuestionTypeResolver, getPluginQuestionTypeResolver, getPluginHost, pluginProblemAvailabilityOf, type ProblemTypeResolver } from "@/src/server";
-import { pendingPluginQuestionOf, activeProblemOf } from "@/src/core";
+import { pendingPluginQuestionOf, activeProblemOf, stripToolResultImages } from "@/src/core";
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
 	const { id } = await params;
+	// Metadata-only reads for views that already hold the transcript.
+	const only = new URL(req.url).searchParams.get("only");
+	if (only === "stats" || only === "coverage" || only === "settings") {
+		const chat = getChat(id);
+		if (!chat) return Response.json({ error: "Not found" }, { status: 404 });
+		if (only === "stats") return Response.json({ turns: chat.turns, pricing: sessionCost(chat) });
+		if (only === "coverage") return Response.json({ coverage: sessionCoverage(id) });
+		return Response.json({ settings: chat.settings });
+	}
 	await reconcilePluginQuestionCompatibility(stores.chatStore, id);
 	let chat = getChat(id);
 	if (!chat) return Response.json({ error: "Not found" }, { status: 404 });
@@ -33,7 +42,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 	const { imageSnapshots: _imageSnapshots, ...record } = chat;
 	return Response.json({
 		...record,
-		messages: chat.messages,
+		messages: stripToolResultImages(chat.messages),
 		pluginQuestionAvailability: pluginQuestionAvailabilityOf(chat, questionResolver),
 		pluginProblemAvailability: pluginProblemAvailabilityOf(chat, problemResolver),
 		pricing: sessionCost(chat),

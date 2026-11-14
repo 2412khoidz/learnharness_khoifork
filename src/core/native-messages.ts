@@ -1091,3 +1091,23 @@ export function needsContinuation(record: readonly LhMessage[]): boolean {
 		}, annotation));
 	});
 }
+
+/** Drop base64 image payloads from toolResult blocks before sending history to
+ *  the browser: the client UI renders only `[Image attached to the model: mimeType]`,
+ *  never raw tool-result image bytes, while the server store retains them for LLM turns. */
+export function stripToolResultImages(messages: readonly LhMessage[]): LhMessage[] {
+	let changed = false;
+	const next = messages.map((message) => {
+		if (message.role !== "toolResult" || !Array.isArray(message.content)) return message;
+		let contentChanged = false;
+		const content = message.content.map((block) => {
+			if (block.type !== "image" || block.data === "") return block;
+			contentChanged = true;
+			return { ...block, data: "" };
+		});
+		if (!contentChanged) return message;
+		changed = true;
+		return { ...message, content };
+	});
+	return changed ? next : (messages as LhMessage[]);
+}

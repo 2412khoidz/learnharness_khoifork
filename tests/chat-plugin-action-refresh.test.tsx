@@ -54,7 +54,7 @@ for (const thinking of [false, true]) for (const overflow of [false, true]) test
         const url = String(input);
         if (url === "/api/models") return Response.json({ providers: [], models: [], slots: {} });
         if (url === "/api/settings") return Response.json({});
-        if (url === "/api/chats/one") return Response.json({ id: "one", messages });
+        if (url === "/api/chats/one" || url.startsWith("/api/chats/one?")) return Response.json({ id: "one", messages });
         if (url === "/api/chats/one/side-chats") return Response.json({ threads: [] });
         if (url === "/api/jobs?chatId=one") return Response.json({ jobs: [], turnInFlight: false });
         assert.fail(`Unexpected fixture request: ${url}`);
