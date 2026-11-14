@@ -25,6 +25,7 @@ import {
 	GET as getPhoneRoute,
 	POST as postPhoneRoute,
 } from "../app/api/attachments/phone/route.ts";
+import { findInstalledCloudflared, resolveCloudflaredAsset } from "../src/server/tunnel-binary.ts";
 
 // Minimal valid 1x1 transparent PNG.
 const VALID_PNG = Buffer.from(
@@ -156,7 +157,13 @@ describe("rankLanAddresses and phone upload HTTP server", () => {
 		const html = await pageRes.text();
 		assert.match(html, /capture="environment"/);
 		assert.match(html, /multiple/);
+		assert.match(html, /id="hd"/);
+		assert.match(html, /XMLHttpRequest/);
 		assert.ok(!html.includes("https://"), "mobile upload page must stay 100% offline/self-contained");
+
+		const pingRes = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}/ping`);
+		assert.equal(pingRes.status, 200);
+		assert.equal(await pingRes.text(), "ok");
 
 		const badUpload = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}/upload`, {
 			method: "POST",
@@ -270,5 +277,44 @@ describe("phone upload cross-network tunnel support", () => {
 		const session = await startRes.json() as { sessionId: string; tunnelStatus?: string };
 		assert.equal(session.tunnelStatus, "off");
 		await deletePhoneRoute(new Request(`http://localhost/api/attachments/phone?sessionId=${session.sessionId}`, { method: "DELETE" }));
+	});
+
+	it("passes pingPath to tunnel spawner and resolves/locates cloudflared binary", async () => {
+		let capturedPingPath: string | undefined;
+		const session = await createPhoneUploadSession({
+			host: "127.0.0.1",
+			enableTunnel: true,
+			tunnelSpawner: (_port, callbacks) => {
+				capturedPingPath = callbacks.pingPath;
+				callbacks.onReady("https://fast-demo.trycloudflare.com");
+				return { close() {} };
+			},
+		});
+		assert.equal(capturedPingPath, `/p/${encodeURIComponent(session.token)}/ping`);
+		assert.equal(session.tunnelStatus, "ready");
+		assert.equal(session.tunnelUrl, "https://fast-demo.trycloudflare.com");
+		await closePhoneUploadSession(session.sessionId);
+
+		assert.deepEqual(resolveCloudflaredAsset("win32", "x64"), {
+			assetName: "cloudflared-windows-amd64.exe",
+			binaryName: "cloudflared.exe",
+			archive: "none",
+		});
+		assert.deepEqual(resolveCloudflaredAsset("darwin", "arm64"), {
+			assetName: "cloudflared-darwin-arm64.tgz",
+			binaryName: "cloudflared",
+			archive: "tgz",
+		});
+		assert.equal(resolveCloudflaredAsset("freebsd", "x64"), null);
+
+		const tmpBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-find-test-"));
+		try {
+			const binName = process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
+			const binFile = path.join(tmpBinDir, binName);
+			fs.writeFileSync(binFile, "stub");
+			assert.equal(findInstalledCloudflared(tmpBinDir, { PATH: "" }), binFile);
+		} finally {
+			fs.rmSync(tmpBinDir, { recursive: true, force: true });
+		}
 	});
 });

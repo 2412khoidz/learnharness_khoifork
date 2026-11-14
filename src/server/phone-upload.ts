@@ -10,15 +10,19 @@ import type {
 	PhoneUploadSessionInfo,
 } from "../core/attachments.ts";
 import { AttachmentError, MAX_ATTACHMENT_IMAGE_BYTES, saveAttachmentImage } from "./attachments.ts";
+import { ensureCloudflaredBinary, waitForTunnelReadiness } from "./tunnel-binary.ts";
 
 const SESSION_TTL_MS = 15 * 60 * 1000;
-const TUNNEL_STARTUP_TIMEOUT_MS = 12_000;
+const SSH_TUNNEL_STARTUP_TIMEOUT_MS = 12_000;
+const CF_TUNNEL_STARTUP_TIMEOUT_MS = 20_000;
 const ANSI_CSI_RE = new RegExp("\\x1b\\[[0-9;]*[A-Za-z]", "g");
 const LHR_URL_RE = /https:\/\/[a-z0-9.-]+\.lhr\.life\b/i;
+const CF_URL_RE = /https:\/\/[a-z0-9.-]+\.trycloudflare\.com\b/i;
 
 export interface TunnelSpawnerCallbacks {
 	onReady: (url: string) => void;
 	onError: (message: string) => void;
+	pingPath?: string;
 }
 
 export type PhoneTunnelSpawner = (
@@ -26,7 +30,7 @@ export type PhoneTunnelSpawner = (
 	callbacks: TunnelSpawnerCallbacks,
 ) => { close: () => void };
 
-function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbacks): { close: () => void } {
+function startSshTunnel(port: number, callbacks: TunnelSpawnerCallbacks): { close: () => void } {
 	const child = spawn(
 		"ssh",
 		[
@@ -59,7 +63,7 @@ function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbac
 		settled = true;
 		killChild();
 		callbacks.onError("Cross-network tunnel timed out while starting");
-	}, TUNNEL_STARTUP_TIMEOUT_MS);
+	}, SSH_TUNNEL_STARTUP_TIMEOUT_MS);
 	timer.unref?.();
 
 	const handleOutput = (chunk: Buffer | string, isStderr: boolean) => {
@@ -105,6 +109,143 @@ function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbac
 			closed = true;
 			clearTimeout(timer);
 			killChild();
+		},
+	};
+}
+
+function startCloudflareTunnel(
+	port: number,
+	binaryPath: string,
+	callbacks: TunnelSpawnerCallbacks,
+	onPreReadyFailure: () => void,
+): { close: () => void } {
+	const child = spawn(
+		binaryPath,
+		[
+			"tunnel",
+			"--no-autoupdate",
+			"--edge-ip-version", "4",
+			"--protocol", "http2",
+			"--url", `http://127.0.0.1:${port}`,
+		],
+		{ stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+	);
+
+	let closed = false;
+	let settled = false;
+	let verifying = false;
+	let tunnelUrl: string | null = null;
+	let registered = false;
+
+	const killChild = () => {
+		try {
+			child.kill();
+		} catch {
+			// ignore child kill errors
+		}
+	};
+
+	const failStartup = (message?: string) => {
+		if (closed || settled) return;
+		settled = true;
+		clearTimeout(timer);
+		killChild();
+		if (message) {
+			// Startup failed before readiness — allow fallback if configured.
+			void message;
+		}
+		onPreReadyFailure();
+	};
+
+	const timer = setTimeout(() => {
+		failStartup("Cloudflare tunnel startup timed out");
+	}, CF_TUNNEL_STARTUP_TIMEOUT_MS);
+	timer.unref?.();
+
+	const maybeVerifyAndReady = () => {
+		if (closed || settled || verifying || !tunnelUrl || !registered) return;
+		verifying = true;
+		clearTimeout(timer);
+		const candidateUrl = tunnelUrl;
+		void waitForTunnelReadiness(candidateUrl, callbacks.pingPath || "/", () => closed || settled).then((live) => {
+			if (closed || settled) return;
+			if (live) {
+				settled = true;
+				callbacks.onReady(candidateUrl);
+			} else {
+				failStartup("Cloudflare tunnel URL failed readiness check");
+			}
+		});
+	};
+
+	const handleOutput = (chunk: Buffer | string) => {
+		if (closed || settled) return;
+		const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+		if (!tunnelUrl) {
+			const match = CF_URL_RE.exec(text);
+			if (match) tunnelUrl = match[0];
+		}
+		if (!registered && /Registered tunnel connection/i.test(text)) {
+			registered = true;
+		}
+		maybeVerifyAndReady();
+	};
+
+	child.stdout?.on("data", handleOutput);
+	child.stderr?.on("data", handleOutput);
+	child.on("error", () => {
+		failStartup("Failed to launch cloudflared");
+	});
+	child.on("close", () => {
+		if (closed) return;
+		clearTimeout(timer);
+		if (!settled) {
+			failStartup("Cloudflare tunnel exited unexpectedly");
+		} else {
+			callbacks.onError("Cross-network tunnel disconnected");
+		}
+	});
+
+	return {
+		close() {
+			if (closed) return;
+			closed = true;
+			clearTimeout(timer);
+			killChild();
+		},
+	};
+}
+
+function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbacks): { close: () => void } {
+	let closed = false;
+	let activeHandle: { close: () => void } | null = null;
+
+	const startFallback = () => {
+		if (closed) return;
+		activeHandle = startSshTunnel(port, callbacks);
+	};
+
+	void ensureCloudflaredBinary().then((binaryPath) => {
+		if (closed) return;
+		if (!binaryPath) {
+			startFallback();
+			return;
+		}
+		activeHandle = startCloudflareTunnel(port, binaryPath, callbacks, () => {
+			if (closed) return;
+			activeHandle = null;
+			startFallback();
+		});
+	});
+
+	return {
+		close() {
+			if (closed) return;
+			closed = true;
+			if (activeHandle) {
+				activeHandle.close();
+				activeHandle = null;
+			}
 		},
 	};
 }
@@ -228,6 +369,7 @@ function buildMobileHtml(uploadEndpoint: string): string {
   input[type="file"] { display: none; }
   .list { margin-top: 16px; display: grid; gap: 8px; }
   .item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid #27272a; background: #111114; font-size: 13px; }
+  .opt { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; cursor: pointer; user-select: none; }
   .ok { color: #22c55e; font-weight: 600; }
   .err { color: #ef4444; font-weight: 600; }
   .foot { margin-top: 14px; font-size: 12px; text-align: center; }
@@ -247,6 +389,10 @@ function buildMobileHtml(uploadEndpoint: string): string {
         <input id="lib" type="file" accept="image/*" multiple />
       </label>
     </div>
+    <label class="opt muted">
+      <input id="hd" type="checkbox" />
+      <span>High detail (2400px &middot; slower over 4G/5G)</span>
+    </label>
     <div id="list" class="list" aria-live="polite"></div>
     <p class="muted foot">Works over 4G/5G, any Wi-Fi, or local network.</p>
   </main>
@@ -255,8 +401,17 @@ function buildMobileHtml(uploadEndpoint: string): string {
   const UPLOAD_URL = ${uploadEndpointLiteral};
   const cam = document.getElementById("cam");
   const lib = document.getElementById("lib");
+  const hd = document.getElementById("hd");
   const list = document.getElementById("list");
-  let queue = Promise.resolve();
+  const CONCURRENCY = 2;
+  const pending = [];
+  let inFlight = 0;
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes < 1024) return (bytes || 0) + " B";
+    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
 
   function addRow(name) {
     const row = document.createElement("div");
@@ -272,8 +427,11 @@ function buildMobileHtml(uploadEndpoint: string): string {
   }
 
   async function normalizeImage(file) {
-    // Re-encode via canvas when browser decoding succeeds to bake EXIF orientation,
-    // convert HEIC/HEIF on iOS/Android, and keep camera bitmaps compact over Wi-Fi.
+    // Re-encode via canvas to bake EXIF orientation, convert HEIC/HEIF,
+    // and compact camera bitmaps so mobile uploads finish fast over 4G/5G.
+    const highDetail = Boolean(hd && hd.checked);
+    const maxDim = highDetail ? 2400 : 1600;
+    const quality = highDetail ? 0.88 : 0.78;
     let bitmap = null;
     try {
       if (typeof createImageBitmap === "function") {
@@ -305,7 +463,6 @@ function buildMobileHtml(uploadEndpoint: string): string {
       }
     }
 
-    const maxDim = 2400;
     const scale = Math.max(width, height) > maxDim ? maxDim / Math.max(width, height) : 1;
     const w = Math.max(1, Math.round(width * scale));
     const h = Math.max(1, Math.round(height * scale));
@@ -319,27 +476,61 @@ function buildMobileHtml(uploadEndpoint: string): string {
     }
     ctx.drawImage(bitmap || imgEl, 0, 0, w, h);
     if (bitmap && typeof bitmap.close === "function") bitmap.close();
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
     return blob || file;
   }
 
-  async function uploadOne(file) {
-    const entry = addRow(file.name);
+  function sendPayload(payload, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", UPLOAD_URL, true);
+      xhr.timeout = 45000;
+      xhr.setRequestHeader("Content-Type", payload.type || "application/octet-stream");
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && ev.total > 0) {
+          onProgress(Math.min(99, Math.round((ev.loaded / ev.total) * 100)));
+        }
+      };
+      xhr.onload = () => {
+        let json = {};
+        try { json = JSON.parse(xhr.responseText || "{}"); } catch {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(json);
+        else reject(new Error(json.error || ("HTTP " + xhr.status)));
+      };
+      xhr.onerror = () => reject(new Error("Network error"));
+      xhr.ontimeout = () => reject(new Error("Upload timed out"));
+      xhr.send(payload);
+    });
+  }
+
+  async function uploadOne(file, entry) {
     try {
       const payload = await normalizeImage(file);
-      entry.status.textContent = "Uploading...";
-      const res = await fetch(UPLOAD_URL, {
-        method: "POST",
-        headers: { "Content-Type": payload.type || "application/octet-stream" },
-        body: payload,
+      const sizeLabel = formatBytes(payload.size);
+      const t0 = Date.now();
+      entry.status.textContent = "Uploading " + sizeLabel + "...";
+      await sendPayload(payload, (pct) => {
+        entry.status.textContent = pct >= 99
+          ? ("Saving " + sizeLabel + "...")
+          : ("Uploading " + sizeLabel + " · " + pct + "%");
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error || ("HTTP " + res.status));
+      const sec = Math.max(0.1, (Date.now() - t0) / 1000).toFixed(1);
       entry.status.className = "ok";
-      entry.status.textContent = "Sent";
+      entry.status.textContent = "Sent (" + sizeLabel + " · " + sec + "s)";
     } catch (err) {
       entry.status.className = "err";
       entry.status.textContent = err && err.message ? err.message : "Failed";
+    }
+  }
+
+  function drainQueue() {
+    while (inFlight < CONCURRENCY && pending.length > 0) {
+      const job = pending.shift();
+      inFlight++;
+      uploadOne(job.file, job.entry).finally(() => {
+        inFlight--;
+        drainQueue();
+      });
     }
   }
 
@@ -347,8 +538,9 @@ function buildMobileHtml(uploadEndpoint: string): string {
     const files = Array.from(input.files || []);
     input.value = "";
     for (const file of files) {
-      queue = queue.then(() => uploadOne(file));
+      pending.push({ file, entry: addRow(file.name) });
     }
+    drainQueue();
   }
 
   cam.addEventListener("change", () => handleSelect(cam));
@@ -450,6 +642,16 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 			"X-Content-Type-Options": "nosniff",
 		});
 		res.end(html);
+		return;
+	}
+
+	if (req.method === "GET" && segments.length === 3 && segments[2] === "ping") {
+		res.writeHead(200, {
+			"Content-Type": "text/plain; charset=utf-8",
+			"Cache-Control": "no-store",
+			"X-Content-Type-Options": "nosniff",
+		});
+		res.end("ok");
 		return;
 	}
 
@@ -564,8 +766,10 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 
 	if (enableTunnel) {
 		const spawner = options.tunnelSpawner ?? defaultPhoneTunnelSpawner;
+		const pingPath = `/p/${encodeURIComponent(session.token)}/ping`;
 		try {
 			const handle = spawner(session.port, {
+				pingPath,
 				onReady: (url) => {
 					if (session.closed || getActiveSession() !== session) return;
 					session.tunnelStatus = "ready";
