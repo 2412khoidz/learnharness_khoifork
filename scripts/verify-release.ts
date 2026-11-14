@@ -105,7 +105,7 @@ type Issues = Issue[];
 // ---------------------------------------------------------------------------
 
 /** Verified product name spelled into every artifact (electron-builder.yml productName). */
-const PRODUCT_NAME = "LearnHarness";
+const PRODUCT_NAME = "ChronoHarness";
 
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 

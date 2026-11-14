@@ -1672,9 +1672,9 @@ export function GraphView({
 					className="flex flex-wrap items-center gap-1.5 rounded-xl border bg-card/85 px-2 py-1 text-[11px] shadow-lg backdrop-blur"
 				>
 					<span className="flex items-center gap-1.5 pr-1 text-muted-foreground" title="FSRS-6 Flashcards Memory Status">
-						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-emerald-500" />{fsrsSummary.counts.strong}</span>
-						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-amber-500" />{fsrsSummary.counts.decaying}</span>
-						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-red-500" />{fsrsSummary.counts.overdue}</span>
+						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-success" />{fsrsSummary.counts.strong}</span>
+						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-warning" />{fsrsSummary.counts.decaying}</span>
+						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-error" />{fsrsSummary.counts.overdue}</span>
 					</span>
 					{(() => {
 						const foundationCount = Object.values(fsrsSummary.nodes).filter((n) => n.isFoundation).length;
@@ -1760,11 +1760,11 @@ export function GraphView({
 						if (!fsrs || (fsrs.state === "untracked" && fsrs.weakPrerequisites.length === 0 && !fsrs.isFoundation)) return null;
 						const pct = fsrs.retrievability !== null ? Math.round(fsrs.retrievability * 100) : null;
 						const badgeColor = fsrs.memoryBand === "overdue"
-							? "text-red-500"
+							? "text-error"
 							: fsrs.memoryBand === "decaying"
-								? "text-amber-500"
+								? "text-warning"
 								: fsrs.memoryBand === "strong"
-									? "text-emerald-500"
+									? "text-success"
 									: "text-muted-foreground";
 						return (
 							<div className="mt-3 rounded-lg border bg-background/60 p-2.5 text-xs">
@@ -1785,7 +1785,7 @@ export function GraphView({
 									</div>
 								)}
 								{fsrs.weakPrerequisites.length > 0 && (
-									<div className="mt-1.5 flex flex-col gap-1 text-amber-600 dark:text-amber-400">
+									<div className="mt-1.5 flex flex-col gap-1 text-warning">
 										<div className="flex items-center gap-1 font-medium">
 											<AlertTriangleIcon className="size-3.5 shrink-0" />
 											<span>Weak prerequisite{fsrs.weakPrerequisites.length > 1 ? "s" : ""}:</span>

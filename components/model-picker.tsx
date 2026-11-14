@@ -386,7 +386,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 									data-testid="pause-active-provider"
 									disabled={catalogBusy}
 									onClick={() => void mutateCatalog({ action: "toggle-pause-provider", provider: effectiveProvider, paused: true })}
-									className="text-[11px] text-muted-foreground hover:text-amber-500 transition-colors"
+									className="text-[11px] text-muted-foreground hover:text-warning transition-colors"
 									title={`Hide ${effectiveProvider} models without deleting credentials`}
 								>
 									Pause {effectiveProvider}

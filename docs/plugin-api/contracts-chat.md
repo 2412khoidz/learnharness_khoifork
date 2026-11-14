@@ -163,6 +163,9 @@ export interface ChatRecord {
     extractions?: ExtractionRunUsage[];
     settings?: ChatSettings;
     sideChats?: SideChatThread[];
+    pinned?: boolean;
+    archived?: boolean;
+    notes?: string;
     version?: number;
 }
 ```
@@ -183,6 +186,9 @@ export interface ChatRecord {
 - [extractions](#chatrecord-extractions)
 - [settings](#chatrecord-settings)
 - [sideChats](#chatrecord-sidechats)
+- [pinned](#chatrecord-pinned)
+- [archived](#chatrecord-archived)
+- [notes](#chatrecord-notes)
 - [version](#chatrecord-version)
 
 ### ChatRecord id
@@ -277,6 +283,30 @@ all threads; already-recorded teacher history is never rewritten.
 sideChats?: SideChatThread[];
 ```
 
+### ChatRecord pinned
+
+Whether the learner pinned this session to the top of the sidebar.
+
+```ts
+pinned?: boolean;
+```
+
+### ChatRecord archived
+
+Whether the learner archived this session from the main sidebar list.
+
+```ts
+archived?: boolean;
+```
+
+### ChatRecord notes
+
+Per-lesson Markdown notes captured by the learner in the Notes drawer.
+
+```ts
+notes?: string;
+```
+
 ### ChatRecord version
 
 Schema version. Absence denotes version 1; writes stamp the current
@@ -367,6 +397,9 @@ export interface ChatSummary {
     pendingQuestion: boolean;
     pendingProblem: boolean;
     settings?: ChatSettings;
+    pinned?: boolean;
+    archived?: boolean;
+    hasNotes?: boolean;
 }
 ```
 
@@ -384,6 +417,9 @@ export interface ChatSummary {
 - [pendingQuestion](#chatsummary-pendingquestion)
 - [pendingProblem](#chatsummary-pendingproblem)
 - [settings](#chatsummary-settings)
+- [pinned](#chatsummary-pinned)
+- [archived](#chatsummary-archived)
+- [hasNotes](#chatsummary-hasnotes)
 
 ### ChatSummary id
 
@@ -454,6 +490,30 @@ Saved per-session model/thinking choices included in the list payload.
 
 ```ts
 settings?: ChatSettings;
+```
+
+### ChatSummary pinned
+
+Pinned to the top of the sidebar when true.
+
+```ts
+pinned?: boolean;
+```
+
+### ChatSummary archived
+
+Hidden behind the Archived filter in the sidebar when true.
+
+```ts
+archived?: boolean;
+```
+
+### ChatSummary hasNotes
+
+True when this session has non-empty lesson notes.
+
+```ts
+hasNotes?: boolean;
 ```
 
 ## ExtractionRunUsage

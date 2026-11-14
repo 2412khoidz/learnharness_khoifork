@@ -272,7 +272,7 @@ function PhoneUploadDialogBody({
 		<div className="flex flex-col gap-3.5">
 			<div className="flex items-start justify-between gap-3">
 				<div>
-					<h2 className="text-base font-semibold leading-tight">KronoHarness Mobile Companion</h2>
+					<h2 className="text-base font-semibold leading-tight">ChronoHarness Mobile Companion</h2>
 					<p className="mt-1 text-xs text-muted-foreground">
 						Scan with your phone camera (4G/5G, any Wi-Fi, or local network) to upload work photos, review due FSRS-6 flashcards, and track Exam Prep.
 					</p>

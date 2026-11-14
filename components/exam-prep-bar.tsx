@@ -81,11 +81,11 @@ export function ExamPrepSidebarCard() {
 			<div className="flex items-center justify-between gap-1.5">
 				<span className="inline-flex items-center gap-1 font-medium tracking-tight text-foreground">
 					{mode === "exam" ? (
-						<GraduationCapIcon className="size-3.5 text-amber-500" />
+						<GraduationCapIcon className="size-3.5 text-warning" />
 					) : (
-						<SparklesIcon className="size-3.5 text-emerald-500" />
+						<SparklesIcon className="size-3.5 text-success" />
 					)}
-					<span>KronoHarness</span>
+					<span>ChronoHarness</span>
 				</span>
 				<span className="tabular-nums text-[10px] text-muted-foreground" title="Weighted FSRS-6 Exam Readiness">
 					Readiness {readiness}%
@@ -95,7 +95,7 @@ export function ExamPrepSidebarCard() {
 			<div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
 				<div
 					className={`h-full transition-all duration-300 ${
-						readiness >= 80 ? "bg-emerald-500" : readiness >= 55 ? "bg-amber-500" : "bg-rose-500"
+						readiness >= 80 ? "bg-success" : readiness >= 55 ? "bg-warning" : "bg-error"
 					}`}
 					style={{ width: `${Math.min(100, Math.max(4, readiness))}%` }}
 				/>
@@ -154,14 +154,14 @@ export function ExamPrepSidebarCard() {
 				>
 					{status.weakFoundationNames.length > 0 && (
 						<p className="truncate" title={status.weakFoundationNames.join(", ")}>
-							<span className="font-medium text-rose-500">Weak roots:</span>{" "}
+							<span className="font-medium text-error">Weak roots:</span>{" "}
 							{status.weakFoundationNames.slice(0, 2).join(", ")}
 							{status.weakFoundationNames.length > 2 ? ` +${status.weakFoundationNames.length - 2}` : ""}
 						</p>
 					)}
 					{status.duePropositionNames.length > 0 && (
 						<p className="truncate" title={status.duePropositionNames.join(", ")}>
-							<span className="font-medium text-amber-500">Due ({status.dueCount}):</span>{" "}
+							<span className="font-medium text-warning">Due ({status.dueCount}):</span>{" "}
 							{status.duePropositionNames.slice(0, 2).join(", ")}
 							{status.duePropositionNames.length > 2 ? ` +${status.duePropositionNames.length - 2}` : ""}
 						</p>
@@ -185,7 +185,7 @@ export function ExamPrepSidebarCard() {
 						</button>
 						<div className="flex shrink-0 items-center gap-1">
 							{countdownText && (
-								<span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+								<span className="rounded bg-warning/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-warning">
 									{countdownText}
 								</span>
 							)}

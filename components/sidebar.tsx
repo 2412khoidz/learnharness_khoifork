@@ -341,7 +341,7 @@ export function SessionRow({
 				<DumbbellIcon className="size-3.5 shrink-0 text-muted-foreground/70" aria-label="Practice session" />
 			)}
 			{chat.pinned && (
-				<PinIcon className="size-3 shrink-0 text-amber-500/80" aria-label="Pinned session" />
+				<PinIcon className="size-3 shrink-0 text-warning/80" aria-label="Pinned session" />
 			)}
 		</button>
 	);

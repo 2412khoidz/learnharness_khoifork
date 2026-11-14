@@ -137,7 +137,7 @@ export function computeExamPrepStatus(
 			untrackedFoundationNames.length > 0 ? `Untracked Foundations (no FSRS cards yet): ${untrackedFoundationNames.join(", ")}.` : "",
 			PACE_DIRECTIVE[normalized.pace],
 		].filter(Boolean);
-		promptDirective = `[KronoHarness Study Mode Directive]\n${briefingLines.join("\n")}`;
+		promptDirective = `[ChronoHarness Study Mode Directive]\n${briefingLines.join("\n")}`;
 	}
 
 	return {

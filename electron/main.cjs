@@ -43,15 +43,18 @@ const path = require("node:path");
 // renderer owns the number; this is the IPC widen target).
 const SIDEBAR_AUTOCLOSE = 928;
 
-const PRODUCT_NAME = "LearnHarness";
+const PRODUCT_NAME = "ChronoHarness";
 
 // APP NAME → userData (owner, 2026-10-10): the Application Support dir is
-// exactly "LearnHarness" in dev AND packaged. Packaged Electron would
-// otherwise derive it from package.json "name" (now lowercase
-// "learnharness"), and productName metadata alone doesn't reach app.name.
+// distinct ("ChronoHarness" vs official "LearnHarness") in dev AND packaged,
+// allowing ChronoHarness to install and run side-by-side with official
+// LearnHarness using independent userData and single-instance lock.
 // Must run before the LH_DEV_URL suffix below — dev becomes
-// "LearnHarness-dev".
+// "ChronoHarness-dev".
 app.setName(PRODUCT_NAME);
+if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
+	app.setAppUserModelId("com.chronoharness.ChronoHarness");
+}
 const AUTH_FILE = () => path.join(app.getPath("userData"), "auth.json");
 const DATA_DIR = () => path.join(app.getPath("userData"), "data");
 

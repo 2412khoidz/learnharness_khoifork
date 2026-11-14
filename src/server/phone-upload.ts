@@ -618,7 +618,7 @@ function buildMobileHtml(uploadEndpoint: string): string {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>KronoHarness · Mobile Companion</title>
+<title>ChronoHarness · Mobile Companion</title>
 <style>
   :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   * { box-sizing: border-box; }
@@ -682,7 +682,7 @@ function buildMobileHtml(uploadEndpoint: string): string {
 <body>
   <main class="card">
     <div class="header">
-      <h1>KronoHarness</h1>
+      <h1>ChronoHarness</h1>
       <span id="top-badge" class="badge">Mobile Companion</span>
     </div>
 

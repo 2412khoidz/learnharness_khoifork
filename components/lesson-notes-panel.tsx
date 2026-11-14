@@ -226,7 +226,7 @@ export function LessonNotesPanel({
 						aria-label="Copy notes"
 						onClick={() => void handleCopy()}
 					>
-						{copied ? <CheckIcon className="size-3.5 text-emerald-500" /> : <CopyIcon className="size-3.5" />}
+						{copied ? <CheckIcon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
 					</Button>
 					<Button
 						type="button"

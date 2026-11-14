@@ -144,9 +144,9 @@ it("25 MiB is per file, not per selection; oversized files fail locally while sm
 	await submit([new File([new Uint8Array(MAX_IMPORT_BYTES + 1)], "textbook.pdf"), new File([half], "a.pdf"), new File([half], "b.pdf")]);
 	assert.deepEqual(sent, ["a.pdf", "b.pdf"]); assert.deepEqual(current.errors, ["textbook.pdf: Too big. Max 25 MB."]);
 });
-it("picker stays enabled during imports, offers Files/Folder, and keeps PDF support", () => {
+it("picker stays enabled during imports, offers Files/Folder, and keeps PDF/EPUB support", () => {
 	const html = renderToStaticMarkup(<NotesImportControl importing onImportFiles={() => {}} />);
-	assert.match(html, /webkitdirectory/); assert.match(html, /accept=".txt,.md,.markdown,.rst,.org,.adoc,.tex,.pdf"/); assert.doesNotMatch(html, /disabled/);
+	assert.match(html, /webkitdirectory/); assert.match(html, /accept=".txt,.md,.markdown,.rst,.org,.adoc,.tex,.pdf,.epub"/); assert.doesNotMatch(html, /disabled/);
 });
 it("the Files picker's accept lists only types the queue takes, in any letter case", () => {
 	const accepted = renderToStaticMarkup(<NotesImportControl importing={false} onImportFiles={() => {}} />).match(/accept="([^"]*)"/)![1]!.split(",");

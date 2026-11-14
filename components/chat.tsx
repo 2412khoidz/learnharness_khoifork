@@ -1811,7 +1811,7 @@ export function Chat({
 									: "border-border/80 text-muted-foreground hover:border-border hover:text-foreground",
 							)}
 						>
-							<StickyNoteIcon className={cn("size-3", hasNotes && "text-amber-500")} aria-hidden />
+							<StickyNoteIcon className={cn("size-3", hasNotes && "text-warning")} aria-hidden />
 							Notes
 						</button>
 					</Hint>

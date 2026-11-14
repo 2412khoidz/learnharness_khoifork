@@ -105,7 +105,7 @@ export function BackupSettings() {
 			</SettingsRow>
 			<SettingsRow
 				label="Restore from snapshot"
-				hint="Import a .json snapshot exported from KronoHarness. Existing learning records matching files in the archive are overwritten."
+				hint="Import a .json snapshot exported from ChronoHarness. Existing learning records matching files in the archive are overwritten."
 				testid="row-backup-import"
 			>
 				<input

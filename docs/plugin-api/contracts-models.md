@@ -251,6 +251,11 @@ export interface ModelCatalogResponse {
     rolePins: RolePins;
     slots: SlotPins;
     providers: CatalogProvider[];
+    pausedProviders?: string[];
+    customModels?: Record<string, Array<{
+        id: string;
+        name: string;
+    }>>;
 }
 ```
 
@@ -263,6 +268,8 @@ export interface ModelCatalogResponse {
 - [rolePins](#modelcatalogresponse-rolepins)
 - [slots](#modelcatalogresponse-slots)
 - [providers](#modelcatalogresponse-providers)
+- [pausedProviders](#modelcatalogresponse-pausedproviders)
+- [customModels](#modelcatalogresponse-custommodels)
 
 ### ModelCatalogResponse models
 
@@ -305,6 +312,21 @@ provider has currently selectable models; inspect models and keyPresent.
 
 ```ts
 providers: CatalogProvider[];
+```
+
+### ModelCatalogResponse pausedProviders
+
+```ts
+pausedProviders?: string[];
+```
+
+### ModelCatalogResponse customModels
+
+```ts
+customModels?: Record<string, Array<{
+    id: string;
+    name: string;
+}>>;
 ```
 
 ## RolePins
