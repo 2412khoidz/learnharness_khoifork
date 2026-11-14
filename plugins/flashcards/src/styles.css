@@ -99,4 +99,7 @@
 .fc-root .fc-model-settings { display: grid; gap: 16px; margin-top: 18px; }
 .fc-root .fc-model-overrides { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 10px; }
 .fc-root .fc-model-row, .fc-root .fc-thinking-row { display: inline-flex; }
+.fc-root .fc-optimizer-settings { margin-top: 18px; padding: 14px; border: 1px solid var(--border, #8885); border-radius: 10px; display: grid; gap: 10px; }
+.fc-root .fc-optimizer-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fc-root .fc-optimizer-title { font-size: 13px; font-weight: 600; margin: 0; }
 @media (max-width: 600px) { .fc-library { padding: 10px; } .fc-root.fc-review-surface { padding: 40px 12px 24px; } .fc-root .fc-review-card { padding: 20px; } }

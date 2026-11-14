@@ -7,6 +7,56 @@ const { PROVIDERS, fileStore, validateCredential, safeHttps, failure } = require
 
 const LABELS = { "github-copilot": "GitHub Copilot", xai: "Grok" };
 const APIS = new Set(["openai-responses", "openai-completions", "anthropic-messages"]);
+const COPILOT_HEADERS = {
+	"User-Agent": "GitHubCopilotChat/0.35.0",
+	"Editor-Version": "vscode/1.107.0",
+	"Editor-Plugin-Version": "copilot-chat/0.35.0",
+	"Copilot-Integration-Id": "vscode-chat",
+};
+const COPILOT_IMAGE_LIMITS = { images: { resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4718592, jpegQuality: 80 } } };
+const SUPPLEMENTAL_COPILOT_MODELS = [
+	{
+		id: "gemini-4-hydrogen",
+		name: "Gemini 4 Hydrogen",
+		api: "openai-completions",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 65536,
+		headers: { ...COPILOT_HEADERS },
+		compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false },
+		inputLimits: COPILOT_IMAGE_LIMITS,
+	},
+];
+function isCopilotNonChatId(id) {
+	return /(embedding|decision|rerank|whisper|tts|dall-e|imagen|moderation)/i.test(id);
+}
+function formatDisplayName(id) {
+	return id.split(/[-_]+/).filter(Boolean).map((p) => (/^\d+(?:\.\d+)?$/.test(p) ? p : p.charAt(0).toUpperCase() + p.slice(1))).join(" ");
+}
+function synthesizeCopilotModel(id) {
+	const isClaude = id.startsWith("claude-");
+	const isResponses = /^(gpt-5|gpt-6|gpt-7|o1|o3|o4|grok-|mai-)/i.test(id);
+	const api = isClaude ? "anthropic-messages" : isResponses ? "openai-responses" : "openai-completions";
+	return {
+		id,
+		name: formatDisplayName(id),
+		api,
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: isClaude || /^gemini-/i.test(id) ? 1048576 : 400000,
+		maxTokens: 65536,
+		headers: { ...COPILOT_HEADERS },
+		...(api === "openai-completions" ? { compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false } } : {}),
+		inputLimits: COPILOT_IMAGE_LIMITS,
+	};
+}
 const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const MESSAGES = {
 	storage: "The saved connection could not be read or written safely. Reopen the app or reconnect after resolving the credential-file problem.",
@@ -72,9 +122,26 @@ function createSubscriptions(options) {
 	function changed(entry) { entry.revision++; try { options.onChange?.(snapshotNow()); } catch { /* observer cannot break credential writes */ } }
 	function catalog(entry) {
 		let models = entry.provider?.getModels().filter((model) => APIS.has(model.api)) ?? [];
+		if (entry.providerId === "github-copilot") {
+			const seen = new Set(models.map((m) => m.id));
+			for (const extra of SUPPLEMENTAL_COPILOT_MODELS) {
+				if (!seen.has(extra.id)) { models.push(extra); seen.add(extra.id); }
+			}
+		}
 		if (!entry.state.credential) models = [];
 		else if (entry.providerId === "github-copilot" && !Array.isArray(entry.state.credential.availableModelIds)) models = [];
-		else if (entry.provider?.filterModels) models = [...entry.provider.filterModels(models, entry.state.credential)];
+		else {
+			if (entry.provider?.filterModels) models = [...entry.provider.filterModels(models, entry.state.credential)];
+			if (entry.providerId === "github-copilot" && Array.isArray(entry.state.credential.availableModelIds)) {
+				const known = new Set(models.map((m) => m.id));
+				for (const id of entry.state.credential.availableModelIds) {
+					if (typeof id === "string" && id && !known.has(id) && !isCopilotNonChatId(id)) {
+						models.push(synthesizeCopilotModel(id));
+						known.add(id);
+					}
+				}
+			}
+		}
 		if (JSON.stringify(models) !== JSON.stringify(entry.catalog)) { entry.catalog = models; entry.authorityRevision++; }
 	}
 	async function updateEndpoint(entry) {
@@ -190,7 +257,7 @@ function createSubscriptions(options) {
 		const connectionId = entry.state.connectionId, epoch = entry.epoch;
 		const unchanged = () => connectionId === entry.state.connectionId && epoch === entry.epoch && !entry.blocked && !closed && !paused;
 		try {
-			const model = entry.provider.getModels().find((m) => m.id === modelId);
+			const model = entry.catalog.find((m) => m.id === modelId) ?? entry.provider.getModels().find((m) => m.id === modelId);
 			if (!model) throw failure("stale");
 			const resolved = await entry.models.getAuth(model);
 			if (!unchanged()) throw failure("stale");

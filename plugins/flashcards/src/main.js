@@ -360,15 +360,60 @@ export function activate(ctx) {
   function mountSettings(container, hostSignal) {
     const scope = lifetime(hostSignal, ctx.signal), signal = scope.signal;
     const root = el('div', 'fc-root fc-settings'), error = el('p', 'fc-error'), fields = el('div'), modelArea = el('div', 'fc-model-settings');
-    error.setAttribute('role', 'alert'); root.append(fields, modelArea, error); container.append(root);
+    const optimizerArea = el('section', 'fc-optimizer-settings');
+    const optimizerTitle = el('h3', 'fc-optimizer-title', 'FSRS-6 Scheduling & Personal Optimizer');
+    const fuzzLabel = el('label', 'fc-check');
+    const fuzzCheckbox = el('input');
+    fuzzCheckbox.type = 'checkbox';
+    fuzzLabel.append(fuzzCheckbox, el('span', '', 'Load-balancing fuzz (spread intervals ≥ 3 days across neighboring days)'));
+    const optimizerMeta = el('p', 'fc-muted');
+    const optimizerActions = el('div', 'fc-actions');
+    const optimizerFeedback = el('p', 'fc-muted');
+    optimizerArea.append(optimizerTitle, fuzzLabel, optimizerMeta, optimizerActions, optimizerFeedback);
+    error.setAttribute('role', 'alert'); root.append(fields, modelArea, optimizerArea, error); container.append(root);
     let initialized = false, rows, followRows, modelPicker, thinkingPicker, modelPickers, modelRow, thinkingRow, catalog = null;
-    let overrideDraft = false, modelBusy = false;
+    let overrideDraft = false, modelBusy = false, optimizeBtn = null, resetWeightsBtn = null;
     const followingCheap = settings => !overrideDraft && !settings.modelOverride && settings.thinkingOverride == null;
     const showError = cause => { if (!signal.aborted) error.textContent = message(cause); };
+    const updateOptimizer = state => {
+      const opt = state.optimizerStatus ?? { reviewCount: 0, minRequired: 30, hasCustomWeights: Array.isArray(state.settings?.weights) && state.settings.weights.length === 21 };
+      fuzzCheckbox.checked = Boolean(state.settings?.fuzz);
+      const statusLabel = opt.hasCustomWeights ? 'Personalized FSRS-6 weights active' : 'Default FSRS-6 weights';
+      optimizerMeta.textContent = `${statusLabel} · ${opt.reviewCount}/${opt.minRequired} reviews logged`;
+      if (optimizeBtn) optimizeBtn.update({ disabled: opt.reviewCount < opt.minRequired });
+      if (resetWeightsBtn) resetWeightsBtn.update({ disabled: !opt.hasCustomWeights });
+    };
     const save = async patch => {
-      try { const state = await ctx.call('save-settings', patch); if (signal.aborted) return; error.textContent = ''; publish(state); rows?.update({ rows: settingsRows(snapshot.settings) }); updateModels(snapshot.settings); }
+      try { const state = await ctx.call('save-settings', patch); if (signal.aborted) return; error.textContent = ''; publish(state); rows?.update({ rows: settingsRows(snapshot.settings) }); updateModels(snapshot.settings); updateOptimizer(snapshot); }
       catch (cause) { showError(cause); throw cause; }
     };
+    fuzzCheckbox.addEventListener('change', async () => {
+      try { await save({ fuzz: fuzzCheckbox.checked }); } catch { if (!signal.aborted && snapshot) fuzzCheckbox.checked = Boolean(snapshot.settings?.fuzz); }
+    }, { signal });
+    optimizeBtn = button(optimizerActions, 'Optimize FSRS weights', async () => {
+      optimizerFeedback.textContent = '';
+      try {
+        const res = await ctx.call('optimize-fsrs', {});
+        if (signal.aborted) return;
+        if (res?.state) publish(res.state);
+        if (res?.result?.ok) {
+          optimizerFeedback.textContent = res.result.improvementPct > 0
+            ? `Optimized on ${res.result.reviewCount} reviews (${res.result.improvementPct}% lower log-loss).`
+            : `Evaluated ${res.result.reviewCount} reviews — default weights are already optimal.`;
+        } else {
+          const minReq = res?.result?.minRequired ?? 30;
+          const count = res?.result?.reviewCount ?? 0;
+          optimizerFeedback.textContent = `Need at least ${minReq} reviews (at least 10 multi-day transitions) to personalize weights (currently ${count}).`;
+        }
+      } catch (cause) { showError(cause); }
+    }, signal);
+    resetWeightsBtn = button(optimizerActions, 'Reset default weights', async () => {
+      optimizerFeedback.textContent = '';
+      try {
+        const state = await ctx.call('reset-fsrs-weights', {});
+        if (!signal.aborted) { publish(state); optimizerFeedback.textContent = 'Restored default FSRS-6 weights.'; }
+      } catch (cause) { showError(cause); }
+    }, signal);
     const settingsRows = settings => {
       const row = (key, label, value, type, parse = value => value, extras = {}) => ({ key, label, value, type, ...extras, onChange: async value => { try { await save({ [key]: parse(value) }); } catch (cause) { showError(cause); throw cause; } } });
       return [
@@ -420,8 +465,9 @@ export function activate(ctx) {
         modelPicker = widget(ctx.ui.mountModelPicker(modelSlot, { value: state.settings.modelOverride || undefined, onChange: async value => { try { await changeModels({ modelOverride: value, thinkingOverride: null }); } catch { /* Keep error visible. */ } } }, { signal }), signal);
         thinkingPicker = widget(ctx.ui.mountThinkingPicker(thinkingSlot, { model: state.settings.modelOverride || undefined, value: state.settings.thinkingOverride ?? undefined, onChange: async value => { try { await changeModels({ thinkingOverride: value }); } catch { /* Keep error visible. */ } } }, { signal }), signal);
         updateModels(state.settings);
+        updateOptimizer(state);
         void ctx.call('get-catalog').then(value => { if (!signal.aborted) { catalog = value; updateModels(snapshot.settings); } }).catch(showError);
-      } else { rows.update({ rows: settingsRows(state.settings) }); updateModels(state.settings); }
+      } else { rows.update({ rows: settingsRows(state.settings) }); updateModels(state.settings); updateOptimizer(state); }
     }, signal);
     return () => { scope.abort(); root.remove(); };
   }

@@ -20,19 +20,22 @@ const fingerprint = (input) => createHash('sha256').update(JSON.stringify(input)
 const activeBatch = (s) => s.batches.findLast(b => ['running', 'cancelling'].includes(b.status));
 const memberships = (s, id) => s.decks.filter(d => d.propositionIds.includes(id)).map(d => d.id);
 const isLocal = p => p.origin === 'file' || p.origin === 'manual';
-const reviewConfiguration = s => fingerprint({ retention: s.retention, learningSteps: s.learningSteps, relearningSteps: s.relearningSteps, dayStart: s.dayStart, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+const reviewConfiguration = s => fingerprint({ retention: s.retention, learningSteps: s.learningSteps, relearningSteps: s.relearningSteps, dayStart: s.dayStart, fuzz: Boolean(s.fuzz), weights: s.weights ?? null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
 const fail = (message) => { throw new Error(message); };
 function requiredText(value, label) { if (typeof value !== 'string' || !value.trim()) fail(`${label} must not be blank.`); return value; }
 function validateSettings(patch, old) {
-  const allowed = new Set(['retention', 'learningSteps', 'relearningSteps', 'dayStart', 'chunkBudget', 'modelOverride', 'thinkingOverride', 'language']);
+  const allowed = new Set(['retention', 'learningSteps', 'relearningSteps', 'dayStart', 'fuzz', 'weights', 'chunkBudget', 'modelOverride', 'thinkingOverride', 'language']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) fail(`Unsupported setting: ${key}`);
   const s = { ...old, ...patch };
   if (s.thinkingOverride === null) delete s.thinkingOverride;
+  if (s.weights === null) delete s.weights;
   if (!Number.isFinite(s.retention) || s.retention < .7 || s.retention > .99) fail('Desired retention must be between 70% and 99%.');
   for (const key of ['learningSteps', 'relearningSteps']) {
     if (!Array.isArray(s[key]) || !s[key].length || s[key].some((v, i, a) => !Number.isSafeInteger(v) || v < 1 || v >= 1440 || (i > 0 && v <= a[i - 1]))) fail('Use nonempty, increasing whole-minute steps shorter than one day.');
   }
   if (!Number.isInteger(s.dayStart) || s.dayStart < 0 || s.dayStart > 23) fail('Study-day start must be a whole hour from 0 to 23.');
+  if (s.fuzz !== undefined && typeof s.fuzz !== 'boolean') fail('Fuzz must be true or false.');
+  if (s.weights !== undefined && !scheduler.isValidWeights(s.weights)) fail('FSRS weights must be 21 valid finite parameters.');
   if (!Number.isSafeInteger(s.chunkBudget) || s.chunkBudget < 1) fail('Input budget must be a positive safe whole number.');
   if (s.modelOverride !== null && (!s.modelOverride || typeof s.modelOverride.provider !== 'string' || typeof s.modelOverride.id !== 'string')) fail('Invalid model override.');
   if (s.thinkingOverride !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(s.thinkingOverride)) fail('Invalid thinking level.');
@@ -146,7 +149,12 @@ function activate(ctx) {
       ...(b.kind === 'file' ? { failedChunkIds: b.chunks.filter(c => ['failed', 'cancelled', 'interrupted'].includes(c.status)).map(c => c.id) } : {}),
       error: b.chunks.map(c => applicationErrors.get(c.id)).find(Boolean),
     } : null;
-    return { revision: s.revision, settings: s.settings, decks, propositions, batch, statistics: statistics(s, live, now), ...(sourceCleanupError ? { cleanupError: sourceCleanupError } : {}) };
+    const optimizerStatus = {
+      reviewCount: s.reviews.length,
+      minRequired: scheduler.MIN_OPTIMIZER_REVIEWS,
+      hasCustomWeights: scheduler.isValidWeights(s.settings.weights),
+    };
+    return { revision: s.revision, settings: s.settings, decks, propositions, batch, statistics: statistics(s, live, now), optimizerStatus, ...(sourceCleanupError ? { cleanupError: sourceCleanupError } : {}) };
   }
   function finishBatch(s, b) {
     if (b.chunks.some(c => !['applied', 'failed', 'cancelled', 'interrupted'].includes(c.status))) return;
@@ -240,6 +248,15 @@ function activate(ctx) {
   register('get-state', view);
   register('get-catalog', () => ctx.inference.catalog());
   register('save-settings', patch => { change(s => { s.settings = validateSettings(patch, s.settings); }); return view(); });
+  register('optimize-fsrs', input => {
+    const result = scheduler.optimizeParameters(store.get().reviews, input);
+    if (result.ok) change(s => { s.settings = validateSettings({ weights: result.weights }, s.settings); });
+    return { state: view(), result };
+  });
+  register('reset-fsrs-weights', () => {
+    change(s => { s.settings = validateSettings({ weights: null }, s.settings); });
+    return view();
+  });
   register('create-deck', ({ name }) => { change(s => s.decks.push({ id: randomUUID(), name: requiredText(name, 'Deck name').trim(), newLimit: 20, propositionIds: [] })); return view(); });
   function createManualCard(input, newTarget) {
     const requestId = requiredText(input.requestId, 'Request ID');

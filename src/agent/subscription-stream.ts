@@ -2,7 +2,7 @@ import { normalizeContext, type Api, type AssistantMessage, type Model, type Pro
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
 import { NATIVE_SUBSCRIPTIONS, type NativeSubscriptionScope } from "../core/contracts/subscriptions.ts";
-import { nativeSubscriptionId, nativeSubscriptionBackgroundAllowed, subscriptionScope, subscriptionScopeCurrent, subscriptionAdmissionScope, subscriptionLease, subscriptionAbortController, subscriptionDenial } from "./subscription-bridge.ts";
+import { nativeSubscriptionId, nativeSubscriptionBackgroundAllowed, nativeSubscriptionModels, subscriptionScope, subscriptionScopeCurrent, subscriptionAdmissionScope, subscriptionLease, subscriptionAbortController, subscriptionDenial } from "./subscription-bridge.ts";
 import { markUnadmittedUsage, type SubscriptionDispatchLifecycle } from "./subscription-request-cycle.ts";
 import { capturePreparedBackgroundPayload } from "./background-capture.ts";
 
@@ -48,7 +48,9 @@ export function nativeSubscriptionStream(provider: Provider, background: () => b
 				const auth = await subscriptionLease(scope, purpose); check();
 				const authKeys = new Set(Object.keys(auth.headers ?? {}).map((key) => key.toLowerCase()));
 				if (Object.keys(options?.headers ?? {}).some((key) => authKeys.has(key.toLowerCase()))) throw new Error("Authorization override forbidden");
-				const nativeModel = provider.getModels().find((model) => model.id === logicalModel.id && model.api === logicalModel.api);
+				const registered = nativeSubscriptionModels().find((model) => model.provider === logicalModel.provider && model.id === logicalModel.id);
+				const nativeModel = provider.getModels().find((model) => model.id === logicalModel.id && model.api === logicalModel.api)
+					?? (registered && registered.api === logicalModel.api ? { ...registered, provider: nativeId } : undefined);
 				if (!nativeModel) throw new Error("Native model unavailable");
 				const transport = { ...nativeModel, ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}) };
 				const fetch = options?.fetch ?? globalThis.fetch;

@@ -84,6 +84,10 @@ export interface CanvasNode {
 	x: number;
 	y: number;
 	label: string;
+	/** Optional FSRS memory-state fill override. */
+	color?: string;
+	/** Optional outer ring highlight (e.g. overdue card or weak prerequisite risk). */
+	ringColor?: string;
 }
 
 /** One directed edge of the DERIVED view (chains-primary, 2026-09-30):
@@ -1680,6 +1684,25 @@ export class GraphCanvasRenderer {
 		// 4. Nodes: one cached Path2D, one fill.
 		ctx.fillStyle = data.colors.node;
 		ctx.fill(this.nodesPath);
+
+		// 4b. Per-node FSRS memory-state overlay (heatmap fill + prerequisite/due rings).
+		for (const n of data.nodes) {
+			if (!n.color && !n.ringColor) continue;
+			if (this.visible && !this.visible.has(n.id)) continue;
+			if (n.ringColor) {
+				ctx.beginPath();
+				ctx.arc(n.x, n.y, nodeR * 1.48, 0, Math.PI * 2);
+				ctx.strokeStyle = n.ringColor;
+				ctx.lineWidth = Math.max(1.5 / k, nodeR * 0.28);
+				ctx.stroke();
+			}
+			if (n.color) {
+				ctx.beginPath();
+				ctx.arc(n.x, n.y, nodeR, 0, Math.PI * 2);
+				ctx.fillStyle = n.color;
+				ctx.fill();
+			}
+		}
 
 		// 6. Node labels — one global gate, faded together. World-scaled
 		// with the graph (they grow as you zoom in, Obsidian-style).

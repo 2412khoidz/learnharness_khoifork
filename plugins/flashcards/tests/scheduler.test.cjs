@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const scheduler = require('../src/scheduler.cjs');
-const { createSchedule, rate, preview, chooseCue, studyDay, dayBounds, isDue } = scheduler;
+const { createSchedule, rate, preview, retrievability, optimizeParameters, chooseCue, studyDay, dayBounds, isDue, W } = scheduler;
 const MINUTE = 60000;
 const local = (day, hour = 12, minute = 0) => +new Date(2026, 0, day, hour, minute);
 const numeric = (s) => [s.stability, s.difficulty, s.elapsed_days, s.scheduled_days,
@@ -263,4 +263,52 @@ test('invalid ratings, clocks and steps fail explicitly', () => {
     assert.throws(() => rate(createSchedule(0), 1, 0, { learningSteps: steps }), /steps/);
   }
   assert.throws(() => rate({ state: 9 }, 1, 0), /state/);
+});
+
+test('retrievability decays continuously along FSRS-6 power curve and fuzz keeps rating ordering', () => {
+  const DAY = 86400000;
+  const fresh = createSchedule(local(1));
+  assert.equal(retrievability(fresh, local(1)), 0);
+
+  const reviewed = rate(fresh, 4, local(1));
+  assert.equal(retrievability(reviewed, local(1)), 1);
+  // At elapsed == stability days under default retention 0.9, R(t) == 0.9.
+  const atStability = retrievability(reviewed, local(1) + reviewed.stability * DAY);
+  assert.ok(Math.abs(atStability - 0.9) < 1e-4, `expected ~0.9 at t=S, got ${atStability}`);
+  const rAt30 = retrievability(reviewed, local(30));
+  const rAt90 = retrievability(reviewed, local(91));
+  assert.ok(rAt90 < rAt30 && rAt30 < atStability && rAt90 < 0.7);
+
+  // Build a review card with long enough interval (>= 3 days) to test fuzz.
+  const graduated = rate(rate(reviewed, 4, local(10)), 3, local(30));
+  const fuzzed = preview(graduated, local(60), { fuzz: true });
+  assert.ok(fuzzed[2].scheduled_days < fuzzed[3].scheduled_days);
+  assert.ok(fuzzed[3].scheduled_days < fuzzed[4].scheduled_days);
+  assert.deepEqual(fuzzed, preview(graduated, local(60), { fuzz: true }), 'deterministic seeded fuzz');
+});
+
+test('personal FSRS-6 parameter optimizer respects minimum sample gate and improves fit on custom user memory traces', () => {
+  const DAY = 86400000;
+  const tooFew = Array.from({ length: 10 }, (_, i) => ({ propositionId: `p${i}`, rating: 3, at: local(1) + i * DAY }));
+  const gate = optimizeParameters(tooFew);
+  assert.equal(gate.ok, false);
+  assert.deepEqual(gate.weights, [...W]);
+
+  // Construct a synthetic learner who forgets faster than default weights after ~5 days
+  // (repeated lapses even on cards graded Good earlier) so personalizing weights lowers log-loss.
+  const reviews = [];
+  const start = +new Date(2026, 0, 1, 12, 0);
+  for (let card = 0; card < 12; card++) {
+    const t0 = start + card * DAY * 0.1;
+    reviews.push({ propositionId: `prop-${card}`, rating: 3, at: t0 });
+    reviews.push({ propositionId: `prop-${card}`, rating: 1, at: t0 + 3 * DAY });
+    reviews.push({ propositionId: `prop-${card}`, rating: 1, at: t0 + 6 * DAY });
+    reviews.push({ propositionId: `prop-${card}`, rating: 3, at: t0 + 7 * DAY });
+  }
+  const optimized = optimizeParameters(reviews);
+  assert.equal(optimized.ok, true);
+  assert.equal(optimized.weights.length, 21);
+  assert.ok(scheduler.isValidWeights(optimized.weights));
+  assert.ok(optimized.lossAfter < optimized.lossBefore, `expected lower loss (${optimized.lossAfter} < ${optimized.lossBefore})`);
+  assert.ok(optimized.improvementPct > 0);
 });

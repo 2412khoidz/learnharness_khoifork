@@ -68,8 +68,8 @@ import { NotesImportControl, NotesImportErrors, NotesImportNotices, useNotesImpo
 import { PluginGraphActions } from "@/components/plugin-chrome";
 import { SettingsSlider as SettingSlider } from "@/components/settings/controls";
 import Link from "next/link";
-import { FileTextIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, WaypointsIcon } from "lucide-react";
-import { formatMathForPlainText, incrementalLayout, propositionSessionHref, wrapBareMathForDisplay, type GraphCostSummary, type GraphNode, type GraphSnapshot } from "@/src/core";
+import { AlertTriangleIcon, FileTextIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, WaypointsIcon } from "lucide-react";
+import { formatMathForPlainText, incrementalLayout, propositionSessionHref, wrapBareMathForDisplay, type GraphCostSummary, type GraphFsrsSummary, type GraphNode, type GraphSnapshot, type NodeFsrsInfo } from "@/src/core";
 import { planCostLabel } from "@/components/usage-format";
 import { CLUSTER_LIGHTNESS, GraphCanvasRenderer, type GraphRenderSettings } from "./graph-canvas.ts";
 import { useAppearance } from "@/components/settings/appearance";
@@ -123,6 +123,22 @@ const NODE_COLOR_TOKEN = "--primary";
 /** Per-device graph camera persistence (zoom+pan view state). v1 in the
  *  key: the stored shape is the renderer's d3 transform {k, x, y}. */
 const CAMERA_STORAGE_KEY = "lh.graph.camera.v1";
+
+type FsrsGraphFilter = "heatmap" | "due" | "prereq" | "off";
+
+function fsrsCanvasStyle(info: NodeFsrsInfo | undefined, mode: FsrsGraphFilter): { color?: string; ringColor?: string } {
+	if (!info || mode === "off") return {};
+	let color: string | undefined;
+	if (info.memoryBand === "overdue") color = "#ef4444";
+	else if (info.memoryBand === "decaying") color = "#f59e0b";
+	else if (info.memoryBand === "strong") color = "#10b981";
+	const ringColor = info.weakPrerequisites.length > 0
+		? "#f97316"
+		: info.memoryBand === "overdue"
+			? "rgba(239, 68, 68, 0.55)"
+			: undefined;
+	return { ...(color ? { color } : {}), ...(ringColor ? { ringColor } : {}) };
+}
 
 // ---- Render settings (the settings-panel controls) ------------------------
 //
@@ -976,6 +992,8 @@ export function GraphView({
 
 	// Search panel state: the query text + the settings section toggle.
 	const [query, setQuery] = useState("");
+	const [fsrsSummary, setFsrsSummary] = useState<GraphFsrsSummary | null>(null);
+	const [fsrsFilter, setFsrsFilter] = useState<FsrsGraphFilter>("heatmap");
 	// Surface-scoped Find: the chains overlay owns it while open.
 	const searchInputRef = useRef<HTMLInputElement>(null);
 	// Render settings: SERVER-persisted (data/render-settings.json via
@@ -1044,20 +1062,36 @@ export function GraphView({
 	const rendererRef = useRef<GraphCanvasRenderer | null>(null);
 	const posRef = useRef<Map<string, { x: number; y: number }> | null>(null);
 
-	// The id set that survives the current search — consumed by the
-	// visibility feed and the "no matches" hint.
-	const visibleIds = useMemo(() => {
-		const set = new Set<string>();
-		if (snapshot)
-			for (const node of snapshot.nodes) {
-				if (isNodeVisible(node, query)) set.add(node.id);
-			}
-		return set;
-	}, [snapshot, query]);
-
 	// Fetch the derived graph. Re-runs when a background pipeline run
 	// finishes (refreshTick) — its merges just landed in the ledger.
 	const [refreshTick, setRefreshTick] = useState(0);
+
+	// The id set that survives the current search + FSRS filter.
+	const visibleIds = useMemo(() => {
+		const set = new Set<string>();
+		if (!snapshot) return set;
+		let allowed: Set<string> | null = null;
+		if (fsrsSummary && fsrsFilter === "due") {
+			allowed = new Set(
+				Object.values(fsrsSummary.nodes)
+					.filter((n) => n.memoryBand === "overdue" || n.memoryBand === "decaying")
+					.map((n) => n.id),
+			);
+		} else if (fsrsSummary && fsrsFilter === "prereq") {
+			allowed = new Set<string>();
+			for (const info of Object.values(fsrsSummary.nodes)) {
+				if (info.weakPrerequisites.length > 0) {
+					allowed.add(info.id);
+					for (const pre of info.weakPrerequisites) allowed.add(pre.id);
+				}
+			}
+		}
+		for (const node of snapshot.nodes) {
+			if (allowed && !allowed.has(node.id)) continue;
+			if (isNodeVisible(node, query)) set.add(node.id);
+		}
+		return set;
+	}, [snapshot, query, fsrsSummary, fsrsFilter]);
 	// The chain table overlay (chains-overlay plan, 2026-09-29) —
 	// component-local: a browsing surface, not graph state.
 	const [chainsOpen, setChainsOpen] = useState(false);
@@ -1085,6 +1119,23 @@ export function GraphView({
 			cancelled = true;
 		};
 	}, [refreshTick]);
+
+	const refreshFsrs = useCallback(() => {
+		fetch("/api/graph/fsrs")
+			.then((res) => (res.ok ? (res.json() as Promise<GraphFsrsSummary>) : null))
+			.then((data) => {
+				if (data) setFsrsSummary(data);
+			})
+			.catch(() => {});
+	}, []);
+	useEffect(() => {
+		refreshFsrs();
+	}, [refreshFsrs, refreshTick]);
+	useEffect(() => {
+		const onFocus = () => refreshFsrs();
+		window.addEventListener("focus", onFocus);
+		return () => window.removeEventListener("focus", onFocus);
+	}, [refreshFsrs]);
 
 	// Notes import (the format-agnostic front door): file picker → POST
 	// /api/graph/import; the runs surface in the status chips below, and the
@@ -1411,6 +1462,7 @@ export function GraphView({
 				x: positions.get(n.id)?.x ?? 0,
 				y: positions.get(n.id)?.y ?? 0,
 				label: formatMathForPlainText(n.name),
+				...fsrsCanvasStyle(fsrsSummary?.nodes[n.id], fsrsFilter),
 			})),
 			edges: snapshot.edges.map((e) => ({ from: e.from, to: e.to })),
 			logicalEdges: snapshot.logicalEdges.map((e) => ({ from: e.from, to: e.to })),
@@ -1426,7 +1478,7 @@ export function GraphView({
 			// Match the app typography (Geist via the body's stack).
 			fontFamily: getComputedStyle(document.body).fontFamily,
 		});
-	}, [snapshot, isEmpty, resolvedMode, colors]);
+	}, [snapshot, isEmpty, resolvedMode, colors, fsrsSummary, fsrsFilter]);
 
 	// Feed #2 — settings: just marks the frame dirty. No rebuild, no
 	// re-layout, no camera touch (the whole point of the new renderer).
@@ -1438,10 +1490,11 @@ export function GraphView({
 	// Feed #3 — visibility: hidden nodes drop out of rendering, picking,
 	// hover, AND labels; edges drop when either endpoint is hidden.
 	useEffect(() => {
-		rendererRef.current?.setVisible(query.trim() ? visibleIds : null);
+		const filterActive = query.trim() !== "" || (fsrsSummary !== null && (fsrsFilter === "due" || fsrsFilter === "prereq"));
+		rendererRef.current?.setVisible(filterActive ? visibleIds : null);
 		// The open detail card cannot outlive its node's visibility.
 		setSelected((sel) => (sel && visibleIds.has(sel.node.id) ? sel : null));
-	}, [visibleIds, query]);
+	}, [visibleIds, query, fsrsSummary, fsrsFilter]);
 
 	// Feed #4 — region tuning. `isEmpty` in the deps (same as Feed #2):
 	// the settings fetch resolves BEFORE the snapshot creates the renderer,
@@ -1604,6 +1657,60 @@ export function GraphView({
 			    row so narrow windows can never push it over the composer
 			    the way the old bottom-left stack did; the whole top-right
 			    cluster is one column, right-aligned. */}
+			{!isEmpty && fsrsSummary && (fsrsSummary.counts.tracked > 0 || fsrsSummary.counts.prereqRisk > 0) && (
+				<div
+					data-testid="graph-fsrs-bar"
+					className="flex flex-wrap items-center gap-1.5 rounded-xl border bg-card/85 px-2 py-1 text-[11px] shadow-lg backdrop-blur"
+				>
+					<span className="flex items-center gap-1.5 pr-1 text-muted-foreground" title="FSRS-6 Flashcards Memory Status">
+						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-emerald-500" />{fsrsSummary.counts.strong}</span>
+						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-amber-500" />{fsrsSummary.counts.decaying}</span>
+						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-red-500" />{fsrsSummary.counts.overdue}</span>
+					</span>
+					{(
+						[
+							["heatmap", "FSRS"],
+							["due", `Due (${fsrsSummary.counts.overdue + fsrsSummary.counts.decaying})`],
+							...(fsrsSummary.counts.prereqRisk > 0 ? [["prereq", `Prereq (${fsrsSummary.counts.prereqRisk})`] as const] : []),
+							["off", "Off"],
+						] as const
+					).map(([mode, label]) => (
+						<button
+							key={mode}
+							type="button"
+							onClick={() => setFsrsFilter(mode)}
+							className={`rounded-md px-1.5 py-0.5 transition-colors ${
+								fsrsFilter === mode
+									? "bg-foreground text-background font-medium"
+									: "text-muted-foreground hover:bg-accent hover:text-foreground"
+							}`}
+						>
+							{label}
+						</button>
+					))}
+					{onPracticeSelectionChange && (fsrsSummary.counts.overdue + fsrsSummary.counts.decaying + fsrsSummary.counts.prereqRisk) > 0 && (
+						<button
+							type="button"
+							onClick={() => {
+								if (!snapshot) return;
+								const weakIds = new Set<string>();
+								for (const info of Object.values(fsrsSummary.nodes)) {
+									if (info.memoryBand === "overdue" || info.memoryBand === "decaying") weakIds.add(info.id);
+									for (const pre of info.weakPrerequisites) weakIds.add(pre.id);
+								}
+								const pool = snapshot.propositions.length > 0 ? snapshot.propositions : snapshot.nodes;
+								const picked = pool
+									.filter((node) => weakIds.has(node.id))
+									.map((node) => ({ id: node.id, name: node.name, statement: node.statement }));
+								if (picked.length > 0) onPracticeSelectionChange(picked);
+							}}
+							className="rounded-md border border-border/70 px-1.5 py-0.5 font-medium text-foreground transition-colors hover:bg-accent"
+						>
+							Practice weak
+						</button>
+					)}
+				</div>
+			)}
 			{costs && costs.runs.length > 0 && <GraphCostControl costs={costs} />}
 			{pipelineRuns.map((run) => (
 				<div
@@ -1630,6 +1737,65 @@ export function GraphView({
 					className="lh-no-drag absolute z-10 max-h-[min(28rem,calc(100%-2rem))] w-96 max-w-[calc(100%-1rem)] overflow-y-auto rounded-xl border bg-card p-4 text-left shadow-lg"
 				>
 					<NodeCardText name={selected.node.name} statement={selected.node.statement} />
+					{(() => {
+						const fsrs = fsrsSummary?.nodes[selected.node.id];
+						if (!fsrs || (fsrs.state === "untracked" && fsrs.weakPrerequisites.length === 0)) return null;
+						const pct = fsrs.retrievability !== null ? Math.round(fsrs.retrievability * 100) : null;
+						const badgeColor = fsrs.memoryBand === "overdue"
+							? "text-red-500"
+							: fsrs.memoryBand === "decaying"
+								? "text-amber-500"
+								: fsrs.memoryBand === "strong"
+									? "text-emerald-500"
+									: "text-muted-foreground";
+						return (
+							<div className="mt-3 rounded-lg border bg-background/60 p-2.5 text-xs">
+								{fsrs.state !== "untracked" && (
+									<div className="flex flex-wrap items-center justify-between gap-2">
+										<span className={`font-medium capitalize ${badgeColor}`}>
+											FSRS-6 · {fsrs.due ? "Due" : fsrs.memoryBand}
+										</span>
+										<span className="tabular-nums text-muted-foreground">
+											{pct !== null ? `R=${pct}% · ` : ""}S={fsrs.stability}d · D={fsrs.difficulty}
+										</span>
+									</div>
+								)}
+								{fsrs.weakPrerequisites.length > 0 && (
+									<div className="mt-1.5 flex flex-col gap-1 text-amber-600 dark:text-amber-400">
+										<div className="flex items-center gap-1 font-medium">
+											<AlertTriangleIcon className="size-3.5 shrink-0" />
+											<span>Weak prerequisite{fsrs.weakPrerequisites.length > 1 ? "s" : ""}:</span>
+										</div>
+										<ul className="list-disc pl-4 text-[11px] text-muted-foreground">
+											{fsrs.weakPrerequisites.map((pre) => (
+												<li key={pre.id}>
+													{formatMathForPlainText(pre.name)} ({Math.round(pre.retrievability * 100)}%
+													{pre.due ? ", due" : ""})
+												</li>
+											))}
+										</ul>
+									</div>
+								)}
+								{onPracticeSelectionChange && (fsrs.memoryBand === "overdue" || fsrs.memoryBand === "decaying" || fsrs.weakPrerequisites.length > 0) && (
+									<button
+										type="button"
+										onClick={() => {
+											if (!snapshot) return;
+											const ids = new Set<string>([selected.node.id, ...fsrs.weakPrerequisites.map((p) => p.id)]);
+											const pool = snapshot.propositions.length > 0 ? snapshot.propositions : snapshot.nodes;
+											const picked = pool
+												.filter((node) => ids.has(node.id))
+												.map((node) => ({ id: node.id, name: node.name, statement: node.statement }));
+											if (picked.length > 0) onPracticeSelectionChange(picked);
+										}}
+										className="mt-2 rounded-md border px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent"
+									>
+										Select for Practice
+									</button>
+								)}
+							</div>
+						);
+					})()}
 					{selected.sourceIds.length > 0 ? (
 						<div className="mt-3 flex flex-col gap-1">
 							<div className="text-xs text-muted-foreground">Sessions</div>

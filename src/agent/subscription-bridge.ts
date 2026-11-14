@@ -2,6 +2,7 @@ import type { Api, Model, ModelAuth } from "@earendil-works/pi-ai";
 import { onWebSubscriptionPacket, webSubscriptionRequest, webSubscriptionsEnabled } from "./subscription-runtime.ts";
 import { NATIVE_SUBSCRIPTIONS, type NativeSubscriptionProviderId, type NativeSubscriptionScope, type NativeSubscriptionSnapshot, type NativeSubscriptionStatus } from "../core/contracts/subscriptions.ts";
 import type { AdmissionScope, NoDispatchKind } from "./chatgpt-request-cycle.ts";
+import { registerDynamicProviderModels } from "./live-models.ts";
 
 interface Pending { op: string; resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
 interface State {
@@ -41,7 +42,11 @@ function accept(state: State, snapshot: NativeSubscriptionSnapshot) {
 		}
 		state.statuses.set(entry.providerId, entry);
 		const descriptor = NATIVE_SUBSCRIPTIONS.find((p) => p.providerId === entry.providerId)!;
-		state.models.set(entry.providerId, entry.available && entry.connected ? (snapshot.models[entry.providerId] ?? []).filter((m) => m.provider === entry.providerId).map((m) => ({ ...m, provider: descriptor.logicalId })) : []);
+		const providerModels = entry.available && entry.connected
+			? (snapshot.models[entry.providerId] ?? []).filter((m) => m.provider === entry.providerId)
+			: [];
+		if (providerModels.length > 0) registerDynamicProviderModels(entry.providerId, providerModels);
+		state.models.set(entry.providerId, providerModels.map((m) => ({ ...m, provider: descriptor.logicalId })));
 		changed ||= !previous || entry.revision !== previous.revision;
 	}
 	if (changed) notify(state);
