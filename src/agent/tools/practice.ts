@@ -45,6 +45,8 @@ export interface PracticeToolContext {
 	 *  Each absent context (tests) = absent from the registry. */
 	graph?: GraphToolContext;
 	jobs?: JobToolContext;
+	/** Optional callback triggered when `conclude` closes a problem with targets. */
+	onConclude?: (input: ConcludeInput, targets: string[]) => void;
 }
 
 /** TURN-SCOPED GATE STATE (the BKT incident, 2026-10-05): the gates used
@@ -59,13 +61,26 @@ export interface PracticeToolContext {
  *  this closure — the intra-turn truth the record cannot hold yet. */
 export interface PracticeGate {
 	problemActive: boolean;
+	activeTargets?: string[];
+	onConclude?: (input: ConcludeInput, targets: string[]) => void;
 }
 
 /** Seed the turn's gate from the record (result-aware activeProblemOf —
  *  only a cleanly-posed problem counts). */
 export function createPracticeGate(ctx: PracticeToolContext): PracticeGate {
 	const record = ctx.chatStore.getChat(ctx.chatId);
-	return { problemActive: record ? activeProblemOf(record.messages) !== null : false };
+	const active = record ? activeProblemOf(record.messages) : null;
+	const rawTarget =
+		(active?.input as { target?: unknown } | undefined)?.target ??
+		(active?.pluginProblem as { target?: unknown } | undefined)?.target;
+	const activeTargets = Array.isArray(rawTarget)
+		? rawTarget.filter((t): t is string => typeof t === "string")
+		: [];
+	return {
+		problemActive: active !== null,
+		activeTargets,
+		onConclude: ctx.onConclude,
+	};
 }
 
 // ─── problem: the pose ───────────────────────────────────────────────────────
@@ -128,6 +143,7 @@ export function admitPracticeProblem(gate: PracticeGate, input: { target?: strin
 		if (unknown.length) return invalidInputResult(toolName, [`target ${JSON.stringify(unknown)} is not a known proposition — targets must be proposition ids from the session context; if the material is not in the map, omit target entirely`]);
 	}
 	gate.problemActive = true;
+	gate.activeTargets = input.target ? [...input.target] : [];
 	return undefined;
 }
 
@@ -180,11 +196,18 @@ export function concludeTool(gate: PracticeGate): AgentTool<typeof concludeInput
 		parameters: concludeInputObject,
 		prepareArguments: (args: unknown) => healEncodedArguments(args, concludeInputObject) as never,
 		executionMode: "sequential",
-		execute: async (_toolCallId, _input) => {
+		execute: async (_toolCallId, input) => {
 			if (!gate.problemActive) {
 				return invalidInputResult("conclude", ["no active problem to conclude — pose one first"]);
 			}
+			const targets = gate.activeTargets ?? [];
 			gate.problemActive = false;
+			gate.activeTargets = [];
+			try {
+				gate.onConclude?.(input, targets);
+			} catch {
+				// Non-fatal: never block concludeResult
+			}
 			return concludeResult();
 		},
 	};

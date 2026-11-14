@@ -274,6 +274,21 @@ const SUPPLEMENTAL_COPILOT_MODELS = [
 		compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false },
 		inputLimits: COPILOT_IMAGE_LIMITS,
 	},
+	{
+		id: "gemini-4-carbon",
+		name: "Gemini 4 Carbon",
+		api: "openai-completions",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 2.0, output: 10.0, cacheRead: 0.1, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 65536,
+		headers: { ...COPILOT_HEADERS },
+		compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false },
+		inputLimits: COPILOT_IMAGE_LIMITS,
+	},
 ];
 function isCopilotNonChatId(id) {
 	return /(embedding|decision|rerank|whisper|tts|dall-e|imagen|moderation)/i.test(id);

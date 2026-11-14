@@ -148,6 +148,8 @@ export interface AgentBuildOptions {
 	 *  fresh per turn, honoring enabled overrides (switch on + file
 	 *  exists); absent → the cached pure-source composition. */
 	promptSwitches?: Record<string, boolean>;
+	/** Additional dynamic system directives (e.g., active Exam Prep mode/pace). */
+	extraInstructions?: readonly string[];
 	/** Native conversation identity: the existing persisted chat id, reused
 	 * across reconstructed prober, teacher, and practice Agents.
 	 * Debug: when set AND LH_PROVIDER_EVENTS=1, raw provider stream events
@@ -233,8 +235,12 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 	const problemTools = kind === "practice" && practice && opts.chatId
 		? pluginProblemTools(contributions?.problemTypes ?? [], opts.chatId, practice.gate, practice.graphNodes) : [];
 	// Never replace the builtin prompt or tools, or mutate an already-running Agent.
-	const systemPrompt = contributions?.instructions.length
-		? [builtinPrompt, ...contributions.instructions].join("\n\n---\n\n")
+	const suffixInstructions = [
+		...(contributions?.instructions ?? []),
+		...(opts.extraInstructions ?? []),
+	];
+	const systemPrompt = suffixInstructions.length
+		? [builtinPrompt, ...suffixInstructions].join("\n\n---\n\n")
 		: builtinPrompt;
 	// Debug recorder (owner, 2026-10-04): raw provider events when
 	// LH_PROVIDER_EVENTS=1 and the caller handed a chatId; undefined is

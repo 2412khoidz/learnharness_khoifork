@@ -29,6 +29,8 @@ export interface NodeFsrsInfo {
 	reps: number;
 	lapses: number;
 	weakPrerequisites: WeakPrerequisiteInfo[];
+	dependentCount: number;
+	isFoundation: boolean;
 }
 
 export interface GraphFsrsSummary {
@@ -39,9 +41,12 @@ export interface GraphFsrsSummary {
 		decaying: number;
 		overdue: number;
 		prereqRisk: number;
+		untrackedFoundations: number;
+		weakFoundations: number;
 	};
 	hasCustomWeights: boolean;
 	reviewCount: number;
+	examReadinessPct: number;
 }
 
 export interface FlashcardsScheduleSnapshot {
@@ -120,16 +125,26 @@ function stateLabel(state: number | undefined): FsrsNodeStateLabel {
 export function emptyGraphFsrsSummary(): GraphFsrsSummary {
 	return {
 		nodes: {},
-		counts: { tracked: 0, strong: 0, decaying: 0, overdue: 0, prereqRisk: 0 },
+		counts: {
+			tracked: 0,
+			strong: 0,
+			decaying: 0,
+			overdue: 0,
+			prereqRisk: 0,
+			untrackedFoundations: 0,
+			weakFoundations: 0,
+		},
 		hasCustomWeights: false,
 		reviewCount: 0,
+		examReadinessPct: 0,
 	};
 }
 
 /**
  * Pure derivation joining Knowledge Graph propositions and reasoning chains
  * with Flashcards FSRS-6 scheduling state, including upstream prerequisite
- * decay alerts (`A -> B` where A's retrievability < 0.80 or A is overdue).
+ * decay alerts (`A -> B` where A's retrievability < 0.80 or A is overdue)
+ * and downstream foundation dependency counts.
  */
 export function computeGraphFsrsSummary(
 	snapshot: Pick<GraphSnapshot, "nodes" | "chains">,
@@ -148,6 +163,35 @@ export function computeGraphFsrsSummary(
 		: 4;
 
 	const nodesById = new Map(snapshot.nodes.map((n) => [n.id, n]));
+	const dependentsOf = new Map<string, Set<string>>();
+	for (const chain of snapshot.chains ?? []) {
+		if (!nodesById.has(chain.conclusion)) continue;
+		for (const premiseId of chain.premises) {
+			if (!nodesById.has(premiseId) || premiseId === chain.conclusion) continue;
+			let targets = dependentsOf.get(premiseId);
+			if (!targets) {
+				targets = new Set();
+				dependentsOf.set(premiseId, targets);
+			}
+			targets.add(chain.conclusion);
+		}
+	}
+
+	const dependentCountById = new Map<string, number>();
+	for (const node of snapshot.nodes) {
+		const visited = new Set<string>();
+		const queue: string[] = [...(dependentsOf.get(node.id) ?? [])];
+		while (queue.length > 0) {
+			const nextId = queue.shift()!;
+			if (nextId === node.id || visited.has(nextId)) continue;
+			visited.add(nextId);
+			for (const childId of dependentsOf.get(nextId) ?? []) {
+				if (!visited.has(childId) && childId !== node.id) queue.push(childId);
+			}
+		}
+		dependentCountById.set(node.id, visited.size);
+	}
+
 	const nodes: Record<string, NodeFsrsInfo> = {};
 	let tracked = 0;
 	let strong = 0;
@@ -155,9 +199,29 @@ export function computeGraphFsrsSummary(
 	let overdue = 0;
 
 	for (const node of snapshot.nodes) {
+		const dependentCount = dependentCountById.get(node.id) ?? 0;
+		const isFoundation = dependentCount >= 1;
 		const prop = flashcards.propositions[node.id];
 		const hasActiveCues = Array.isArray(prop?.cues) && prop.cues.some((c) => !c.deleted);
-		if (!prop || !hasActiveCues || !prop.schedule) continue;
+		if (!prop || !hasActiveCues || !prop.schedule) {
+			if (isFoundation) {
+				nodes[node.id] = {
+					id: node.id,
+					state: "untracked",
+					memoryBand: "untracked",
+					retrievability: null,
+					stability: 0,
+					difficulty: 0,
+					due: false,
+					reps: 0,
+					lapses: 0,
+					weakPrerequisites: [],
+					dependentCount,
+					isFoundation,
+				};
+			}
+			continue;
+		}
 
 		tracked++;
 		const s = prop.schedule;
@@ -190,6 +254,8 @@ export function computeGraphFsrsSummary(
 			reps: s.reps ?? 0,
 			lapses: s.lapses ?? 0,
 			weakPrerequisites: [],
+			dependentCount,
+			isFoundation,
 		};
 	}
 
@@ -198,7 +264,7 @@ export function computeGraphFsrsSummary(
 		if (!nodesById.has(chain.conclusion)) continue;
 		for (const premiseId of chain.premises) {
 			const premiseInfo = nodes[premiseId];
-			if (!premiseInfo) continue;
+			if (!premiseInfo || premiseInfo.state === "untracked") continue;
 			const isWeak =
 				premiseInfo.memoryBand === "overdue" ||
 				(premiseInfo.retrievability !== null && premiseInfo.retrievability < 0.80);
@@ -213,6 +279,7 @@ export function computeGraphFsrsSummary(
 			seen.add(premiseId);
 
 			if (!nodes[chain.conclusion]) {
+				const conclusionDepCount = dependentCountById.get(chain.conclusion) ?? 0;
 				nodes[chain.conclusion] = {
 					id: chain.conclusion,
 					state: "untracked",
@@ -224,6 +291,8 @@ export function computeGraphFsrsSummary(
 					reps: 0,
 					lapses: 0,
 					weakPrerequisites: [],
+					dependentCount: conclusionDepCount,
+					isFoundation: conclusionDepCount >= 1,
 				};
 			}
 			nodes[chain.conclusion]!.weakPrerequisites.push({
@@ -236,14 +305,53 @@ export function computeGraphFsrsSummary(
 	}
 
 	let prereqRisk = 0;
+	let untrackedFoundations = 0;
+	let weakFoundations = 0;
 	for (const info of Object.values(nodes)) {
 		if (info.weakPrerequisites.length > 0) prereqRisk++;
+		if (info.isFoundation) {
+			if (info.state === "untracked") untrackedFoundations++;
+			else if (info.memoryBand === "overdue" || info.memoryBand === "decaying" || info.due) weakFoundations++;
+		}
+	}
+
+	let examReadinessPct = 0;
+	if (snapshot.nodes.length > 0) {
+		let weightedSum = 0;
+		let totalWeight = 0;
+		for (const node of snapshot.nodes) {
+			const dependentCount = dependentCountById.get(node.id) ?? 0;
+			const weight = dependentCount >= 1 ? 2 : 1;
+			const info = nodes[node.id];
+			let nodeScore = 0.35;
+			if (info && info.state !== "untracked") {
+				if (info.retrievability !== null) {
+					nodeScore = info.due ? info.retrievability * 0.6 : info.retrievability;
+				} else if (info.state === "new") {
+					nodeScore = 0.5;
+				}
+			}
+			weightedSum += weight * nodeScore;
+			totalWeight += weight;
+		}
+		if (totalWeight > 0) {
+			examReadinessPct = Math.round(Math.min(100, Math.max(0, (weightedSum / totalWeight) * 100)));
+		}
 	}
 
 	return {
 		nodes,
-		counts: { tracked, strong, decaying, overdue, prereqRisk },
+		counts: {
+			tracked,
+			strong,
+			decaying,
+			overdue,
+			prereqRisk,
+			untrackedFoundations,
+			weakFoundations,
+		},
 		hasCustomWeights,
 		reviewCount: Array.isArray(flashcards.reviews) ? flashcards.reviews.length : 0,
+		examReadinessPct,
 	};
 }

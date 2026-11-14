@@ -124,7 +124,7 @@ const NODE_COLOR_TOKEN = "--primary";
  *  key: the stored shape is the renderer's d3 transform {k, x, y}. */
 const CAMERA_STORAGE_KEY = "lh.graph.camera.v1";
 
-type FsrsGraphFilter = "heatmap" | "due" | "prereq" | "off";
+type FsrsGraphFilter = "heatmap" | "due" | "foundations" | "prereq" | "off";
 
 function fsrsCanvasStyle(info: NodeFsrsInfo | undefined, mode: FsrsGraphFilter): { color?: string; ringColor?: string } {
 	if (!info || mode === "off") return {};
@@ -132,11 +132,14 @@ function fsrsCanvasStyle(info: NodeFsrsInfo | undefined, mode: FsrsGraphFilter):
 	if (info.memoryBand === "overdue") color = "#ef4444";
 	else if (info.memoryBand === "decaying") color = "#f59e0b";
 	else if (info.memoryBand === "strong") color = "#10b981";
+	else if (mode === "foundations" && info.isFoundation) color = "#6366f1";
 	const ringColor = info.weakPrerequisites.length > 0
 		? "#f97316"
-		: info.memoryBand === "overdue"
-			? "rgba(239, 68, 68, 0.55)"
-			: undefined;
+		: info.isFoundation && info.state === "untracked"
+			? "#6366f1"
+			: info.memoryBand === "overdue"
+				? "rgba(239, 68, 68, 0.55)"
+				: undefined;
 	return { ...(color ? { color } : {}), ...(ringColor ? { ringColor } : {}) };
 }
 
@@ -1077,6 +1080,12 @@ export function GraphView({
 					.filter((n) => n.memoryBand === "overdue" || n.memoryBand === "decaying")
 					.map((n) => n.id),
 			);
+		} else if (fsrsSummary && fsrsFilter === "foundations") {
+			allowed = new Set(
+				Object.values(fsrsSummary.nodes)
+					.filter((n) => n.isFoundation)
+					.map((n) => n.id),
+			);
 		} else if (fsrsSummary && fsrsFilter === "prereq") {
 			allowed = new Set<string>();
 			for (const info of Object.values(fsrsSummary.nodes)) {
@@ -1490,7 +1499,7 @@ export function GraphView({
 	// Feed #3 — visibility: hidden nodes drop out of rendering, picking,
 	// hover, AND labels; edges drop when either endpoint is hidden.
 	useEffect(() => {
-		const filterActive = query.trim() !== "" || (fsrsSummary !== null && (fsrsFilter === "due" || fsrsFilter === "prereq"));
+		const filterActive = query.trim() !== "" || (fsrsSummary !== null && (fsrsFilter === "due" || fsrsFilter === "foundations" || fsrsFilter === "prereq"));
 		rendererRef.current?.setVisible(filterActive ? visibleIds : null);
 		// The open detail card cannot outlive its node's visibility.
 		setSelected((sel) => (sel && visibleIds.has(sel.node.id) ? sel : null));
@@ -1657,7 +1666,7 @@ export function GraphView({
 			    row so narrow windows can never push it over the composer
 			    the way the old bottom-left stack did; the whole top-right
 			    cluster is one column, right-aligned. */}
-			{!isEmpty && fsrsSummary && (fsrsSummary.counts.tracked > 0 || fsrsSummary.counts.prereqRisk > 0) && (
+			{!isEmpty && fsrsSummary && (fsrsSummary.counts.tracked > 0 || fsrsSummary.counts.prereqRisk > 0 || Object.values(fsrsSummary.nodes).some((n) => n.isFoundation)) && (
 				<div
 					data-testid="graph-fsrs-bar"
 					className="flex flex-wrap items-center gap-1.5 rounded-xl border bg-card/85 px-2 py-1 text-[11px] shadow-lg backdrop-blur"
@@ -1667,27 +1676,36 @@ export function GraphView({
 						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-amber-500" />{fsrsSummary.counts.decaying}</span>
 						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-red-500" />{fsrsSummary.counts.overdue}</span>
 					</span>
-					{(
-						[
+					{(() => {
+						const foundationCount = Object.values(fsrsSummary.nodes).filter((n) => n.isFoundation).length;
+						const untrackedCount = fsrsSummary.counts.untrackedFoundations ?? 0;
+						const items: Array<readonly [FsrsGraphFilter, string]> = [
 							["heatmap", "FSRS"],
 							["due", `Due (${fsrsSummary.counts.overdue + fsrsSummary.counts.decaying})`],
+							...(foundationCount > 0
+								? [[
+									"foundations",
+									untrackedCount > 0 ? `Foundations (${foundationCount} · ${untrackedCount} untracked)` : `Foundations (${foundationCount})`,
+								] as const]
+								: []),
 							...(fsrsSummary.counts.prereqRisk > 0 ? [["prereq", `Prereq (${fsrsSummary.counts.prereqRisk})`] as const] : []),
 							["off", "Off"],
-						] as const
-					).map(([mode, label]) => (
-						<button
-							key={mode}
-							type="button"
-							onClick={() => setFsrsFilter(mode)}
-							className={`rounded-md px-1.5 py-0.5 transition-colors ${
-								fsrsFilter === mode
-									? "bg-foreground text-background font-medium"
-									: "text-muted-foreground hover:bg-accent hover:text-foreground"
-							}`}
-						>
-							{label}
-						</button>
-					))}
+						];
+						return items.map(([mode, label]) => (
+							<button
+								key={mode}
+								type="button"
+								onClick={() => setFsrsFilter(mode)}
+								className={`rounded-md px-1.5 py-0.5 transition-colors ${
+									fsrsFilter === mode
+										? "bg-foreground text-background font-medium"
+										: "text-muted-foreground hover:bg-accent hover:text-foreground"
+								}`}
+							>
+								{label}
+							</button>
+						));
+					})()}
 					{onPracticeSelectionChange && (fsrsSummary.counts.overdue + fsrsSummary.counts.decaying + fsrsSummary.counts.prereqRisk) > 0 && (
 						<button
 							type="button"
@@ -1739,7 +1757,7 @@ export function GraphView({
 					<NodeCardText name={selected.node.name} statement={selected.node.statement} />
 					{(() => {
 						const fsrs = fsrsSummary?.nodes[selected.node.id];
-						if (!fsrs || (fsrs.state === "untracked" && fsrs.weakPrerequisites.length === 0)) return null;
+						if (!fsrs || (fsrs.state === "untracked" && fsrs.weakPrerequisites.length === 0 && !fsrs.isFoundation)) return null;
 						const pct = fsrs.retrievability !== null ? Math.round(fsrs.retrievability * 100) : null;
 						const badgeColor = fsrs.memoryBand === "overdue"
 							? "text-red-500"
@@ -1758,6 +1776,12 @@ export function GraphView({
 										<span className="tabular-nums text-muted-foreground">
 											{pct !== null ? `R=${pct}% · ` : ""}S={fsrs.stability}d · D={fsrs.difficulty}
 										</span>
+									</div>
+								)}
+								{fsrs.isFoundation && (
+									<div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-indigo-500 dark:text-indigo-400">
+										<span>Supports {fsrs.dependentCount} downstream proposition{fsrs.dependentCount === 1 ? "" : "s"}</span>
+										{fsrs.state === "untracked" && <span className="font-medium">Untracked foundation</span>}
 									</div>
 								)}
 								{fsrs.weakPrerequisites.length > 0 && (

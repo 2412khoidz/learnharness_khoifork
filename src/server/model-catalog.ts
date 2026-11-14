@@ -24,19 +24,43 @@ import { customProviderAvailable } from "./custom-provider.ts";
 import { chatGPTConnected, chatGPTModel, chatGPTModels, refreshChatGPTModels } from "../agent/chatgpt-bridge.ts";
 import { NATIVE_SUBSCRIPTIONS } from "../core/contracts/subscriptions.ts";
 import { nativeSubscriptionId, nativeSubscriptionConnected, nativeSubscriptionModel, nativeSubscriptionModels, refreshSubscriptionModels } from "../agent/subscription-bridge.ts";
-import { probeLiveProviderModels } from "../agent/live-models.ts";
+import {
+	addCustomProviderModel,
+	getCustomProviderModels,
+	getDynamicProviderModels,
+	getPausedProviders,
+	isProviderPaused,
+	probeLiveProviderModels,
+	removeCustomProviderModel,
+	setProviderPaused,
+} from "../agent/live-models.ts";
+
+export {
+	addCustomProviderModel,
+	getCustomProviderModels,
+	getPausedProviders,
+	isProviderPaused,
+	removeCustomProviderModel,
+	setProviderPaused,
+};
 
 export async function refreshConnectionCatalog(provider?: string): Promise<void> {
 	await Promise.all([
 		!provider || provider === "chatgpt" ? refreshChatGPTModels(piModels().getModels("openai").filter((m): m is Model<"openai-responses"> => m.api === "openai-responses")) : Promise.resolve(),
 		!provider || nativeSubscriptionId(provider) ? refreshSubscriptionModels() : Promise.resolve(),
-		!provider || provider === "google" ? probeLiveProviderModels("google", keyValue("GEMINI_API_KEY")).catch(() => []) : Promise.resolve(),
-		!provider || provider === "openrouter" ? probeLiveProviderModels("openrouter", keyValue("OPENROUTER_API_KEY")).catch(() => []) : Promise.resolve(),
+		(!provider || provider === "google") && !isProviderPaused("google") ? probeLiveProviderModels("google", keyValue("GEMINI_API_KEY")).catch(() => []) : Promise.resolve(),
+		(!provider || provider === "openrouter") && !isProviderPaused("openrouter") ? probeLiveProviderModels("openrouter", keyValue("OPENROUTER_API_KEY")).catch(() => []) : Promise.resolve(),
 	]);
 }
 function connectionModel(provider: string, id: string): Model<Api> | undefined {
 	if (provider === CLAUDE_CODE_PROVIDER && !claudeCodeAvailable()) return undefined;
-	return provider === "chatgpt" ? chatGPTModel(id) : nativeSubscriptionId(provider) ? nativeSubscriptionModel(provider, id) : piModels().getModel(provider, id);
+	const direct = provider === "chatgpt"
+		? chatGPTModel(id)
+		: nativeSubscriptionId(provider)
+			? nativeSubscriptionModel(provider, id)
+			: piModels().getModel(provider, id);
+	if (direct) return direct;
+	return getDynamicProviderModels(provider).find((m) => m.id === id);
 }
 function connectionProviderIds(): string[] { return [...piModels().getProviders().map((p) => p.id), "chatgpt", ...NATIVE_SUBSCRIPTIONS.map((p) => p.logicalId)]; }
 import { settingsStore } from "../store/settings.ts";
@@ -164,7 +188,9 @@ export function catalogProviders(): CatalogProvider[] {
 		...(customProviderUsable(effectiveSettings().customProvider)
 			? [{ id: CUSTOM_PROVIDER.id, envVar: CUSTOM_PROVIDER.envVar, keyPresent: customProviderAvailable() }]
 			: []),
-	]).sort((a, b) => a.id.localeCompare(b.id));
+	])
+		.filter((p) => !isProviderPaused(p.id))
+		.sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /** The providers whose key is present — the picker federates exactly
@@ -221,19 +247,45 @@ export function catalogContextLimits(): Map<string, number> {
  *  pins (the settings UI's per-role default captions). */
 export function modelCatalog(): ModelCatalogResponse {
 	const keyed = keyedProviderIds();
-	const models = piModels()
+	const seen = new Set<string>();
+	const baseModels = piModels()
 		.getProviders()
 		.filter((p) => keyed.has(p.id))
 		.flatMap((p) => piModels().getModels(p.id))
 		.map(toModelDto)
-		.sort((a, b) => (a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider)))
-		.concat([...chatGPTModels(), ...nativeSubscriptionModels()].map(toModelDto));
+		.sort((a, b) => (a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider)));
+	for (const m of baseModels) seen.add(`${m.provider}:${m.id}`);
+
+	const extraConnModels = [...chatGPTModels(), ...nativeSubscriptionModels()]
+		.filter((m) => !isProviderPaused(m.provider))
+		.map(toModelDto);
+	for (const m of extraConnModels) seen.add(`${m.provider}:${m.id}`);
+
+	// Include user-added custom models on keyed subscription/chatgpt providers too.
+	const extraCustomModels: ModelDto[] = [];
+	const rawCustom = getCustomProviderModels();
+	const customModelsSummary: Record<string, Array<{ id: string; name: string }>> = {};
+	for (const [providerId, specs] of Object.entries(rawCustom)) {
+		customModelsSummary[providerId] = specs.map((s) => ({ id: s.id, name: s.name?.trim() || s.id }));
+		if (!keyed.has(providerId)) continue;
+		for (const m of getDynamicProviderModels(providerId)) {
+			const dto = toModelDto(m);
+			if (!seen.has(`${dto.provider}:${dto.id}`)) {
+				seen.add(`${dto.provider}:${dto.id}`);
+				extraCustomModels.push(dto);
+			}
+		}
+	}
+
+	const models = baseModels.concat(extraConnModels, extraCustomModels);
 	return {
 		models,
 		defaults: catalogDefaults(),
 		rolePins: catalogRolePins(),
 		slots: catalogSlots(),
 		providers: catalogProviders(),
+		pausedProviders: getPausedProviders(),
+		customModels: customModelsSummary,
 	};
 }
 

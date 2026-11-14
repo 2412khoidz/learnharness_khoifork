@@ -62,6 +62,8 @@ export interface ModelCatalogResponse {
 	 * providers where exposed by the host. This is not a guarantee that each
 	 * provider has currently selectable models; inspect models and keyPresent. */
 	providers: CatalogProvider[];
+	pausedProviders?: string[];
+	customModels?: Record<string, Array<{ id: string; name: string }>>;
 }
 
 /** One row of the providers surface. */

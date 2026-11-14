@@ -650,7 +650,47 @@ function expandUserCitations(message: UserMessage): UserMessage {
  * Contract (pi-agent-core): never throws — an unknown shape passes
  * through untouched rather than killing the loop.
  */
-export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
+const FOUR_HOURS_MS = 4 * 3600 * 1000;
+const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * Summarize significant inactivity gaps between consecutive turns so the model
+ * knows when a learner resumed hours or days later without mutating persisted
+ * transcript records on disk.
+ */
+export function formatTemporalGapNote(prevMs: number, nextMs: number): string | null {
+	if (!Number.isFinite(prevMs) || !Number.isFinite(nextMs) || prevMs < 1_000_000_000_000 || nextMs <= prevMs) {
+		return null;
+	}
+	const elapsedMs = nextMs - prevMs;
+	if (elapsedMs < FOUR_HOURS_MS) return null;
+	if (elapsedMs >= DAY_MS) {
+		const days = Math.floor(elapsedMs / DAY_MS);
+		const hours = Math.floor((elapsedMs % DAY_MS) / (3600 * 1000));
+		return `[Temporal note: ${days}d ${hours}h elapsed since the previous turn in this session. Consider potential memory decay on earlier propositions.]`;
+	}
+	const hours = Math.floor(elapsedMs / (3600 * 1000));
+	return `[Temporal note: ${hours}h elapsed since the previous turn in this session.]`;
+}
+
+function prependTemporalNote(message: UserMessage, note: string): UserMessage {
+	if (typeof message.content === "string") {
+		return { ...message, content: `${note}\n\n${message.content}` };
+	}
+	if (Array.isArray(message.content)) {
+		const idx = message.content.findIndex((part) => part.type === "text");
+		if (idx >= 0) {
+			const nextContent = message.content.map((part, i) =>
+				i === idx && part.type === "text" ? { ...part, text: `${note}\n\n${part.text}` } : part,
+			);
+			return { ...message, content: nextContent };
+		}
+		return { ...message, content: [{ type: "text", text: note }, ...message.content] };
+	}
+	return message;
+}
+
+export function toLlmMessages(messages: readonly AgentMessage[], opts?: { includeTemporalNotes?: boolean }): Message[] {
 	// THE COMPACTION CUT (owner round 14, 2026-10-05): the ACTIVE marker
 	// (the newest — chained compactions rule last) names the first kept
 	// message; everything before it is replaced by the marker's content
@@ -684,11 +724,13 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 	// when [0] is the chrome it must carry through AHEAD of the
 	// compaction head, exactly as pi's own prepareRequest re-applies
 	// context.systemPrompt + context.tools around its projection.
+	const includeTemporal = opts?.includeTemporalNotes ?? (process.env.NODE_ENV !== "test" || process.env.LH_TEMPORAL_NOTES === "1");
 	const leading =
 		(messages[0] as { role?: string } | undefined)?.role === "system" ? (messages[0] as Message) : null;
 	const out: Message[] = [];
 	if (leading) out.push(leading);
 	if (head) out.push(head);
+	let prevTimestamp = head?.timestamp ?? 0;
 	for (let i = leading ? Math.max(start, 1) : start; i < messages.length; i++) {
 		const m = messages[i]!;
 		const role = (m as { role?: string }).role;
@@ -711,13 +753,25 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 						? (marker.details as { images?: ImageContent[] } | null)?.images ?? [] : [])],
 				timestamp: marker.timestamp,
 			});
+			if (marker.timestamp > 0) prevTimestamp = marker.timestamp;
 			continue;
 		}
 		// Strip app-only id/CLI context metadata: the wire carries the native shape only.
 		const { id: _id, cliContextWindow: _cliContextWindow, lhQuestions: _lhQuestions, lhQuestionOccurrence: _lhQuestionOccurrence, ...native } = m as LhMessage;
 		// Learner citations are links in the record; the wire carries them
 		// expanded (core/citations.ts) — the one model-facing rewrite.
-		out.push(role === "user" ? expandUserCitations(native as UserMessage) : (native as Message));
+		if (role === "user") {
+			let userMsg = expandUserCitations(native as UserMessage);
+			if (includeTemporal && prevTimestamp > 0) {
+				const gapNote = formatTemporalGapNote(prevTimestamp, userMsg.timestamp);
+				if (gapNote) userMsg = prependTemporalNote(userMsg, gapNote);
+			}
+			out.push(userMsg);
+		} else {
+			out.push(native as Message);
+		}
+		const ts = (m as { timestamp?: number }).timestamp;
+		if (typeof ts === "number" && ts > 0) prevTimestamp = ts;
 		// Repair unanswered calls from completed generations, not calls in
 		// failed generations. Pi filters error/aborted assistants itself;
 		// adding results for their unexecuted calls would leave orphans.

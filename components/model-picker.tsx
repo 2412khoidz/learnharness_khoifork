@@ -48,6 +48,10 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 	const [session, setSession] = useState<{ settings?: ChatSettings }>();
 	const [open, setOpen] = useState<"model" | "thinking" | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [customOpen, setCustomOpen] = useState(false);
+	const [customProvider, setCustomProvider] = useState("google");
+	const [customModelId, setCustomModelId] = useState("");
+	const [catalogBusy, setCatalogBusy] = useState(false);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const interactions = useInteractionLayers();
 
@@ -267,7 +271,45 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 	const openMenu = (kind: "model" | "thinking") => {
 		setOpen((o) => (o === kind ? null : kind));
 		setError(null);
-		if (kind === "model") refresh();
+		if (kind === "model") {
+			setCustomProvider(effectiveProvider ?? catalog?.providers.find((p) => p.keyPresent)?.id ?? "google");
+			refresh();
+		}
+	};
+
+	const mutateCatalog = async (payload: Record<string, unknown>, onDone?: (nextCatalog: ModelCatalogResponse) => void) => {
+		setCatalogBusy(true);
+		setError(null);
+		try {
+			const res = await fetch("/api/models", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(payload),
+			});
+			const data = (await res.json().catch(() => ({}))) as ModelCatalogResponse & { error?: string };
+			if (!res.ok) {
+				setError(data.error ?? `Model update failed (${res.status})`);
+				return;
+			}
+			refresh();
+			onDone?.(data);
+		} catch {
+			setError("Could not reach the server — try again.");
+		} finally {
+			setCatalogBusy(false);
+		}
+	};
+
+	const submitCustomModel = () => {
+		const id = customModelId.trim();
+		if (!id) return;
+		const provider = customProvider.trim() || "google";
+		void mutateCatalog({ action: "add-custom-model", provider, id }, (nextCatalog) => {
+			setCustomModelId("");
+			setCustomOpen(false);
+			const added = nextCatalog.models?.find((m) => m.provider === provider && m.id === id);
+			if (added) pickModel(added);
+		});
 	};
 
 	return (
@@ -325,6 +367,88 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 									: "Strong tier — the default for new sessions"
 						}
 					/>
+					<div className="mt-1.5 border-t pt-1.5 flex flex-col gap-1.5">
+						<div className="flex items-center justify-between gap-2 px-1">
+							<button
+								type="button"
+								data-testid="toggle-custom-model"
+								onClick={() => {
+									setCustomOpen((v) => !v);
+									setCustomProvider((p) => p || effectiveProvider || catalog?.providers.find((x) => x.keyPresent)?.id || "google");
+								}}
+								className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+							>
+								{customOpen ? "Cancel custom ID" : "+ Add model ID"}
+							</button>
+							{effectiveProvider && (
+								<button
+									type="button"
+									data-testid="pause-active-provider"
+									disabled={catalogBusy}
+									onClick={() => void mutateCatalog({ action: "toggle-pause-provider", provider: effectiveProvider, paused: true })}
+									className="text-[11px] text-muted-foreground hover:text-amber-500 transition-colors"
+									title={`Hide ${effectiveProvider} models without deleting credentials`}
+								>
+									Pause {effectiveProvider}
+								</button>
+							)}
+						</div>
+						{customOpen && (
+							<div
+								className="flex items-center gap-1 px-1"
+								onKeyDown={(e) => {
+									e.stopPropagation();
+									if (e.key === "Enter") {
+										e.preventDefault();
+										submitCustomModel();
+									}
+								}}
+							>
+								<select
+									aria-label="Provider"
+									value={customProvider}
+									onChange={(e) => setCustomProvider(e.target.value)}
+									className="h-7 rounded border bg-background px-1.5 text-[11px] text-foreground"
+								>
+									{(catalog?.providers.length ? catalog.providers.map((p) => p.id) : ["google", "google-vertex", "openai", "anthropic", "openrouter"]).map((pid) => (
+										<option key={pid} value={pid}>{pid}</option>
+									))}
+								</select>
+								<input
+									type="text"
+									value={customModelId}
+									onChange={(e) => setCustomModelId(e.target.value)}
+									placeholder="e.g. gemini-4-carbon"
+									className="h-7 min-w-0 flex-1 rounded border bg-background px-2 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-ring"
+								/>
+								<button
+									type="button"
+									disabled={catalogBusy || !customModelId.trim()}
+									onClick={submitCustomModel}
+									className="h-7 rounded bg-primary px-2 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+								>
+									Add
+								</button>
+							</div>
+						)}
+						{(catalog?.pausedProviders?.length ?? 0) > 0 && (
+							<div className="flex flex-wrap items-center gap-1 px-1 text-[10px] text-muted-foreground">
+								<span>Paused:</span>
+								{catalog!.pausedProviders!.map((pid) => (
+									<button
+										key={pid}
+										type="button"
+										disabled={catalogBusy}
+										onClick={() => void mutateCatalog({ action: "toggle-pause-provider", provider: pid, paused: false })}
+										className="rounded border px-1.5 py-0.5 hover:bg-accent hover:text-foreground"
+										title={`Resume ${pid}`}
+									>
+										{pid} ↺
+									</button>
+								))}
+							</div>
+						)}
+					</div>
 				</MenuShell>
 			)}
 

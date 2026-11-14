@@ -39,6 +39,8 @@ import { searchAvailable, searchProvider } from "./search.ts";
 import { prepareSubmissionImages, prepareSubmissionImageChannels, prepareProblemSubmissionImageChannels, submissionImagePolicyKey } from "./submission-images.ts";
 import { preparePluginProblemSubmission, requirePluginProblemTarget, type ProblemTypeResolver } from "./plugin-problems.ts";
 import { providerKeyPresent } from "./keys.ts";
+import { recordPracticeFsrsOutcome } from "./graph-fsrs.ts";
+import { readExamPrepStatus } from "./exam-prep.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
 import {
 	extractionEnabled,
@@ -673,6 +675,15 @@ export async function handleChatInput(
 		restoreAutomatic: (automaticIds, retainedIds) => restoreUncommittedAutomatic(chatId, constructed, automaticIds, retainedIds),
 	});
 	let pendingSideBudgetError: Error | undefined;
+	let extraInstructions: string[] | undefined;
+	if (process.env.NODE_ENV !== "test" || process.env.LH_EXAM_PREP_PROMPT === "1") {
+		try {
+			const examStatus = readExamPrepStatus({ graphStore: stores.graphStore });
+			if (examStatus.promptDirective) extraInstructions = [examStatus.promptDirective];
+		} catch {
+			// Best-effort study mode directive: never block a turn on config read failure.
+		}
+	}
 	const agentOpts: AgentBuildOptions = {
 		pluginContributions,
 		engine,
@@ -726,6 +737,7 @@ export async function handleChatInput(
 		// point as the tool delta — the agent layer composes the system
 		// prompt fresh per turn, swapping in any enabled override segments.
 		promptSwitches: effective.agent.prompts,
+		...(extraInstructions ? { extraInstructions } : {}),
 	};
 	// PRACTICE BRANCH (owner design, 2026-10-04): a kind:"practice"
 	// session builds the practitioner from turn 1 — no prober→teacher
@@ -744,6 +756,15 @@ export async function handleChatInput(
 						// proposition, not just the session's picks (pickless sessions
 						// and future graph-tools poses stay valid).
 						graphNodes: () => stores.graphStore.readNodes(),
+						onConclude: (concludeInput, targets) => {
+							recordPracticeFsrsOutcome({
+								targets,
+								outcome: concludeInput.outcome,
+								rung: concludeInput.rung,
+								missClass: concludeInput.missClass,
+								retest: concludeInput.retest,
+							});
+						},
 						// THE RARELY-NEEDED SET (owner round 10): research + pdf jobs
 						// (same runner/gating as the teacher's — research honestly
 						// absent when no engine is live) and the map readers behind
