@@ -300,7 +300,7 @@ function PhoneUploadDialogBody({
 								}}
 								className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
 							>
-								{copied ? <CheckCircle2Icon className="size-3.5 text-emerald-500" /> : <CopyIcon className="size-3.5" />}
+								{copied ? <CheckCircle2Icon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
 							</button>
 						</div>
 					)}
@@ -322,7 +322,7 @@ function PhoneUploadDialogBody({
 			)}
 
 			{firstWarning && (
-				<p role="alert" className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-300">
+				<p role="alert" className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
 					{firstWarning}
 				</p>
 			)}
