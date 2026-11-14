@@ -109,3 +109,5 @@ export * from "./plugin-submissions.ts";
 export type * from "./plugin-ui.ts";
 export type * from "./plugin-tree.ts";
 export * from "./plugin-agents.ts";
+export { encodeQrMatrix, qrSvgPath, type QrMatrix } from "./qr.ts";
+export * from "./attachments.ts";

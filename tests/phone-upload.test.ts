@@ -1,0 +1,215 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, it } from "node:test";
+import {
+	buildPhoneUploadUrl,
+	encodeQrMatrix,
+	extractClipboardImageFiles,
+	qrSvgPath,
+} from "../src/core/index.ts";
+import {
+	AttachmentError,
+	closePhoneUploadSession,
+	createPhoneUploadSession,
+	pollPhoneUploadSession,
+	rankLanAddresses,
+	saveAttachmentImage,
+} from "../src/server/index.ts";
+import { POST as postAttachmentRoute } from "../app/api/attachments/route.ts";
+import {
+	DELETE as deletePhoneRoute,
+	GET as getPhoneRoute,
+	POST as postPhoneRoute,
+} from "../app/api/attachments/phone/route.ts";
+
+// Minimal valid 1x1 transparent PNG.
+const VALID_PNG = Buffer.from(
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+	"base64",
+);
+// Minimal JPEG SOI + APP0 header bytes recognized by magic-byte sniffer.
+const VALID_JPEG = Buffer.from([
+	0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9,
+]);
+
+const tempDirs: string[] = [];
+
+function makeTempDir(): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-attach-test-"));
+	tempDirs.push(dir);
+	return dir;
+}
+
+afterEach(async () => {
+	await closePhoneUploadSession();
+	for (const dir of tempDirs.splice(0)) {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+describe("QR matrix generator", () => {
+	it("generates compliant finder patterns, timing patterns, dark module, and SVG paths across versions", () => {
+		const shortQr = encodeQrMatrix("HELLO WORLD");
+		assert.equal(shortQr.version, 1);
+		assert.equal(shortQr.size, 21);
+		// Top-left 7x7 finder corners and center must be dark; (size - 8, 8) dark module must be dark.
+		const at = (m: typeof shortQr, r: number, c: number) => m.modules[r * m.size + c];
+		assert.equal(at(shortQr, 0, 0), true);
+		assert.equal(at(shortQr, 1, 1), false);
+		assert.equal(at(shortQr, 3, 3), true);
+		assert.equal(at(shortQr, shortQr.size - 8, 8), true);
+		assert.equal(at(shortQr, 6, 8), true);
+		assert.equal(at(shortQr, 6, 9), false);
+
+		const svg = qrSvgPath(shortQr);
+		assert.match(svg, /^M\d+,\d+h\d+v1h-\d+z/);
+
+		const urlQr = encodeQrMatrix("http://192.168.1.42:54321/p/abcdef1234567890abcdef12");
+		assert.equal(urlQr.version, 4);
+		assert.equal(urlQr.size, 33);
+
+		const maxQr = encodeQrMatrix("a".repeat(210));
+		assert.equal(maxQr.version, 10);
+		assert.equal(maxQr.size, 57);
+
+		assert.throws(() => encodeQrMatrix("a".repeat(214)), /QR payload too long/);
+	});
+});
+
+describe("clipboard and URL pure helpers", () => {
+	it("builds clean phone URLs and extracts non-empty image Files only", () => {
+		assert.equal(
+			buildPhoneUploadUrl("192.168.1.25", 5001, "tok_123"),
+			"http://192.168.1.25:5001/p/tok_123",
+		);
+
+		assert.deepEqual(extractClipboardImageFiles(null), []);
+		const emptyMock = { items: undefined, files: undefined } as unknown as DataTransfer;
+		assert.deepEqual(extractClipboardImageFiles(emptyMock), []);
+
+		const pngFile = new File([VALID_PNG], "shot.png", { type: "image/png" });
+		const emptyFile = new File([], "empty.png", { type: "image/png" });
+		const txtFile = new File(["hello"], "note.txt", { type: "text/plain" });
+		const transfer = {
+			items: [
+				{ kind: "file", type: "image/png", getAsFile: () => pngFile },
+				{ kind: "file", type: "image/png", getAsFile: () => emptyFile },
+				{ kind: "file", type: "text/plain", getAsFile: () => txtFile },
+			] as unknown as DataTransferItemList,
+			files: [pngFile, txtFile] as unknown as FileList,
+		};
+		assert.deepEqual(extractClipboardImageFiles(transfer), [pngFile]);
+	});
+});
+
+describe("saveAttachmentImage", () => {
+	it("validates magic bytes and writes safe image attachments to disk", () => {
+		const dir = makeTempDir();
+		const png = saveAttachmentImage(VALID_PNG, { prefix: "paste", attachmentsDir: dir });
+		assert.equal(png.mimeType, "image/png");
+		assert.match(png.filename, /^paste-\d{8}-\d{6}-[0-9a-f]{8}\.png$/);
+		assert.equal(path.dirname(png.path), dir);
+		assert.deepEqual(fs.readFileSync(png.path), VALID_PNG);
+
+		const jpg = saveAttachmentImage(VALID_JPEG, { prefix: "phone", attachmentsDir: dir });
+		assert.equal(jpg.mimeType, "image/jpeg");
+		assert.match(jpg.filename, /^phone-.*\.jpg$/);
+
+		assert.throws(() => saveAttachmentImage(Buffer.alloc(0), { attachmentsDir: dir }), (err: unknown) =>
+			err instanceof AttachmentError && err.status === 400,
+		);
+		assert.throws(() => saveAttachmentImage(Buffer.from("<svg>not png</svg>"), { attachmentsDir: dir }), (err: unknown) =>
+			err instanceof AttachmentError && err.status === 415,
+		);
+	});
+});
+
+describe("rankLanAddresses and phone upload HTTP server", () => {
+	it("ranks real Wi-Fi/Ethernet adapters ahead of virtual/VPN NICs", () => {
+		const ranked = rankLanAddresses({
+			Loopback: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", mac: "00:00:00:00:00:00", internal: true, cidr: "127.0.0.1/8" }],
+			"vEthernet (WSL)": [{ address: "172.24.16.1", netmask: "255.255.240.0", family: "IPv4", mac: "00:15:5d:00:00:01", internal: false, cidr: "172.24.16.1/20" }],
+			"VirtualBox Host-Only Network": [{ address: "192.168.56.1", netmask: "255.255.255.0", family: "IPv4", mac: "0a:00:27:00:00:00", internal: false, cidr: "192.168.56.1/24" }],
+			Tailscale: [{ address: "100.80.1.2", netmask: "255.192.0.0", family: "IPv4", mac: "00:00:00:00:00:00", internal: false, cidr: "100.80.1.2/10" }],
+			"APIPA": [{ address: "169.254.10.20", netmask: "255.255.0.0", family: "IPv4", mac: "00:00:00:00:00:00", internal: false, cidr: "169.254.10.20/16" }],
+			"Wi-Fi": [{ address: "192.168.1.42", netmask: "255.255.255.0", family: "IPv4", mac: "aa:bb:cc:dd:ee:ff", internal: false, cidr: "192.168.1.42/24" }],
+		});
+		assert.equal(ranked[0]?.address, "192.168.1.42");
+		assert.equal(ranked[0]?.recommended, true);
+		assert.ok(!ranked.some((c) => c.address.startsWith("127.") || c.address.startsWith("169.254.")));
+	});
+
+	it("serves tokenized camera HTML, rejects wrong tokens, saves valid images, and closes cleanly", async () => {
+		const dir = makeTempDir();
+		const session = await createPhoneUploadSession({ host: "127.0.0.1", attachmentsDir: dir });
+		assert.ok(session.port > 0);
+
+		const badRes = await fetch(`http://127.0.0.1:${session.port}/p/wrong-token`);
+		assert.equal(badRes.status, 404);
+
+		const pageRes = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}`);
+		assert.equal(pageRes.status, 200);
+		const html = await pageRes.text();
+		assert.match(html, /capture="environment"/);
+		assert.match(html, /multiple/);
+		assert.ok(!html.includes("https://"), "mobile upload page must stay 100% offline/self-contained");
+
+		const badUpload = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}/upload`, {
+			method: "POST",
+			body: Buffer.from("not an image"),
+		});
+		assert.equal(badUpload.status, 415);
+
+		const okUpload = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}/upload`, {
+			method: "POST",
+			headers: { "Content-Type": "image/png" },
+			body: VALID_PNG,
+		});
+		assert.equal(okUpload.status, 200);
+		const uploadJson = await okUpload.json() as { ok: boolean; filename: string; mimeType: string };
+		assert.equal(uploadJson.ok, true);
+		assert.equal(uploadJson.mimeType, "image/png");
+
+		const poll1 = pollPhoneUploadSession(session.sessionId, 0);
+		assert.equal(poll1.active, true);
+		assert.equal(poll1.uploads.length, 1);
+		assert.equal(poll1.nextIndex, 1);
+		assert.equal(fs.existsSync(poll1.uploads[0]!.path), true);
+
+		const poll2 = pollPhoneUploadSession(session.sessionId, poll1.nextIndex);
+		assert.equal(poll2.uploads.length, 0);
+		assert.equal(poll2.nextIndex, 1);
+
+		assert.equal(await closePhoneUploadSession(session.sessionId), true);
+		assert.equal(pollPhoneUploadSession(session.sessionId, 0).active, false);
+		await assert.rejects(() => fetch(`http://127.0.0.1:${session.port}/p/${session.token}`));
+	});
+});
+
+describe("attachment Next API route handlers", () => {
+	it("rejects invalid /api/attachments payload and manages /api/attachments/phone lifecycle", async () => {
+		const badAttach = await postAttachmentRoute(new Request("http://localhost/api/attachments", {
+			method: "POST",
+			body: Buffer.from("plain text"),
+		}));
+		assert.equal(badAttach.status, 415);
+
+		const startRes = await postPhoneRoute();
+		assert.equal(startRes.status, 200);
+		const session = await startRes.json() as { sessionId: string; token: string; port: number };
+		assert.ok(session.sessionId && session.token && session.port > 0);
+
+		const pollRes = await getPhoneRoute(new Request(`http://localhost/api/attachments/phone?sessionId=${session.sessionId}&since=0`));
+		assert.equal(pollRes.status, 200);
+		const pollJson = await pollRes.json() as { active: boolean; uploads: unknown[] };
+		assert.equal(pollJson.active, true);
+		assert.deepEqual(pollJson.uploads, []);
+
+		const delRes = await deletePhoneRoute(new Request(`http://localhost/api/attachments/phone?sessionId=${session.sessionId}`, { method: "DELETE" }));
+		assert.equal(delRes.status, 200);
+		const delJson = await delRes.json() as { closed: boolean };
+		assert.equal(delJson.closed, true);
+	});
+});

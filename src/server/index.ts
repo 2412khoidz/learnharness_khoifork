@@ -65,3 +65,16 @@ export { claudeCodeInstallationResponse } from "./claude-code.ts";
 // No import side effects; the boot sync lives in stores.ts.
 export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";
+export {
+	AttachmentError,
+	MAX_ATTACHMENT_IMAGE_BYTES,
+	saveAttachmentImage,
+	type SaveAttachmentOptions,
+} from "./attachments.ts";
+export {
+	closePhoneUploadSession,
+	createPhoneUploadSession,
+	pollPhoneUploadSession,
+	rankLanAddresses,
+	type CreatePhoneSessionOptions,
+} from "./phone-upload.ts";

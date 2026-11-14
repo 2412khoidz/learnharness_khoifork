@@ -8,6 +8,7 @@ import type { QuestionRendererRegistration } from "./plugin-manager";
 import { usePlugins } from "./plugins";
 import { QuestionDockBar } from "./question-dock";
 import { PathInput } from "./path-input";
+import { PhoneUploadButton } from "./phone-upload-button";
 import { finishDictation, joinDictation, usePluginQuestionDictationTarget } from "./dictation";
 import { useOptionalInteractionLayers } from "./interaction-layers";
 import { isInteractionScopeEligible } from "./plugin-input-focus";
@@ -168,6 +169,7 @@ export function PluginQuestionDockContent({ viewReader, snapshot, chatId, draft,
 					</>}
 					<div className="flex items-center justify-between gap-2 p-1">
 						<span aria-hidden className="pl-1.5 text-xs text-muted-foreground">↵ submits · ⇧↵ newline</span>
+						{snapshot.showThinking && <PhoneUploadButton editorRef={thinking} compact disabled={!ready || submitting} />}
 						{unavailable && <Button type="button" variant="ghost" disabled={!ready || submitting} onClick={() => { if (latch.current) return; latch.current = true; void finishDictation().then(dismiss).catch(() => {}).finally(() => { latch.current = false; }); }}>Dismiss question</Button>}
 						<Button type="submit" disabled={!canSubmit} className="ml-auto h-9 rounded-[6px] px-3.5 text-sm font-medium">Submit answer</Button>
 					</div>

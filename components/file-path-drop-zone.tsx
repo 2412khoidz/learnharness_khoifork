@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FileSymlinkIcon, XIcon } from "lucide-react";
-import { directoryReferencePath, quoteFilePath } from "@/src/core";
+import { ATTACHMENT_NOTICE_EVENT, directoryReferencePath, quoteFilePath } from "@/src/core";
 import { appendToPrimaryInput } from "@/components/dictation";
 import { INSERT_FILE_PATHS_EVENT } from "@/components/path-input";
 
@@ -34,9 +34,15 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 		};
 		window.addEventListener("dragover", preventOutsideNavigation);
 		window.addEventListener("drop", preventOutsideNavigation);
+		const onAttachmentNotice = (event: Event) => {
+			const message = (event as CustomEvent<unknown>).detail;
+			if (typeof message === "string" && message) setNotice(message);
+		};
+		window.addEventListener(ATTACHMENT_NOTICE_EVENT, onAttachmentNotice);
 		return () => {
 			window.removeEventListener("dragover", preventOutsideNavigation);
 			window.removeEventListener("drop", preventOutsideNavigation);
+			window.removeEventListener(ATTACHMENT_NOTICE_EVENT, onAttachmentNotice);
 		};
 	}, []);
 	return (

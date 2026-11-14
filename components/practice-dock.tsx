@@ -10,6 +10,7 @@ import { useEnterSubmits } from "@/components/enter-submits";
 import { useOptionalInteractionLayers } from "./interaction-layers";
 import { isInteractionScopeEligible } from "./plugin-input-focus";
 import { PathInput } from "@/components/path-input";
+import { PhoneUploadButton } from "@/components/phone-upload-button";
 import type { PrepareThinkingSubmission } from "./plugin-submission-adapters";
 import { cn } from "@/lib/utils";
 
@@ -68,6 +69,7 @@ export interface PracticeDockProps {
 export function PracticeDock({ viewReader, problemCallId, input, expanded, onExpand, onSubmit, onPrepareSubmission, customInput, hasPendingInput = false, preparing = false, onEscape, compactionRunning = false }: PracticeDockProps) {
 	const controller = useOptionalInteractionLayers();
 	const rootRef = useRef<HTMLElement>(null);
+	const thinkingInputRef = useRef<HTMLDivElement>(null);
 	const [nativeThinking, setNativeThinking] = useState("");
 	const custom = useRef(customInput); custom.current = customInput;
 	const thinking = customInput ? customInput.thinking : nativeThinking;
@@ -165,6 +167,7 @@ export function PracticeDock({ viewReader, problemCallId, input, expanded, onExp
 					YOUR THINKING
 				</div>
 				<PathInput
+					ref={thinkingInputRef}
 					value={thinking}
 					onValueChange={(value) => {
 						thinkingRef.current = value; editRevision.current++;
@@ -201,6 +204,11 @@ export function PracticeDock({ viewReader, problemCallId, input, expanded, onExp
 					<span aria-hidden className="pl-1.5 text-xs text-muted-foreground">
 						{compactionRunning ? "compacting session…" : "↵ submits · ⇧↵ newline"}
 					</span>
+					<PhoneUploadButton
+						editorRef={thinkingInputRef}
+						compact
+						disabled={compactionRunning || preparing}
+					/>
 					<Button
 						type="button"
 						data-testid="practice-send"

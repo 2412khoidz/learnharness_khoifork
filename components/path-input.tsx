@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { FilePathChip } from "./file-path-chip";
 import { CitationChip } from "./citation-chip";
 import { cn } from "../lib/utils";
+import { ATTACHMENT_NOTICE_EVENT, extractClipboardImageFiles, type AttachmentUploadResult } from "@/src/core";
 import {
 	adjacentPathRange, atomicPathRange, clampPathSelection, insertCitation, insertFilePaths, locateToken,
 	normalizePathEdit, normalizePathInputValue, pathInputStaticRange, PathInputHistory, readPathInput, readPathSelection, renderPathInput,
@@ -104,7 +105,7 @@ export const PathInput = React.forwardRef<HTMLDivElement, PathInputProps>(functi
 			const next = history[direction](snapshot());
 			if (next) change(next, false);
 		}
-		function stage(paths: string[]) {
+		function stage(paths: string[], focus = true) {
 			if (composing.current) { pendingPaths.push(...paths); return; }
 			remember();
 			// Global drop may have moved focus: saved selection is still authoritative.
@@ -112,8 +113,10 @@ export const PathInput = React.forwardRef<HTMLDivElement, PathInputProps>(functi
 			try { next = insertFilePaths(current, saved, paths); }
 			catch { return; } // Invalid event payloads never mutate learner text.
 			change(next);
-			root.focus();
-			restorePathSelection(root, saved);
+			if (focus) {
+				root.focus();
+				restorePathSelection(root, saved);
+			}
 		}
 		function cite(detail: InsertCitationDetail) {
 			if (composing.current) { pendingCitations.push(detail); return; }
@@ -146,8 +149,17 @@ export const PathInput = React.forwardRef<HTMLDivElement, PathInputProps>(functi
 		}
 		function insertEvent(event: Event) {
 			if (!callbacks.current.fileInsertion) return;
-			const paths: unknown = (event as CustomEvent<unknown>).detail;
-			if (Array.isArray(paths) && paths.every((path) => typeof path === "string")) stage(paths);
+			const detail: unknown = (event as CustomEvent<unknown>).detail;
+			if (Array.isArray(detail) && detail.every((path) => typeof path === "string")) {
+				stage(detail);
+				return;
+			}
+			if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+				const record = detail as { paths?: unknown; focus?: unknown };
+				if (Array.isArray(record.paths) && record.paths.every((path) => typeof path === "string")) {
+					stage(record.paths, record.focus !== false);
+				}
+			}
 		}
 		function beforeInput(event: InputEvent) {
 			if (composing.current || event.isComposing) return;
@@ -213,10 +225,47 @@ export const PathInput = React.forwardRef<HTMLDivElement, PathInputProps>(functi
 				}
 			}
 		}
+		async function uploadClipboardImages(images: File[]): Promise<{ paths: string[]; notice: string }> {
+			const paths: string[] = [];
+			let warning = "";
+			let errorNotice = "";
+			for (const image of images) {
+				try {
+					const response = await fetch("/api/attachments", {
+						method: "POST",
+						headers: { "Content-Type": image.type || "application/octet-stream" },
+						body: image,
+					});
+					const body = await response.json().catch(() => ({})) as Partial<AttachmentUploadResult> & { error?: string };
+					if (!response.ok || typeof body.path !== "string") {
+						errorNotice = body.error || "Could not save pasted image.";
+						continue;
+					}
+					paths.push(body.path);
+					if (body.warning && !warning) warning = body.warning;
+				} catch {
+					errorNotice = "Could not save pasted image.";
+				}
+			}
+			return { paths, notice: errorNotice || warning };
+		}
 		function paste(event: ClipboardEvent) {
 			if (event.defaultPrevented) return;
 			event.preventDefault();
 			const text = event.clipboardData?.getData("text/plain") ?? "";
+			const images = text === "" && callbacks.current.fileInsertion
+				? extractClipboardImageFiles(event.clipboardData)
+				: [];
+			if (images.length > 0) {
+				void uploadClipboardImages(images).then((result) => {
+					if (!mounted || !callbacks.current.fileInsertion) return;
+					if (result.paths.length > 0) stage(result.paths, document.activeElement === root);
+					if (result.notice) {
+						window.dispatchEvent(new CustomEvent(ATTACHMENT_NOTICE_EVENT, { detail: result.notice }));
+					}
+				});
+				return;
+			}
 			// Image/file/HTML-only clipboard contents are not text replacement.
 			if (text === "") return;
 			if (composing.current) pendingPaste.push(text);
