@@ -114,3 +114,4 @@ export { encodeQrMatrix, qrSvgPath, type QrMatrix } from "./qr.ts";
 export * from "./attachments.ts";
 export * from "./fsrs-graph.ts";
 export * from "./exam-prep.ts";
+export * from "./mistakes.ts";

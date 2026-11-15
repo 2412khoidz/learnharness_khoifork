@@ -7,16 +7,19 @@ import {
 	DEFAULT_EXAM_PREP_CONFIG,
 	sanitizeExamPrepConfig,
 	type ExamPrepConfig,
+	type ExamPrepMistakeHints,
 	type ExamPrepPatch,
 	type ExamPrepStatus,
 	type ExamScopeOption,
 } from "../core/exam-prep.ts";
+import { ERROR_TYPE_LABELS, summarizeMistakes, type MistakeRecord } from "../core/mistakes.ts";
 import { computeGraphFsrsSummary, emptyGraphFsrsSummary } from "../core/fsrs-graph.ts";
 import type { Cluster, GraphChain, GraphNode } from "../core/contracts.ts";
 import type { GraphStore } from "../core/ports.ts";
 import { birthSessionPartition } from "../core/session-clusters.ts";
 import { graphView } from "./graph.ts";
 import { readFlashcardsSnapshot } from "./graph-fsrs.ts";
+import { readMistakes } from "../store/mistakes.ts";
 
 export function defaultExamPrepPath(): string {
 	return path.join(/* turbopackIgnore: true */ PATHS.data, "exam-prep.json");
@@ -84,12 +87,38 @@ function resolveScopeClusters(
 	return [...byId.values()].sort((a, b) => b.memberIds.size - a.memberIds.size);
 }
 
+function buildExamPrepMistakeHints(records: readonly MistakeRecord[]): ExamPrepMistakeHints | undefined {
+	if (records.length === 0) return undefined;
+	const summary = summarizeMistakes(records);
+	const top = summary.byType[0];
+	const recurringPattern = top ? `${ERROR_TYPE_LABELS[top.type]} (${top.count})` : null;
+	const sortedReady = [...records]
+		.filter((r) => r.status === "ready" && typeof r.analysis?.rule === "string" && r.analysis.rule.trim())
+		.sort((a, b) => (b.createdAt || b.answeredAt || "").localeCompare(a.createdAt || a.answeredAt || ""));
+	const recentRules: string[] = [];
+	const seen = new Set<string>();
+	for (const rec of sortedReady) {
+		const rule = rec.analysis!.rule.replace(/\s+/g, " ").trim().slice(0, 120);
+		if (!rule || seen.has(rule)) continue;
+		seen.add(rule);
+		recentRules.push(rule);
+		if (recentRules.length >= 3) break;
+	}
+	return {
+		totalCount: summary.total,
+		recurringPattern,
+		recentRules,
+	};
+}
+
 export function readExamPrepStatus(opts?: {
 	graphStore?: GraphStore;
 	clusters?: Cluster[];
 	sessions?: Record<string, string>;
 	examPrepFile?: string;
 	flashcardsFile?: string;
+	mistakesFile?: string;
+	mistakes?: readonly MistakeRecord[];
 	now?: number;
 }): ExamPrepStatus {
 	const now = opts?.now ?? Date.now();
@@ -158,10 +187,20 @@ export function readExamPrepStatus(opts?: {
 		? computeGraphFsrsSummary({ nodes: activeNodes, chains: activeChains }, flashcards, now)
 		: emptyGraphFsrsSummary();
 
+	const mistakeRecords = opts?.mistakes ?? (
+		opts?.mistakesFile
+			? readMistakes(opts.mistakesFile)
+			: opts?.examPrepFile
+				? []
+				: readMistakes()
+	);
+	const mistakeHints = buildExamPrepMistakeHints(mistakeRecords);
+
 	return computeExamPrepStatus(config, fsrs, now, activeNodes, {
 		availableScopes,
 		activeScopeLabels,
 		scopedNodeCount: activeNodes.length,
 		totalNodeCount: propositions.length,
+		mistakeHints,
 	});
 }

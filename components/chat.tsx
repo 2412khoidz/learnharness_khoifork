@@ -97,6 +97,7 @@ import { practiceProblemForCall } from "@/src/core";
 import { PluginProblemSubmitted } from "./plugin-problem-submitted";
 import { readPluginProblemSubmission, pluginProblemById } from "@/src/core";
 import { ThinkingCard, ProblemCard, type PracticeThinkingData } from "@/components/practice-cards";
+import { MistakesContext, useChatMistakes } from "@/components/mistakes-context";
 import { GraphContextCard, type GraphContextData } from "@/components/graph-context-card";
 import { TopBar } from "@/components/top-bar";
 import { PluginSessionTopBarActions } from "@/components/plugin-chrome";
@@ -1670,8 +1671,11 @@ export function Chat({
 	};
 
 	usePluginShortcutPage(`/chat/${encodeURIComponent(chatId)}`, captureActionContext);
+	// The recorded analyses for this session's answer cards (mistakes fork).
+	const sessionMistakes = useChatMistakes(chatId);
 
 	return (
+		<MistakesContext.Provider value={sessionMistakes}>
 		<ChatActionsContext.Provider
 			value={{
 				chatId,
@@ -2070,7 +2074,7 @@ export function Chat({
 														// transcript; answered ones render as graded records.
 														if (part.state === "output-available") {
 															return (
-																<AnsweredCard key={pi} stateKey={`${part.sourceMessageId}:${part.sourceContentIndex}`} answer={part.output as QuestionAnswerData} input={part.input} />
+																<AnsweredCard key={pi} stateKey={`${part.sourceMessageId}:${part.sourceContentIndex}`} mistakeId={`${chatId}:${part.toolCallId}`} answer={part.output as QuestionAnswerData} input={part.input} />
 															);
 														}
 														return null;
@@ -2382,6 +2386,7 @@ export function Chat({
 			}}
 		/>
 		</ChatActionsContext.Provider>
+		</MistakesContext.Provider>
 	);
 }
 

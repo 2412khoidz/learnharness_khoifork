@@ -37,11 +37,12 @@ Bảng đối chiếu nhanh giữa **LearnHarness `v0.6.1` gốc** và **ChronoH
 | **Cài đặt trên Windows** | `LearnHarness`, lưu ở `%APPDATA%\LearnHarness` | **Tách riêng `ChronoHarness`** (`com.chronoharness.desktop`), `%APPDATA%\ChronoHarness\data\`, NSIS/GUID cô lập — chạy song song được với bản gốc |
 | **Chế độ học & Nhịp dạy** | Một chế độ dạy mặc định duy nhất | **`Long-Term` / `Exam Prep`** + **3 nhịp dạy (`Thorough` / `Efficient` / `Crash`)** + **lọc theo môn (`Subject Scope`)** + **lưu tối đa 30 hồ sơ kỳ thi (`Saved Exams`)** |
 | **Liên kết Graph ↔ FSRS-6 ↔ Practice** | Graph chỉ lưu khái niệm; Practice độc lập với Flashcards | **Bản đồ nhiệt FSRS-6 trên Graph**, `Readiness %` có trọng số, nút **`Practice weak`** & **`Drill`**, tự **chấm ngược FSRS** khi `conclude` Practice + **1-day recheck**, **FSRS-6 Optimizer** & **Fuzz** |
+| **Sổ tay lỗi sai & Phân tích AI** | Chỉ hiển thị đúng/sai & giải thích tĩnh trong phiên chat | **Trang `/mistakes`** gom mọi câu sai / `"I don't know"` / bài Practice chưa giải gọn, **phân loại 9 nhóm lỗi**, tự động phân tích ngắn nguyên nhân + **"Next time" rule** ngay dưới nút **`Why`**, tool `mistakes` cho AI và tự nhắc trong **Exam Prep** |
 | **Nhận biết khoảng nghỉ học** | Không theo dõi thời gian gián đoạn giữa các lượt | **Temporal Gap Hints** tự gắn ghi chú tạm sau `>= 4 giờ` / `>= 24 giờ` nghỉ trên payload gửi model |
 | **Học trên điện thoại (QR)** | Không có | **Mobile Study Companion v2** qua `Same Wi-Fi (LAN)` hoặc `Any network (HTTPS)` (Cloudflare Quick Tunnel pre-warm, chạy nền 60m): tab **`Photo`**, **`FSRS Cards`**, **`Exam & Chat`** (kèm **`📷 Camera`** & **`📎 Attach File`** trong chat) |
 | **Ghi chú, Toán & Sửa tin nhắn** | Chỉ trích dẫn vào câu hỏi hoặc chat phụ | **Sổ tay từng bài (`Notes`)** kéo rộng `280–560px`, bôi đen **`Note`** để trích dẫn, **click công thức toán copy LaTeX**, **`Edit Last`** tua ngược lượt cuối, **Pin/Archive** session, **dán ảnh Ctrl+V** |
 | **Nhập sách & Ngôn ngữ Graph** | Không có `.epub`, trích xuất hay bị đổi sang tiếng Anh | Nhập **`.epub`** (≤ 25 MB) kèm **`[DOCUMENT OUTLINE DIGEST]`**, giữ ngôn ngữ nguồn (**`Extraction language`**), sửa bare LaTeX & đóng gói KaTeX standalone |
-| **Sao lưu toàn bộ dữ liệu** | Sao chép thủ công thư mục `data/` | **1-Click `Backup & Restore`** ra file `.json` (không xuất `auth.json` / API keys) |
+| **Sao lưu toàn bộ dữ liệu** | Sao chép thủ công thư mục `data/` | **1-Click `Backup & Restore`** ra file `.json` (kèm `mistakes.json`, không xuất `auth.json` / API keys) |
 | **Model & Hiệu năng** | Catalog tĩnh `pi-ai 1.4.0` | **Pi `1.5.2`**, thêm **`gemini-4-hydrogen` / `gemini-4-carbon`**, **Live Model Discovery** (Google/OpenRouter + Copilot dynamic), **`+ Add model ID`**, **`Pause <provider>`**, **Virtual Transcript**, sửa ngân sách **Researcher** |
 
 Chi tiết từng nhóm nâng cấp so với bản gốc:
@@ -118,7 +119,18 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
   - `Export snapshot` tải file `kronoharness-backup-YYYY-MM-DD.json` (`kronoharness-backup-v1`) chứa Knowledge Graph, toàn bộ Chats, Flashcards FSRS-6 + sources, `exam-prep.json`, `settings.json`, `live-models-cache.json` (**không** bao gồm `auth.json` / API keys).
   - `Restore snapshot` khôi phục toàn bộ dữ liệu học tập từ file JSON đó khi cài lại Windows hoặc chuyển máy.
 
-### 6. Model, Provider, Hiệu năng & GitHub Actions Workflows
+### 6. Sổ tay Lỗi sai & Phân tích Nguyên nhân AI (`/mistakes` — port từ `vvcdev/learnharness` via `amoghu1s1/twig`)
+- **Tự động ghi nhận (`src/core/mistakes.ts`, `src/store/mistakes.ts`):** Mọi câu quiz sai, bấm `"I don't know"`, hoặc bài tập **Practice** kết thúc chưa trọn vẹn (`solvedWithHints` / `surrendered` / `movedOn`) được tự động lưu vào `data/mistakes.json` sau mỗi lượt hoàn tất (`mistakesAfterTurn`).
+- **Phân tích nguyên nhân & Rule rút kinh nghiệm (`src/server/mistake-analysis.ts`):** Model ở slot **`Cheap`** phân loại lỗi theo **9 nhóm** (`Knowledge gap`, `Confusable pair`, `Reversal`, `Setup error`, `Calculation slip`, `Misread`, `Incomplete reasoning`, `Wrong situation`, `Code logic bug`), chỉ rõ **What you did**, **Correct** (dùng đúng số liệu bài làm) và một dòng **`Next time`** để tránh lặp lại. Có thể bật/tắt tự động phân tích và giới hạn ngân sách (`1–100` lần/24h, mặc định `20`) trong **Settings → Agent → Tools (`Mistake analysis` & `Daily analysis limit`)**.
+- **Hiển thị ngay trong bài học & trang riêng `/mistakes`:**
+  - Nút **`Mistakes`** nằm gọn dưới chân Sidebar trái (bên cạnh `Settings`, không chiếm diện tích danh sách Sessions). Hỗ trợ nhóm theo **Loại lỗi / Phiên học / Chủ đề**, lọc tìm kiếm, quét bù toàn bộ lịch sử cũ (`Scan past sessions`), `Retry`, `Cancel` và `Delete`.
+  - Bấm **`Why`** trên từng thẻ câu trả lời sai trong chat để mở ngay phần phân tích lỗi & rule rút kinh nghiệm.
+- **Tích hợp với Tutor, Exam Prep & Backup:**
+  - AI `Teacher` có tool chỉ đọc native **`mistakes`** (`src/agent/tools/mistakes.ts`) để tra cứu lỗi cũ khi sửa bài.
+  - Khi bật chế độ khác mặc định (**`Exam Prep`**, **`Efficient`**, **`Crash`**, hoặc **`Subject Scope`**), directive gửi model tự đính kèm thống kê lỗi hay gặp và tối đa **3** quy tắc **`Next time`** gần nhất (vẫn giữ mặc định `Long-Term + Thorough` hoàn toàn không tốn token thêm).
+  - **`Backup & Restore`** tự động đóng gói và khôi phục luôn `mistakes.json`.
+
+### 7. Model, Provider, Hiệu năng & GitHub Actions Workflows
 - **Nâng cấp runtime `@earendil-works/pi-ai` & `@earendil-works/pi-agent-core` lên `1.5.2`** (upstream v0.6.1 dùng `1.4.0`).
 - **Live Model Discovery & Supplemental Catalog (`src/agent/live-models.ts`, `electron/subscriptions.cjs`, `components/model-picker.tsx`):**
   - Bổ sung sẵn **`gemini-4-hydrogen`** và **`gemini-4-carbon`** (Google, Google Vertex, GitHub Copilot).
@@ -145,6 +157,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
 | **Ghi chú, trích dẫn & Copy LaTeX** | Bấm **`Notes`** ở góc trên phải chat; bôi đen chữ → **`Note`** để trích dẫn; click vào công thức toán để copy LaTeX; bấm **`Edit Last`** nếu muốn sửa lại câu vừa hỏi. |
 | **Nhập sách `.epub` / tài liệu** | Ở màn hình **Graph** (hoặc Home), bấm **`Extract files…`** → chọn `.epub`, `.pdf`, `.md`, `.tex`, `.txt` (≤ 25 MB/file). |
 | **Học & gửi ảnh từ điện thoại** | Bấm icon **QR / Điện thoại** cạnh ô nhập → chọn **`Any network (HTTPS)`** hoặc **`Same Wi-Fi (LAN)`** → quét QR → bấm **`Done`** để ẩn bảng QR nhưng giữ kết nối chạy nền. Dùng tab **`Photo`**, **`FSRS Cards`**, **`Exam & Chat`** (có **`📷 Camera`** & **`📎 Attach File`**). Khi cần ngắt hẳn, mở lại bảng QR bấm **`Disconnect`**. |
+| **Xem lại & phân tích lỗi sai** | Bấm **`Mistakes`** dưới chân Sidebar trái (cạnh `Settings`) → chọn **`Scan`** để quét lịch sử cũ hoặc mở nút **`Why`** ngay dưới câu vừa làm sai trong chat. |
 | **Sao lưu / Chuyển máy** | **Settings (`Ctrl+,`) → `General` → `Backup & Restore` → `Export snapshot`**; sang máy mới bấm **`Restore snapshot`** và nhập lại API key ở **`Providers`**. |
 
 ---

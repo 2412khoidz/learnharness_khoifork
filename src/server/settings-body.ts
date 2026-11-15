@@ -28,7 +28,16 @@ import type {
 	ModelSlot,
 	RoleModelOverride,
 } from "../core/settings.ts";
-import { BACKGROUND_MODEL_ROLES, CACHE_RETENTIONS, COMPACTION_THRESHOLD_FLOOR, CUSTOM_MODEL_PIN_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS } from "../core/settings.ts";
+import {
+	BACKGROUND_MODEL_ROLES,
+	CACHE_RETENTIONS,
+	COMPACTION_THRESHOLD_FLOOR,
+	CUSTOM_MODEL_PIN_FLOOR,
+	EXTRACTION_CHUNK_TOKENS_FLOOR,
+	MISTAKE_ANALYSIS_DAILY_CAP_MAX,
+	MISTAKE_ANALYSIS_DAILY_CAP_MIN,
+	MODEL_SLOTS,
+} from "../core/settings.ts";
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
 import { isSearchEngineId, SEARCH_ENGINES } from "../core/search.ts";
 import { isDictationLanguage } from "../core/dictation.ts";
@@ -226,6 +235,31 @@ export function parseAgentSettingsBody(body: unknown): SettingsBodyResult<AgentS
 			return { ok: false, error: "fileAccess.folders must be absolute on the server filesystem (or start with ~/)" };
 		}
 		settings.fileAccess = parsed.settings;
+	}
+	if (raw.mistakeAnalysis !== undefined) {
+		const m = asRecord(raw.mistakeAnalysis);
+		if (!m) return { ok: false, error: "mistakeAnalysis must be an object" };
+		const next: { auto?: boolean; dailyCap?: number } = {};
+		if (m.auto !== undefined) {
+			if (typeof m.auto !== "boolean") return { ok: false, error: "mistakeAnalysis.auto must be a boolean" };
+			next.auto = m.auto;
+		}
+		if (m.dailyCap !== undefined) {
+			if (
+				typeof m.dailyCap !== "number"
+				|| !Number.isFinite(m.dailyCap)
+				|| !Number.isInteger(m.dailyCap)
+				|| m.dailyCap < MISTAKE_ANALYSIS_DAILY_CAP_MIN
+				|| m.dailyCap > MISTAKE_ANALYSIS_DAILY_CAP_MAX
+			) {
+				return {
+					ok: false,
+					error: `mistakeAnalysis.dailyCap must be an integer between ${MISTAKE_ANALYSIS_DAILY_CAP_MIN} and ${MISTAKE_ANALYSIS_DAILY_CAP_MAX}`,
+				};
+			}
+			next.dailyCap = m.dailyCap;
+		}
+		settings.mistakeAnalysis = next;
 	}
 	return { ok: true, settings };
 }

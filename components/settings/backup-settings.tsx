@@ -14,6 +14,7 @@ interface BackupRestoreResponse {
 		chatsCount: number;
 		flashcardsPropositionsCount: number;
 		flashcardsReviewsCount: number;
+		mistakesCount?: number;
 	};
 	error?: string;
 }
@@ -74,7 +75,7 @@ export function BackupSettings() {
 			const s = data.summary;
 			setStatusMessage(
 				s
-					? `Restored ${data.restoredFiles ?? 0} files (${s.nodesCount} nodes, ${s.chatsCount} sessions, ${s.flashcardsPropositionsCount} card propositions). Reload app to refresh views.`
+					? `Restored ${data.restoredFiles ?? 0} files (${s.nodesCount} nodes, ${s.chatsCount} sessions, ${s.flashcardsPropositionsCount} card propositions, ${s.mistakesCount ?? 0} mistakes). Reload app to refresh views.`
 					: `Restored ${data.restoredFiles ?? 0} files. Reload app to refresh views.`,
 			);
 		} catch (err) {
@@ -88,7 +89,7 @@ export function BackupSettings() {
 		<SettingsGroup label="Backup & Restore" testid="group-backup">
 			<SettingsRow
 				label="Export learning snapshot"
-				hint="Download knowledge graph, chat history, FSRS-6 flashcards, and exam settings into one portable file. API keys are never exported."
+				hint="Download knowledge graph, chat history, FSRS-6 flashcards, mistakes log, and exam settings into one portable file. API keys are never exported."
 				testid="row-backup-export"
 			>
 				<Button

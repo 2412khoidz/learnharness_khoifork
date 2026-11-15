@@ -682,4 +682,90 @@ describe("Role-tailored pace directives (TobiasSamsonsen overrides)", () => {
 		assert.match(examThorough.promptDirective!, /preserving full derivation depth/i);
 		assert.match(examThorough.promptDirective!, /Pace \(Thorough\)/);
 	});
+
+	it("surfaces recurring mistake patterns and Next time rules only in non-default Exam Prep directives", async () => {
+		const dir = await makeTempDir("lh-exam-mistakes-");
+		const examPrepFile = path.join(dir, "exam-prep.json");
+		const flashcardsFile = path.join(dir, "flashcards.json");
+		const mistakesFile = path.join(dir, "mistakes.json");
+
+		await fs.writeFile(flashcardsFile, JSON.stringify({ propositions: {}, reviews: [] }), "utf8");
+		await fs.writeFile(
+			mistakesFile,
+			JSON.stringify([
+				{
+					id: "c1:q1",
+					chatId: "c1",
+					sessionTitle: "Optics",
+					sessionKind: "teaching",
+					kind: "wrong",
+					question: "Sign convention for concave mirror",
+					yourAnswer: "+f",
+					correctAnswer: "-f",
+					answeredAt: "2026-11-14T10:00:00.000Z",
+					createdAt: "2026-11-14T10:00:00.000Z",
+					status: "ready",
+					analysis: {
+						errorType: "reversal",
+						topic: "mirror sign convention",
+						whatYouDid: "Flipped focal length sign",
+						correct: "Concave mirrors have negative focal length in Cartesian convention",
+						rule: "Check incoming light direction before signing f",
+					},
+				},
+				{
+					id: "c1:q2",
+					chatId: "c1",
+					sessionTitle: "Optics",
+					sessionKind: "teaching",
+					kind: "wrong",
+					question: "Magnification orientation",
+					yourAnswer: "upright",
+					correctAnswer: "inverted",
+					answeredAt: "2026-11-15T10:00:00.000Z",
+					createdAt: "2026-11-15T10:00:00.000Z",
+					status: "ready",
+					analysis: {
+						errorType: "reversal",
+						topic: "magnification sign",
+						whatYouDid: "Assumed positive m means inverted",
+						correct: "Negative m means inverted real image",
+						rule: "Verify image sign after computing m = -di/do",
+					},
+				},
+			]),
+			"utf8",
+		);
+
+		const store = createMemoryGraphStore([
+			{
+				id: "n1",
+				name: "Optics",
+				statement: "Lens equation",
+				aliases: [],
+				createdAt: "2026-11-01T00:00:00.000Z",
+				provenance: [{ chatId: "c1", messageId: "m1" }],
+			},
+		]);
+
+		// Pure default Long-Term + Thorough unscoped remains null even when mistakes exist
+		const defaultStatus = readExamPrepStatus({ graphStore: store, examPrepFile, flashcardsFile, mistakesFile });
+		assert.equal(defaultStatus.promptDirective, null);
+		assert.equal(defaultStatus.mistakeHints?.totalCount, 2);
+
+		// Exam Prep mode surfaces recurring pattern & Next time rules + teacher tool reminder
+		writeExamPrepConfig({ mode: "exam", examTitle: "Physics Midterm", examDate: "2026-11-28", pace: "efficient" }, examPrepFile);
+		const examStatus = readExamPrepStatus({
+			graphStore: store,
+			examPrepFile,
+			flashcardsFile,
+			mistakesFile,
+			now: Date.UTC(2026, 10, 15, 12, 0, 0),
+		});
+		assert.ok(examStatus.promptDirective);
+		assert.match(examStatus.promptDirective!, /Recorded Mistakes: 2 total · top pattern: Reversal \(2\)\./);
+		assert.match(examStatus.promptDirective!, /Check incoming light direction before signing f/);
+		assert.match(examStatus.promptDirective!, /Verify image sign after computing m = -di\/do/);
+		assert.match(examStatus.promptDirective!, /mistakes` tool/);
+	});
 });

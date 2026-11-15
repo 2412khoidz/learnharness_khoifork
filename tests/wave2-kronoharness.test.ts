@@ -283,6 +283,32 @@ describe("Wave 2: 1-Click Snapshot Backup & Restore", () => {
 		);
 		await fs.writeFile(path.join(srcDir, "core-plugin-data", "flashcards", "sources", "s1.md"), "# Notes", "utf8");
 		await fs.writeFile(path.join(srcDir, "exam-prep.json"), JSON.stringify({ mode: "exam" }), "utf8");
+		await fs.writeFile(
+			path.join(srcDir, "mistakes.json"),
+			JSON.stringify([
+				{
+					id: "chat_1:tc1",
+					chatId: "chat_1",
+					sessionTitle: "Demo",
+					sessionKind: "teaching",
+					kind: "wrong",
+					question: "2+2?",
+					yourAnswer: "5",
+					correctAnswer: "4",
+					answeredAt: "2026-11-15T00:00:00.000Z",
+					createdAt: "2026-11-15T00:00:00.000Z",
+					status: "ready",
+					analysis: {
+						errorType: "calculation-slip",
+						topic: "addition",
+						whatYouDid: "picked 5",
+						correct: "4",
+						rule: "check small sums",
+					},
+				},
+			]),
+			"utf8",
+		);
 
 		const bundle = exportLearningBackup(srcDir);
 		assert.equal(bundle.format, "kronoharness-backup-v1");
@@ -291,12 +317,15 @@ describe("Wave 2: 1-Click Snapshot Backup & Restore", () => {
 		assert.equal(bundle.summary.chatsCount, 1);
 		assert.equal(bundle.summary.flashcardsPropositionsCount, 1);
 		assert.equal(bundle.summary.flashcardsReviewsCount, 2);
+		assert.equal(bundle.summary.mistakesCount, 1);
 		assert.equal(Object.hasOwn(bundle.files, "auth.json"), false);
 		assert.ok(!JSON.stringify(bundle).includes("SECRET_KEY_DO_NOT_EXPORT"));
 
 		const restored = importLearningBackup(bundle, dstDir);
 		assert.equal(restored.ok, true);
-		assert.equal(restored.restoredFiles, 6);
+		assert.equal(restored.restoredFiles, 7);
+		assert.equal(restored.summary.mistakesCount, 1);
+		assert.match(await fs.readFile(path.join(dstDir, "mistakes.json"), "utf8"), /check small sums/);
 		assert.equal(
 			await fs.readFile(path.join(dstDir, "graph", "nodes.jsonl"), "utf8"),
 			"{\"id\":\"n1\"}\n{\"id\":\"n2\"}\n",

@@ -9,6 +9,7 @@ export interface BackupSummary {
 	chatsCount: number;
 	flashcardsPropositionsCount: number;
 	flashcardsReviewsCount: number;
+	mistakesCount: number;
 }
 
 export interface KronoHarnessBackupBundle {
@@ -29,6 +30,7 @@ export class BackupError extends Error {
 
 const ALLOWED_SINGLE_FILES = new Set([
 	"exam-prep.json",
+	"mistakes.json",
 	"settings.json",
 	"live-models-cache.json",
 	"core-plugin-data/flashcards/flashcards.json",
@@ -98,12 +100,24 @@ export function computeBackupSummary(files: Record<string, string>): BackupSumma
 			// Leave counts at 0 if unreadable
 		}
 	}
+	let mistakesCount = 0;
+	const rawMistakes = files["mistakes.json"];
+	if (typeof rawMistakes === "string") {
+		try {
+			const parsed = JSON.parse(rawMistakes) as unknown;
+			if (Array.isArray(parsed)) mistakesCount = parsed.length;
+		} catch {
+			// Ignore malformed count preview during summary computation
+		}
+	}
+
 	return {
 		nodesCount,
 		chainsCount,
 		chatsCount,
 		flashcardsPropositionsCount,
 		flashcardsReviewsCount,
+		mistakesCount,
 	};
 }
 

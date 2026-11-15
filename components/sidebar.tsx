@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { MenuShell } from "@/components/menu-shell";
 import { DeleteSessionDialog } from "@/components/delete-session-dialog";
 import type { ChatDeleteMode, ThemeMode } from "@/src/core";
-import { ArchiveIcon, ArchiveRestoreIcon, DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PinIcon, PinOffIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveRestoreIcon, CircleAlertIcon, DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PinIcon, PinOffIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
 import { ActivitySection } from "@/components/activity-dock";
 import { CoverageMenuBlock } from "@/components/extraction-coverage";
 import { LhMark } from "@/components/lh-mark";
@@ -916,10 +916,9 @@ function SessionsSidebar() {
 					    learner opted out (no ambient signal, user decision). */}
 					<ActivitySection />
 
-					{/* Settings entry (settings-app wave): same row language as
-					    New session — quiet, bottom-pinned, opens the centered
-					    dialog (also mod+, in the keyboard registry). */}
-					<div className="px-3 pb-3 pt-1">
+					{/* Bottom utility row: Settings + Mistakes sit side-by-side so the
+					    session list keeps its full vertical space. */}
+					<div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1">
 						<Hint label="Settings" action="open-settings" side="right">
 							<button
 								type="button"
@@ -931,6 +930,17 @@ function SessionsSidebar() {
 								Settings
 							</button>
 						</Hint>
+						<Link
+							href="/mistakes"
+							data-testid="nav-mistakes"
+							className={cn(
+								"flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+								pathname?.startsWith("/mistakes") && "bg-accent text-foreground",
+							)}
+						>
+							<CircleAlertIcon className="size-3" />
+							Mistakes
+						</Link>
 					</div>
 				</div>
 

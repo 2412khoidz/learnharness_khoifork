@@ -42,6 +42,8 @@ import { providerKeyPresent } from "./keys.ts";
 import { recordPracticeFsrsOutcome } from "./graph-fsrs.ts";
 import { readExamPrepStatus } from "./exam-prep.ts";
 import { formatExamPrepDirectiveForRole } from "../core/exam-prep.ts";
+import { mistakesAfterTurn } from "./mistakes.ts";
+import { readMistakes } from "../store/mistakes.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
 import {
 	extractionEnabled,
@@ -792,6 +794,7 @@ export async function handleChatInput(
 						// The registry drop's signal (2026-09-20): no live engine
 						// = no research tool in the teacher's registry.
 						searchAvailable,
+						mistakeStore: { read: readMistakes },
 					},
 					agentOpts,
 				)
@@ -914,6 +917,11 @@ export async function handleChatInput(
 					// (extraction-UX redesign, 2026-09-24): the trigger compares
 					// against it and the pipeline's batches share it.
 					triggerExtraction(stores, extraction, chatId, effective.graph.extractionChunkTokens);
+				}
+				try {
+					mistakesAfterTurn(chatId);
+				} catch (mistakeErr) {
+					console.error(`[chat ${chatId}] mistakes hook failed:`, mistakeErr);
 				}
 				// PARKED DISMISSAL (owner, 2026-10-04): a dismissal that arrived
 				// mid-turn was parked by the dismiss route (202); now that

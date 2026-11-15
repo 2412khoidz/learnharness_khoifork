@@ -47,12 +47,19 @@ export type ExamPrepPatch = Partial<ExamPrepConfig> & {
 	clearExam?: boolean;
 };
 
+export interface ExamPrepMistakeHints {
+	totalCount: number;
+	recurringPattern: string | null;
+	recentRules: string[];
+}
+
 export interface ExamScopeContext {
 	availableScopes?: ExamScopeOption[];
 	activeScopeLabels?: string[];
 	scopedNodeCount?: number;
 	totalNodeCount?: number;
 	priorityPropositionIds?: string[];
+	mistakeHints?: ExamPrepMistakeHints;
 }
 
 export interface ExamPrepStatus {
@@ -71,6 +78,7 @@ export interface ExamPrepStatus {
 	scopedNodeCount: number;
 	totalNodeCount: number;
 	priorityPropositionIds: string[];
+	mistakeHints?: ExamPrepMistakeHints;
 	promptDirective: string | null;
 }
 
@@ -374,6 +382,21 @@ interface DirectiveSummaryInput {
 	weakFoundationNames: readonly string[];
 	duePropositionNames: readonly string[];
 	untrackedFoundationNames: readonly string[];
+	mistakeHints?: ExamPrepMistakeHints;
+}
+
+function mistakeDirectiveLine(hints: ExamPrepMistakeHints | undefined, role: StudyDirectiveRole): string {
+	if (!hints || hints.totalCount <= 0) return "";
+	const headParts = [`Recorded Mistakes: ${hints.totalCount} total`];
+	if (hints.recurringPattern) headParts.push(`top pattern: ${hints.recurringPattern}`);
+	const parts = [`${headParts.join(" · ")}.`];
+	if (hints.recentRules.length > 0) {
+		parts.push(`Guard these "Next time" rules: ${hints.recentRules.map((rule) => `"${rule}"`).join("; ")}.`);
+	}
+	if (role === "teacher") {
+		parts.push("Use the `mistakes` tool for full error details when repairing misses.");
+	}
+	return parts.join(" ");
 }
 
 function renderStudyModeDirective(input: DirectiveSummaryInput, role: StudyDirectiveRole): string | null {
@@ -398,6 +421,7 @@ function renderStudyModeDirective(input: DirectiveSummaryInput, role: StudyDirec
 		input.weakFoundationNames.length > 0 ? `Priority Weak Foundations (reinforce first): ${input.weakFoundationNames.join(", ")}.` : "",
 		input.duePropositionNames.length > 0 ? `Due/Decaying Propositions: ${input.duePropositionNames.join(", ")}.` : "",
 		input.untrackedFoundationNames.length > 0 ? `Untracked Foundations (no FSRS cards yet): ${input.untrackedFoundationNames.join(", ")}.` : "",
+		mistakeDirectiveLine(input.mistakeHints, role),
 		input.mode === "exam" ? examSelectionLine(input.pace) : "",
 		PACE_ROLE_DIRECTIVE[role][input.pace],
 	].filter(Boolean);
@@ -426,6 +450,7 @@ export function formatExamPrepDirectiveForRole(
 			weakFoundationNames: status.weakFoundationNames,
 			duePropositionNames: status.duePropositionNames,
 			untrackedFoundationNames: status.untrackedFoundationNames,
+			mistakeHints: status.mistakeHints,
 		},
 		role,
 	);
@@ -505,6 +530,7 @@ export function computeExamPrepStatus(
 			weakFoundationNames,
 			duePropositionNames,
 			untrackedFoundationNames,
+			mistakeHints: scopeContext?.mistakeHints,
 		},
 		"teacher",
 	);
@@ -525,6 +551,7 @@ export function computeExamPrepStatus(
 		scopedNodeCount,
 		totalNodeCount,
 		priorityPropositionIds,
+		...(scopeContext?.mistakeHints ? { mistakeHints: scopeContext.mistakeHints } : {}),
 		promptDirective,
 	};
 }
