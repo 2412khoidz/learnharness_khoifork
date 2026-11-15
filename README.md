@@ -64,15 +64,15 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
 - **Công tắc Chế độ (`Study Mode`):**
   - `Long-Term`: Học hiểu sâu để ghi nhớ bền vững dài hạn.
   - `Exam Prep`: Mở thêm bộ quản lý kỳ thi (`Saved Exams`), tên kỳ thi, đếm ngược ngày thi (`D-x` / `Today` / `+Nd`) và nút **`Drill`**.
-- **3 mức Nhịp dạy (`Study Pace`):**
-  - `Thorough`: Ưu tiên dẫn xuất đầy đủ, chứng minh chặt chẽ và nền tảng gốc trước khi đi tiếp.
-  - `Efficient`: Cân bằng trực giác với chứng minh cốt lõi, vá nền tảng yếu/đến hạn trước, bỏ qua nhánh phụ rườm rà.
-  - `Crash`: Tối đa điểm thi/phút — đánh thẳng vào định lý hay ra, gốc yếu/đến hạn, khuôn mẫu giải bài nhanh và truy hồi tốc độ cao.
+- **3 mức Nhịp dạy theo từng vai trò (`Study Pace` cho `Prober` / `Teacher` / `Practice`):**
+  - `Thorough`: Dò rộng mặt bằng (`Prober`), dẫn xuất & chứng minh đầy đủ (`Teacher`), giữ nguyên Socratic nudging sâu (`Practice`).
+  - `Efficient`: `Prober` giảm khoảng một nửa số câu hỏi dò dư thừa; `Teacher` cân bằng trực giác & chứng minh cốt lõi, **tin ngay câu trả lời đúng tự làm** (không hỏi dò xác nhận thừa trừ khi cần gợi ý); `Practice` trả lời ngắn gọn theo lỗi đầu tiên và nếu kẹt cùng một chỗ qua 2 lần gợi ý sẽ chốt bước thiếu rồi `movedOn` (`retest: true`).
+  - `Crash`: Tối đa điểm thi/phút — `Prober` chỉ hỏi ~2–4 câu cốt lõi; `Teacher` dạy theo mẫu (ý chính → quy trình giải → dấu hiệu nhận biết khi nào dùng) + 1 câu kiểm tra mỗi bước; `Practice` ưu tiên đề thi/chuyển giao trên nền tảng yếu/đến hạn và chốt nhanh khi kẹt quá 2 lượt gợi ý.
 - **Hồ sơ nhiều kỳ thi (`Saved Exams`):** Tạo và lưu tối đa **30 hồ sơ thi** riêng biệt (`+ New`, `Edit`, `Delete`, `Choose subject`, dropdown đổi nhanh); mỗi hồ sơ giữ **Tên kỳ thi**, **Ngày thi**, **Pace** và **Cụm môn** riêng.
 - **Nút `Drill` & Nhắc ôn ưu tiên:** Thẻ tóm tắt ngay `Weak` và `Due (N)`. Bấm **`Drill`** mở thẳng màn hình tạo phiên **Practice** (`/chat/new?mode=practice&drill=1`) đã nạp sẵn tối đa **8** mệnh đề ưu tiên (lấy từ tối đa `12` mục trong `priorityPropositionIds`) cùng gợi ý prompt ôn thi.
 - **Cơ chế hoạt động & mặc định nguyên bản:**
-  - Ở mỗi lượt chat trong **Prober**, **Teacher** và **Practice**, server đọc cấu hình hiện tại và chèn khối **`[ChronoHarness Study Mode Directive]`** vào **cuối** `systemPrompt` để tận dụng tối đa **prefix prompt caching** (`src/agent/teacher-agent.ts`).
-  - Khối directive bị **giới hạn cứng** tối đa **6** `Weak Foundations` + **8** `Due/Decaying Propositions` + **6** `Untracked Foundations` (từ 436 ký tự khi rỗng đến khoảng ~1,200–1,800 ký tự khi đầy đủ, rất nhỏ so với `systemPrompt` nền của `Teacher` là `39,924` ký tự).
+  - Ở mỗi lượt chat trong **Prober**, **Teacher** và **Practice**, server đọc cấu hình hiện tại và chèn khối **`[ChronoHarness Study Mode Directive]`** tách riêng cho từng vai trò vào **cuối** `systemPrompt` để giữ tối đa **prefix prompt caching** (`src/agent/teacher-agent.ts`, `src/core/exam-prep.ts`).
+  - Khối directive bị **giới hạn cứng** tối đa **6** `Weak Foundations` + **8** `Due/Decaying Propositions` + **6** `Untracked Foundations` (+ tối đa **3** quy tắc từ Sổ tay lỗi sai khi có), giữ phần đuôi prompt rất gọn và ổn định.
   - **Mặc định giống LearnHarness gốc:** Khi đặt ở `Long-Term` + `Thorough` + `All subjects` (không lọc cụm môn), ChronoHarness **không chèn** directive (`promptDirective = null`), giữ nguyên 100% hành vi gốc.
   - **`Side question`** (hỏi nhanh khi bôi đen văn bản) đi qua luồng `src/agent/side-chat.ts` riêng và chọn model theo thứ tự: `agent.models.sideQuestion` → model của session hiện tại → slot `Strong`.
 
@@ -116,19 +116,19 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
   - Mục **`Extraction language`** trong Settings (`src/core/output-language.ts`, mặc định `Auto (match session/notes)`, hỗ trợ `Tiếng Việt`, `English`, `日本語`, `中文`, `한국어`, `Français`, `Deutsch`, `Español`) giúp Graph & Flashcards không bị tự dịch sang tiếng Anh khi bạn học bằng tiếng Việt.
   - Sửa lỗi delimiter toán (`src/core/math-delims.ts`), phục hồi bare LaTeX cho node Graph cũ (`src/core/bare-math.ts`) & Flashcards (`plain-math.js`), và đóng gói đầy đủ font/CSS KaTeX trong `scripts/build-server.mjs`.
 - **Sao lưu & Khôi phục 1-Click (`Settings → General → Backup & Restore`, `src/server/backup.ts`):**
-  - `Export snapshot` tải file `kronoharness-backup-YYYY-MM-DD.json` (`kronoharness-backup-v1`) chứa Knowledge Graph, toàn bộ Chats, Flashcards FSRS-6 + sources, `exam-prep.json`, `settings.json`, `live-models-cache.json` (**không** bao gồm `auth.json` / API keys).
+  - `Export snapshot` tải file `kronoharness-backup-YYYY-MM-DD.json` (`kronoharness-backup-v1`) chứa Knowledge Graph, toàn bộ Chats, Flashcards FSRS-6 + sources, `mistakes.json`, `exam-prep.json`, `settings.json`, `live-models-cache.json` (**không** bao gồm `auth.json` / API keys).
   - `Restore snapshot` khôi phục toàn bộ dữ liệu học tập từ file JSON đó khi cài lại Windows hoặc chuyển máy.
 
 ### 6. Sổ tay Lỗi sai & Phân tích Nguyên nhân AI (`/mistakes` — port từ `vvcdev/learnharness` via `amoghu1s1/twig`)
-- **Tự động ghi nhận (`src/core/mistakes.ts`, `src/store/mistakes.ts`):** Mọi câu quiz sai, bấm `"I don't know"`, hoặc bài tập **Practice** kết thúc chưa trọn vẹn (`solvedWithHints` / `surrendered` / `movedOn`) được tự động lưu vào `data/mistakes.json` sau mỗi lượt hoàn tất (`mistakesAfterTurn`).
-- **Phân tích nguyên nhân & Rule rút kinh nghiệm (`src/server/mistake-analysis.ts`):** Model ở slot **`Cheap`** phân loại lỗi theo **9 nhóm** (`Knowledge gap`, `Confusable pair`, `Reversal`, `Setup error`, `Calculation slip`, `Misread`, `Incomplete reasoning`, `Wrong situation`, `Code logic bug`), chỉ rõ **What you did**, **Correct** (dùng đúng số liệu bài làm) và một dòng **`Next time`** để tránh lặp lại. Có thể bật/tắt tự động phân tích và giới hạn ngân sách (`1–100` lần/24h, mặc định `20`) trong **Settings → Agent → Tools (`Mistake analysis` & `Daily analysis limit`)**.
+- **Tự động ghi nhận (`src/core/mistakes.ts`, `src/store/mistakes.ts`):** Mọi câu quiz sai (`quiz`, `probe`, `mcq`, `mcq_batch` — bỏ qua trả lời giọng nói `byVoice` chưa chấm), bấm `"I don't know"`, hoặc bài tập **Practice** kết thúc chưa trọn vẹn (`Solved, but needed hints` / `Moved on without solving` / `Gave up`) được tự động lưu vào `data/mistakes.json` sau mỗi lượt hoàn tất (`mistakesAfterTurn`).
+- **Phân tích nguyên nhân & Rule rút kinh nghiệm (`src/server/mistake-analysis.ts`):** Model ở slot **`Cheap`** (role `analyst`) phân loại lỗi theo **9 nhóm** (`Knowledge gap`, `Confusable pair`, `Reversal`, `Setup error`, `Calculation slip`, `Misread`, `Incomplete reasoning`, `Wrong situation`, `Code or logic bug`), chỉ rõ **`What happened`**, **`What’s correct`** (dùng đúng số liệu bài làm) và quy tắc **`Remember this`** (hiển thị kèm nhãn **`Next time:`** dưới nút **`Why`**). Có thể bật/tắt tự động phân tích và giới hạn ngân sách (`1–100` lần/24h trượt, mặc định `20`) trong **Settings → Agent → Tools (`Mistake analysis` & `Daily analysis limit`)**. *(Lưu ý: nếu tắt tự động phân tích, hệ thống cũng bỏ qua bước tự ghi lỗi sau mỗi lượt; có thể vào `/mistakes` bấm **`Scan past sessions`** để quét bù bất cứ lúc nào.)*
 - **Hiển thị ngay trong bài học & trang riêng `/mistakes`:**
-  - Nút **`Mistakes`** nằm gọn dưới chân Sidebar trái (bên cạnh `Settings`, không chiếm diện tích danh sách Sessions). Hỗ trợ nhóm theo **Loại lỗi / Phiên học / Chủ đề**, lọc tìm kiếm, quét bù toàn bộ lịch sử cũ (`Scan past sessions`), `Retry`, `Cancel` và `Delete`.
-  - Bấm **`Why`** trên từng thẻ câu trả lời sai trong chat để mở ngay phần phân tích lỗi & rule rút kinh nghiệm.
+  - Nút **`Mistakes`** nằm gọn dưới chân Sidebar trái (bên cạnh `Settings`, không chiếm diện tích danh sách Sessions). Hỗ trợ nhóm theo **`Error type` / `Session` / `Topic`** (tự chỉ ra pattern lặp lại), lọc tìm kiếm, quét bù toàn bộ lịch sử cũ (**`Scan past sessions`** → **`Analyze them`**), **`Expand all` / `Collapse all`**, **`Retry analysis`**, **`Cancel`** và xóa từng mục. *(Trường `sources` được giữ rỗng `[]` để tương thích cấu trúc vì ChronoHarness không dùng "lesson sources" theo thư mục gắn session như fork gốc.)*
+  - Bấm **`Why`** trên từng thẻ câu trả lời sai trong chat để mở ngay phần phân tích lỗi & rule **`Next time`**.
 - **Tích hợp với Tutor, Exam Prep & Backup:**
-  - AI `Teacher` có tool chỉ đọc native **`mistakes`** (`src/agent/tools/mistakes.ts`) để tra cứu lỗi cũ khi sửa bài.
-  - Khi bật chế độ khác mặc định (**`Exam Prep`**, **`Efficient`**, **`Crash`**, hoặc **`Subject Scope`**), directive gửi model tự đính kèm thống kê lỗi hay gặp và tối đa **3** quy tắc **`Next time`** gần nhất (vẫn giữ mặc định `Long-Term + Thorough` hoàn toàn không tốn token thêm).
-  - **`Backup & Restore`** tự động đóng gói và khôi phục luôn `mistakes.json`.
+  - AI `Teacher` có tool chỉ đọc native **`mistakes`** (`src/agent/tools/mistakes.ts`) với `list`, `summary`, `get` để tra cứu lỗi cũ khi sửa bài.
+  - Khi bật chế độ khác mặc định (**`Exam Prep`**, **`Efficient`**, **`Crash`**, hoặc **`Subject Scope`**), directive gửi model tự đính kèm tổng số lỗi, pattern lặp lại nhiều nhất và tối đa **3** quy tắc **`Next time`** gần nhất (vẫn giữ mặc định `Long-Term + Thorough` hoàn toàn không tốn token thêm).
+  - **`Backup & Restore`** tự động đóng gói và khôi phục luôn `mistakes.json` (hiển thị `mistakesCount` khi khôi phục).
 
 ### 7. Model, Provider, Hiệu năng & GitHub Actions Workflows
 - **Nâng cấp runtime `@earendil-works/pi-ai` & `@earendil-works/pi-agent-core` lên `1.5.2`** (upstream v0.6.1 dùng `1.4.0`).
@@ -157,7 +157,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
 | **Ghi chú, trích dẫn & Copy LaTeX** | Bấm **`Notes`** ở góc trên phải chat; bôi đen chữ → **`Note`** để trích dẫn; click vào công thức toán để copy LaTeX; bấm **`Edit Last`** nếu muốn sửa lại câu vừa hỏi. |
 | **Nhập sách `.epub` / tài liệu** | Ở màn hình **Graph** (hoặc Home), bấm **`Extract files…`** → chọn `.epub`, `.pdf`, `.md`, `.tex`, `.txt` (≤ 25 MB/file). |
 | **Học & gửi ảnh từ điện thoại** | Bấm icon **QR / Điện thoại** cạnh ô nhập → chọn **`Any network (HTTPS)`** hoặc **`Same Wi-Fi (LAN)`** → quét QR → bấm **`Done`** để ẩn bảng QR nhưng giữ kết nối chạy nền. Dùng tab **`Photo`**, **`FSRS Cards`**, **`Exam & Chat`** (có **`📷 Camera`** & **`📎 Attach File`**). Khi cần ngắt hẳn, mở lại bảng QR bấm **`Disconnect`**. |
-| **Xem lại & phân tích lỗi sai** | Bấm **`Mistakes`** dưới chân Sidebar trái (cạnh `Settings`) → chọn **`Scan`** để quét lịch sử cũ hoặc mở nút **`Why`** ngay dưới câu vừa làm sai trong chat. |
+| **Xem lại & phân tích lỗi sai** | Bấm **`Mistakes`** dưới chân Sidebar trái (cạnh `Settings`) → chọn **`Scan past sessions`** (`Analyze them`) để quét lịch sử cũ hoặc mở nút **`Why`** ngay dưới câu vừa làm sai trong chat. |
 | **Sao lưu / Chuyển máy** | **Settings (`Ctrl+,`) → `General` → `Backup & Restore` → `Export snapshot`**; sang máy mới bấm **`Restore snapshot`** và nhập lại API key ở **`Providers`**. |
 
 ---
@@ -180,9 +180,19 @@ ChronoHarness kế thừa toàn bộ kiến trúc agent 4 pha từ [**LearnHarne
 
 ---
 
+## Nền tảng hỗ trợ & Yêu cầu hệ thống
+
+- **Windows x64 (bộ cài sẵn):** Hỗ trợ đầy đủ qua bộ cài [`ChronoHarness-0.6.1-x64-setup.exe`](https://github.com/2412khoidz/learnharness_khoifork/releases/latest) (cài & lưu dữ liệu song song, độc lập với LearnHarness gốc).
+- **macOS (App Desktop Electron):** Cấu hình `electron-builder.yml` dùng **Electron `44.9.3`** (yêu cầu tối thiểu **`macOS 13 Ventura`** trở lên) với target đóng gói mặc định **`arm64` (Apple Silicon M1+)** *(hiện chưa phát hành sẵn file `.dmg` trên GitHub Releases)*.
+- **Mac Intel đời cũ (`macOS 11 Big Sur` / `12 Monterey`) hoặc mở từ máy khác:**
+  - **Cách nhẹ nhất (Web qua LAN / Tailscale):** Chạy bản Web server trên một máy Windows/Linux/Mac khác (`npm run build && npm run start -- -H 0.0.0.0 -p 3001`, có thể đặt `LH_DATA_DIR` và `LH_AUTH_FILE` tách riêng từng người theo [`docs/development.md`](docs/development.md#other-devices-on-your-network)), rồi truy cập từ **Firefox** hoặc **Chrome** trên máy Mac.
+  - **Chạy Web độc lập trên Mac:** Lõi Next.js (`16.4.3`) cần `node >= 20.9.0` (`puppeteer-core >= 22.12.0`); có thể chạy web UI qua **Node.js 22 LTS+** (hỗ trợ macOS 11/12 Intel `x64`), lưu ý CI chính thức kiểm thử trên **Node.js 26**.
+
+---
+
 ## Phát triển từ mã nguồn
 
-Yêu cầu Node.js 26+:
+Yêu cầu Node.js 26+ (khuyến nghị theo CI/release):
 
 ```bash
 npm ci
