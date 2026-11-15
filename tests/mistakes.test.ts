@@ -12,7 +12,9 @@ import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
 import {
+	FLAG_MISTAKE_TOOL,
 	filterMistakes,
+	findExplainMistakeByCallId,
 	findMistakes,
 	groupMistakes,
 	mergeMistakes,
@@ -21,6 +23,7 @@ import {
 	summarizeMistakes,
 	type MistakeRecord,
 } from "../src/core/mistakes.ts";
+import { flagMistakeTools } from "../src/agent/tools/flag-mistake.ts";
 import { MISTAKE_ANALYSIS_DAILY_CAP_DEFAULT, sanitizeUserSettings } from "../src/core/settings.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
 import type { PiEngine } from "../src/agent/models.ts";
@@ -111,6 +114,69 @@ describe("findMistakes", () => {
 		assert.equal(p.yourAnswer, "Gave up");
 		assert.equal(p.verdict, "Never found the pairing.");
 		assert.equal(p.missClass, "structural");
+	});
+	it("picks up AI-flagged explain and recall checks (with or without explicit toolCallId) and skips unflagged ones", () => {
+		const freeSession: LhMessage[] = [
+			call("e1", "explain", { question: "Why does binary search require sorted input?", committedAnswer: "Comparisons cannot eliminate half the array unless order is monotonic." }),
+			result("e1", "explain", { kind: "explain", questionText: "Why does binary search require sorted input?", text: "Because otherwise it takes $O(n)$.", committed: "Comparisons cannot eliminate half the array unless order is monotonic.", dontKnow: false, answers: [], answeredAt: "2026-11-15T10:00:00.000Z" }),
+			call("f1", FLAG_MISTAKE_TOOL, { verdict: "wrong", summary: "Stated complexity instead of the pruning invariant." }),
+			result("f1", FLAG_MISTAKE_TOOL, { targetToolCallId: "e1", verdict: "wrong", summary: "Stated complexity instead of the pruning invariant." }),
+			// Duplicate flag for e1 should de-duplicate cleanly:
+			call("f1_dup", FLAG_MISTAKE_TOOL, { toolCallId: "e1", verdict: "wrong", summary: "Dup." }),
+			result("f1_dup", FLAG_MISTAKE_TOOL, { targetToolCallId: "e1", verdict: "wrong", summary: "Dup." }),
+			// Second check answered right (never flagged):
+			call("e2", "explain", {}),
+			result("e2", "explain", { kind: "explain", questionText: "Good answer", text: "Monotonicity lets us discard half.", committed: "Monotonicity lets us discard half.", dontKnow: false, answers: [], answeredAt: "2026-11-15T10:01:00.000Z" }),
+			// Third check (recall) where learner admitted not knowing in words (flag omits targetToolCallId in details):
+			call("r1", "recall", { question: "State Baye's rule.", committedAnswer: "$P(A|B) = P(B|A)P(A)/P(B)$" }),
+			result("r1", "recall", { kind: "explain", questionText: "State Bayes' rule.", text: "I don't remember the denominator.", committed: "$P(A|B) = P(B|A)P(A)/P(B)$", dontKnow: false, answers: [], answeredAt: "2026-11-15T10:02:00.000Z" }),
+			call("f2", FLAG_MISTAKE_TOOL, { verdict: "dont_know", summary: "Could not recall normalizing denominator." }),
+			result("f2", FLAG_MISTAKE_TOOL, { verdict: "dont_know", summary: "Could not recall normalizing denominator." }),
+			// Errored flag_mistake must never create a draft:
+			call("f_err", FLAG_MISTAKE_TOOL, { verdict: "wrong", summary: "Should ignore" }),
+			result("f_err", FLAG_MISTAKE_TOOL, null, true),
+		];
+		const drafts = findMistakes("chat_free", freeSession);
+		assert.deepEqual(drafts.map((d) => [d.id, d.kind, d.origin]), [
+			["chat_free:e1", "missed", "explain"],
+			["chat_free:r1", "unanswered", "recall"],
+		]);
+		assert.equal(drafts[0]!.yourAnswer, "Because otherwise it takes $O(n)$.");
+		assert.equal(drafts[0]!.correctAnswer, "Comparisons cannot eliminate half the array unless order is monotonic.");
+		assert.equal(drafts[0]!.explanation, "Stated complexity instead of the pruning invariant.");
+		assert.equal(drafts[1]!.yourAnswer, "I don't remember the denominator.");
+		assert.ok(findExplainMistakeByCallId("chat_free", freeSession, "e2"), "manual lookup still finds unflagged explain check");
+	});
+});
+
+describe("flagMistakeTools", () => {
+	it("resolves the latest answered explain/recall check when toolCallId is omitted and validates inputs", async () => {
+		const messages: LhMessage[] = [
+			call("e_ok", "explain", {}),
+			result("e_ok", "explain", { kind: "explain", questionText: "Q", text: "My answer", committed: "Committed", dontKnow: false, answers: [], answeredAt: "t" }),
+		];
+		const tool = flagMistakeTools({
+			chatId: "c1",
+			chatStore: { getChat: () => ({ messages }) },
+		})[FLAG_MISTAKE_TOOL]!;
+		const bad = await tool.execute("call_1", { verdict: "wrong", summary: "   " } as never);
+		assert.equal((bad as { isError?: boolean }).isError, true);
+		assert.ok((bad.content[0] as { text?: string }).text?.includes("summary must state"));
+
+		const ok = await tool.execute("call_2", { verdict: "partial", summary: "Missed edge condition." } as never);
+		assert.deepEqual(ok.details, {
+			targetToolCallId: "e_ok",
+			verdict: "partial",
+			summary: "Missed edge condition.",
+		});
+
+		const emptyStoreTool = flagMistakeTools({
+			chatId: "c2",
+			chatStore: { getChat: () => ({ messages: [call("d1", "explain", {}), result("d1", "explain", { kind: "explain", questionText: "Skipped", dismissed: true, dontKnow: false, answers: [], answeredAt: "t" })] }) },
+		})[FLAG_MISTAKE_TOOL]!;
+		const none = await emptyStoreTool.execute("call_3", { verdict: "wrong", summary: "Nothing eligible." } as never);
+		assert.equal((none as { isError?: boolean }).isError, true);
+		assert.ok((none.content[0] as { text?: string }).text?.includes("No answered"));
 	});
 });
 
@@ -218,7 +284,10 @@ describe("the mistakes service and routes", () => {
 	let scan: { POST: (req: Request) => Promise<Response> };
 	let del: { DELETE: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response> };
 	let retry: { POST: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response> };
-	let perChat: { GET: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response> };
+	let perChat: {
+		GET: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+		POST: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+	};
 	let chatStore: typeof import("../src/store/chats.ts").chatStore;
 
 	before(async () => {
@@ -315,6 +384,64 @@ describe("the mistakes service and routes", () => {
 		server.retryMistake(blocked.id);
 		await until(() => server.analysisProgress().active === 0);
 		assert.equal((await stored()).find((r) => r.id === blocked.id)!.status, "ready");
+		server.analysisEngineOverride.current = undefined;
+	});
+
+	it("manually saves and analyzes a free-recall explain/recall answer via POST /api/chats/[id]/mistakes", async () => {
+		const settingsStore = (await import("../src/store/settings.ts")).settingsStore;
+		settingsStore.writeSettings({ version: 1, agent: { mistakeAnalysis: { auto: true, dailyCap: 100 } } });
+		const chat = chatStore.createChat("Free recall save");
+		chatStore.saveMessages(chat.id, [
+			call("e1", "recall", { question: "Why use gradient clipping?", committedAnswer: "Prevents exploding gradients by rescaling large gradient norms." }),
+			result("e1", "recall", {
+				kind: "explain",
+				questionText: "Why use gradient clipping?",
+				text: "It avoids division by zero.",
+				committed: "Prevents exploding gradients by rescaling large gradient norms.",
+				dontKnow: false,
+				answers: [],
+				answeredAt: "2026-11-15T12:00:00.000Z",
+			}),
+			call("e_skip", "explain", {}),
+			result("e_skip", "explain", {
+				kind: "explain",
+				questionText: "Skipped",
+				dismissed: true,
+				dontKnow: false,
+				answers: [],
+				answeredAt: "2026-11-15T12:01:00.000Z",
+			}),
+		]);
+
+		assert.equal((await perChat.POST(post({}), ctx(chat.id))).status, 400);
+		assert.equal((await perChat.POST(post({ toolCallId: "e_skip" }), ctx(chat.id))).status, 404);
+		assert.equal((await perChat.POST(post({ toolCallId: "missing" }), ctx(chat.id))).status, 404);
+
+		const rule = {
+			errorType: "confusable-pair",
+			topic: "gradient clipping",
+			whatYouDid: "Confused exploding gradients with zero division.",
+			correct: "Rescales norm when above threshold.",
+			rule: "Clipping caps exploding steps; epsilon prevents zero division.",
+		};
+		server.analysisEngineOverride.current = analystEngine([submit(rule)]);
+		const first = await perChat.POST(post({ toolCallId: "e1" }), ctx(chat.id));
+		assert.equal(first.status, 200);
+		const firstBody = (await first.json()) as { mistake: MistakeRecord; created: boolean };
+		assert.equal(firstBody.created, true);
+		assert.equal(firstBody.mistake.id, `${chat.id}:e1`);
+		assert.equal(firstBody.mistake.origin, "recall");
+		assert.equal(firstBody.mistake.yourAnswer, "It avoids division by zero.");
+		await until(() => server.analysisProgress().active === 0);
+
+		const saved = (await stored()).find((r) => r.id === `${chat.id}:e1`)!;
+		assert.equal(saved.status, "ready");
+		assert.equal(saved.analysis?.errorType, "confusable-pair");
+
+		const second = await perChat.POST(post({ toolCallId: "e1" }), ctx(chat.id));
+		assert.equal(second.status, 200);
+		const secondBody = (await second.json()) as { mistake: MistakeRecord; created: boolean };
+		assert.equal(secondBody.created, false);
 		server.analysisEngineOverride.current = undefined;
 	});
 });

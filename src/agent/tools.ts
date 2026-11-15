@@ -18,6 +18,7 @@ import type { JobStore } from "../core/ports.ts";
 import { jobTools, type DemoInput, type PdfInput, type ResearchInput, type VisualInput } from "./tools/jobs.ts";
 import { planTools, type PlanToolContext } from "./tools/plan.ts";
 import { mistakeTools, type MistakeToolContext } from "./tools/mistakes.ts";
+import { flagMistakeTools } from "./tools/flag-mistake.ts";
 import { probeDoneTool, type ProbeDoneContext } from "./tools/probe.ts";
 import { proberGraphTools } from "./tools/graph.ts";
 import { readTool } from "./tools/read.ts";
@@ -341,6 +342,9 @@ export function createProberTools(
 				...(ctx.graphStore
 					? proberGraphTools({ chatStore: ctx.chatStore, graphStore: ctx.graphStore })
 					: {}),
+				...(mechanics === "free"
+					? flagMistakeTools({ chatId: ctx.chatId, chatStore: ctx.chatStore })
+					: {}),
 				...done,
 			},
 				withoutMechanics(enabled),
@@ -468,6 +472,9 @@ export function createTeacherTools(
 			...jobTools({ chatId: ctx.chatId, jobStore: ctx.jobStore, spawn: ctx.spawn, searchAvailable: ctx.searchAvailable }),
 			// The learner's mistake history, read-only (never a file path).
 			...mistakeTools({ read: ctx.mistakeStore?.read ?? (() => []) }),
+			...(mechanics === "free"
+				? flagMistakeTools({ chatId: ctx.chatId, chatStore: ctx.chatStore })
+				: {}),
 		},
 		withoutMechanics(enabled),
 		),

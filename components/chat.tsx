@@ -61,6 +61,7 @@ import {
 	type ChatInput,
 	type ChatSettings,
 	type LhMessage,
+	type MistakeRecord,
 	type ModelSlotName,
 } from "@/src/core";
 import { PlanBlock, PlanPopup, latestTree } from "@/components/plan-block";
@@ -97,7 +98,7 @@ import { practiceProblemForCall } from "@/src/core";
 import { PluginProblemSubmitted } from "./plugin-problem-submitted";
 import { readPluginProblemSubmission, pluginProblemById } from "@/src/core";
 import { ThinkingCard, ProblemCard, type PracticeThinkingData } from "@/components/practice-cards";
-import { MistakesContext, useChatMistakes } from "@/components/mistakes-context";
+import { MistakesContext, notifyMistakeUpserted, useChatMistakes } from "@/components/mistakes-context";
 import { GraphContextCard, type GraphContextData } from "@/components/graph-context-card";
 import { TopBar } from "@/components/top-bar";
 import { PluginSessionTopBarActions } from "@/components/plugin-chrome";
@@ -2073,12 +2074,43 @@ export function Chat({
 														// Pending/streaming questions live in the dock, not the
 														// transcript; answered ones render as graded records.
 														if (part.state === "output-available") {
+															const isExplainPart = part.type === "tool-explain" || part.type === "tool-recall";
+															const callId = part.toolCallId;
 															return (
-																<AnsweredCard key={pi} stateKey={`${part.sourceMessageId}:${part.sourceContentIndex}`} mistakeId={`${chatId}:${part.toolCallId}`} answer={part.output as QuestionAnswerData} input={part.input} />
+																<AnsweredCard
+																	key={pi}
+																	stateKey={`${part.sourceMessageId}:${part.sourceContentIndex}`}
+																	mistakeId={`${chatId}:${part.toolCallId}`}
+																	answer={part.output as QuestionAnswerData}
+																	input={part.input}
+																	onSaveMistake={
+																		isExplainPart && callId
+																			? async () => {
+																				const res = await fetch(`/api/chats/${encodeURIComponent(chatId)}/mistakes`, {
+																					method: "POST",
+																					headers: { "Content-Type": "application/json" },
+																					body: JSON.stringify({ toolCallId: callId }),
+																				});
+																				const data = (await res.json().catch(() => ({}))) as {
+																					mistake?: MistakeRecord;
+																					error?: string;
+																				};
+																				if (!res.ok || !data.mistake) {
+																					throw new Error(data.error || "Could not save mistake.");
+																				}
+																				notifyMistakeUpserted(data.mistake);
+																			}
+																			: undefined
+																	}
+																/>
 															);
 														}
 														return null;
 													}
+													case "tool-flag_mistake":
+														// Internal free-recall grading marker — surfaced on the
+														// answered explain/recall card via MistakesContext.
+														return null;
 													default: {
 														// Built-in presentation stays authoritative; plugin renderers
 														// extend only the generic native-tool fallback slot.

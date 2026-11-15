@@ -1,6 +1,6 @@
 "use client";
 
-import { useContext } from "react";
+import { useContext, useState } from "react";
 import { MistakesContext } from "@/components/mistakes-context";
 import { ERROR_TYPE_LABELS } from "@/src/core";
 import { useTranscriptState } from "./transcript-row-state";
@@ -30,18 +30,24 @@ export function AnsweredCard({
 	input,
 	stateKey,
 	mistakeId,
+	onSaveMistake,
 }: {
 	answer: QuestionAnswerData;
 	input?: unknown;
 	stateKey?: string;
 	/** `<chatId>:<toolCallId>` — where this answer's recorded analysis lives. */
 	mistakeId?: string;
+	/** Optional manual save action for answered free-recall (`explain`/`recall`) cards. */
+	onSaveMistake?: () => Promise<void>;
 }) {
 	const answer = answerForPresentation(savedAnswer, input);
+	const isExplain = answer.kind === "explain";
 	const mistake = useContext(MistakesContext).get(mistakeId ?? "");
 	const analysis = mistake?.status === "ready" ? mistake.analysis : undefined;
-	const hasAnalysis = Boolean(analysis) || mistake?.status === "pending";
+	const hasAnalysis = Boolean(analysis) || mistake?.status === "pending" || (isExplain && mistake?.status === "failed" && !answer.explanation);
 	const [whyOpen, setWhyOpen] = useTranscriptState(`why:${stateKey ?? savedAnswer.questionText}`, false); // retained across virtual unmounts
+	const [savingMistake, setSavingMistake] = useState(false);
+	const [saveMistakeError, setSaveMistakeError] = useState<string | null>(null);
 	if (answer.dismissed) {
 		return (
 			<div className="rounded-xl border bg-card p-4 text-sm text-muted-foreground">
@@ -51,7 +57,6 @@ export function AnsweredCard({
 	}
 
 	const isQuiz = answer.kind === "quiz";
-	const isExplain = answer.kind === "explain";
 	const selectedIdx = new Set(answer.answers.map((a) => a.index));
 	const correctIdx = new Set(answer.correctIndices ?? []);
 	// The question's own context rides the ORIGINAL CALL, not the answer
@@ -105,6 +110,7 @@ export function AnsweredCard({
 					) : (
 						<StatusBadge text="incorrect" color="var(--lh-error)" />
 					))}
+				{isExplain && mistake && <StatusBadge text="in mistakes" />}
 			</div>
 			<div className="mb-3 font-medium">
 				<ToolContentResponse>{answer.questionText}</ToolContentResponse>
@@ -215,6 +221,43 @@ export function AnsweredCard({
 				/>
 			)}
 
+			{/* The explain reveal (owner ruling 2026-09-27): the committed answer
+			    — one field, reasoning included — shown on submit; no verdict,
+			    the model's next reply IS the grading. */}
+			{isExplain && answer.committed && (
+				<div className="mt-3 rounded-lg bg-muted py-2 text-sm text-muted-foreground">
+					<span className="font-medium text-foreground">The answer: </span>
+					<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{answer.committed}</ToolContentResponse>
+				</div>
+			)}
+
+			{isExplain && !mistake && !(answer as { byVoice?: boolean }).byVoice && onSaveMistake && (
+				<div className="mt-2 flex flex-wrap items-center gap-2">
+					<button
+						type="button"
+						data-testid="save-mistake-button"
+						disabled={savingMistake}
+						onClick={async () => {
+							if (savingMistake) return;
+							setSaveMistakeError(null);
+							setSavingMistake(true);
+							try {
+								await onSaveMistake();
+								setWhyOpen(true);
+							} catch (err) {
+								setSaveMistakeError(err instanceof Error ? err.message : "Could not save mistake.");
+							} finally {
+								setSavingMistake(false);
+							}
+						}}
+						className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+					>
+						{savingMistake ? "Saving…" : "Save to mistakes"}
+					</button>
+					{saveMistakeError && <span className="text-xs text-destructive">{saveMistakeError}</span>}
+				</div>
+			)}
+
 			{/* px-3→removed: card p-4 + box px-3 double-inset sat the "Why" label deeper
 			    than the option box edges (owner, round 3). Sides flush with everything
 			    else; py-2 stays for vertical air. */}
@@ -223,7 +266,7 @@ export function AnsweredCard({
 			    one rule); "I don't know" opens to the short Why only (no error type,
 			    nothing to diagnose); anything else opens to the teacher's explanation.
 			    Hidden until clicked. */}
-			{isQuiz && (hasAnalysis || answer.explanation) && (
+			{(isQuiz || isExplain) && (hasAnalysis || answer.explanation) && (
 				<div className="mt-2" data-testid="tucked-explanation">
 					<button
 						type="button"
@@ -270,16 +313,11 @@ export function AnsweredCard({
 					{whyOpen && !analysis && !answer.explanation && mistake?.status === "pending" && (
 						<div className="mt-1.5 text-xs text-muted-foreground" data-testid="mistake-why-pending">Working out why…</div>
 					)}
-				</div>
-			)}
-
-			{/* The explain reveal (owner ruling 2026-09-27): the committed answer
-			    — one field, reasoning included — shown on submit; no verdict,
-			    the model's next reply IS the grading. */}
-			{isExplain && answer.committed && (
-				<div className="mt-3 rounded-lg bg-muted py-2 text-sm text-muted-foreground">
-					<span className="font-medium text-foreground">The answer: </span>
-					<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{answer.committed}</ToolContentResponse>
+					{whyOpen && !analysis && !answer.explanation && mistake?.status === "failed" && (
+						<div className="mt-1.5 text-xs text-muted-foreground" data-testid="mistake-why-failed">
+							{mistake.error || "Analysis unavailable."}
+						</div>
+					)}
 				</div>
 			)}
 		</div>

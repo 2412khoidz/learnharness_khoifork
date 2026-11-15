@@ -101,4 +101,47 @@ describe("AnsweredCard mistake analysis", () => {
 		}
 		assert.doesNotMatch(renderToStaticMarkup(<AnsweredCard answer={answer} />), /mistake-why/);
 	});
+
+	const explainAnswer: QuestionAnswerData = {
+		kind: "explain",
+		tool: "recall",
+		questionText: "Why does binary search need sorted order?",
+		text: "Because otherwise it is slow.",
+		committed: "Because order is monotonic so half can be eliminated.",
+		dontKnow: false,
+		answers: [],
+		answeredAt: "2026-11-15T10:00:00.000Z",
+	};
+
+	it("offers Save to mistakes on answered explain/recall cards and shows analysis once recorded", async () => {
+		let savedCalls = 0;
+		const host = document.createElement("div"); document.body.append(host);
+		const root = createRoot(host);
+		try {
+			await act(async () => root.render(
+				<MistakesContext.Provider value={new Map()}>
+					<AnsweredCard answer={explainAnswer} mistakeId="c1:e1" onSaveMistake={async () => { savedCalls += 1; }} />
+				</MistakesContext.Provider>,
+			));
+			const saveBtn = host.querySelector<HTMLButtonElement>("[data-testid='save-mistake-button']");
+			assert.ok(saveBtn, "Save to mistakes button is shown on free-recall card");
+			assert.match(saveBtn.textContent ?? "", /Save to mistakes/);
+			await act(async () => saveBtn.click());
+			assert.equal(savedCalls, 1);
+
+			await act(async () => root.render(
+				<MistakesContext.Provider value={new Map([["c1:e1", record({ id: "c1:e1", origin: "recall" })]])}>
+					<AnsweredCard answer={explainAnswer} mistakeId="c1:e1" onSaveMistake={async () => { savedCalls += 1; }} />
+				</MistakesContext.Provider>,
+			));
+			assert.equal(host.querySelector("[data-testid='save-mistake-button']"), null, "save button hides once in mistakes");
+			assert.match(host.innerHTML, /in mistakes/i);
+			assert.match(host.innerHTML, /Why/);
+			const whyBtn = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Why" || b.textContent === "Hide why");
+			assert.ok(whyBtn, "Why toggle present on recorded free-recall card");
+			if (whyBtn.textContent === "Why") await act(async () => whyBtn.click());
+			assert.match(host.innerHTML, /data-testid="mistake-why"/);
+			assert.match(host.innerHTML, /mu N is the ceiling\./);
+		} finally { await act(async () => root.unmount()); host.remove(); }
+	});
 });

@@ -110,7 +110,18 @@ export interface MistakeRecord extends MistakeDraft {
 	error?: string;
 }
 
-const QUIZ_TOOLS = new Set(["quiz", "probe", "explain", "mcq", "mcq_batch"]);
+export const FLAG_MISTAKE_TOOL = "flag_mistake";
+export const FLAG_MISTAKE_VERDICTS = ["wrong", "partial", "dont_know"] as const;
+export type FlagMistakeVerdict = (typeof FLAG_MISTAKE_VERDICTS)[number];
+
+export interface FlagMistakeDetails {
+	targetToolCallId?: string;
+	verdict?: FlagMistakeVerdict;
+	summary?: string;
+}
+
+const QUIZ_TOOLS = new Set(["quiz", "probe", "explain", "recall", "mcq", "mcq_batch"]);
+const EXPLAIN_TOOLS = new Set(["explain", "recall"]);
 const UNCLEAN_OUTCOMES = new Set(["solvedWithHints", "movedOn", "surrendered"]);
 
 const OUTCOME_TEXT: Record<string, string> = {
@@ -118,6 +129,117 @@ const OUTCOME_TEXT: Record<string, string> = {
 	movedOn: "Moved on without solving",
 	surrendered: "Gave up",
 };
+
+function parseFlagVerdict(raw: unknown): FlagMistakeVerdict | undefined {
+	return typeof raw === "string" && (FLAG_MISTAKE_VERDICTS as readonly string[]).includes(raw)
+		? (raw as FlagMistakeVerdict)
+		: undefined;
+}
+
+function isEligibleExplainAnswer(details: unknown): details is QuestionAnswerData {
+	if (!details || typeof details !== "object") return false;
+	const a = details as QuestionAnswerData & { byVoice?: boolean };
+	return !a.dismissed && !a.byVoice && a.kind === "explain" && typeof a.questionText === "string" && a.questionText.trim().length > 0;
+}
+
+function collectToolCalls(messages: readonly LhMessage[]): Map<string, { args: Record<string, unknown> | undefined }> {
+	const calls = new Map<string, { args: Record<string, unknown> | undefined }>();
+	for (const m of messages) {
+		if ((m as { role?: string }).role !== "assistant") continue;
+		const content = (m as { content?: unknown }).content;
+		if (!Array.isArray(content)) continue;
+		for (const part of content as { type?: string; id?: string; arguments?: unknown }[]) {
+			if (part.type === "toolCall" && typeof part.id === "string") {
+				calls.set(part.id, { args: (part.arguments ?? undefined) as Record<string, unknown> | undefined });
+			}
+		}
+	}
+	return calls;
+}
+
+function collectExplainResults(messages: readonly LhMessage[]): Map<string, { index: number; result: ToolResultMessage }> {
+	const explainResults = new Map<string, { index: number; result: ToolResultMessage }>();
+	for (let i = 0; i < messages.length; i++) {
+		const m = messages[i];
+		if ((m as { role?: string }).role !== "toolResult") continue;
+		const result = m as ToolResultMessage;
+		if (result.isError || !EXPLAIN_TOOLS.has(result.toolName)) continue;
+		if (!isEligibleExplainAnswer(result.details)) continue;
+		explainResults.set(result.toolCallId, { index: i, result });
+	}
+	return explainResults;
+}
+
+/** Resolve which answered explain/recall tool call a `flag_mistake` call
+ *  refers to: an explicit eligible id before `beforeIndex`, or else the most
+ *  recent eligible explain/recall answer before `beforeIndex`. Pure. */
+export function resolveExplainTargetCallId(
+	messages: readonly LhMessage[],
+	requestedId?: string,
+	beforeIndex = messages.length,
+): string | null {
+	const explainResults = collectExplainResults(messages);
+	const clean = typeof requestedId === "string" ? requestedId.trim() : "";
+	if (clean) {
+		const exact = explainResults.get(clean);
+		if (exact && exact.index < beforeIndex) return clean;
+	}
+	for (let i = Math.min(beforeIndex, messages.length) - 1; i >= 0; i--) {
+		const m = messages[i];
+		if ((m as { role?: string }).role !== "toolResult") continue;
+		const result = m as ToolResultMessage;
+		if (explainResults.has(result.toolCallId)) return result.toolCallId;
+	}
+	return null;
+}
+
+function buildExplainDraft(
+	chatId: string,
+	toolCallId: string,
+	result: ToolResultMessage,
+	callArgs: Record<string, unknown> | undefined,
+	override?: { verdict?: FlagMistakeVerdict; summary?: string },
+): MistakeDraft | null {
+	if (result.isError || !EXPLAIN_TOOLS.has(result.toolName) || !isEligibleExplainAnswer(result.details)) return null;
+	const a = result.details;
+	const committed =
+		a.committed?.trim() ||
+		(typeof callArgs?.committedAnswer === "string" ? callArgs.committedAnswer.trim() : "") ||
+		"(not recorded)";
+	const yourAnswer =
+		override?.verdict === "dont_know" && !a.text?.trim()
+			? "I don't know"
+			: a.text?.trim() || "(no answer)";
+	const explanation = override?.summary?.trim() || a.explanation?.trim() || undefined;
+	return {
+		id: `${chatId}:${toolCallId}`,
+		chatId,
+		kind: override?.verdict === "dont_know" ? "unanswered" : "missed",
+		origin: result.toolName,
+		question: a.questionText,
+		yourAnswer,
+		correctAnswer: committed,
+		...(explanation ? { explanation } : {}),
+		...((a.thinking ?? a.note) ? { thinking: a.thinking ?? a.note } : {}),
+		...(override?.verdict ? { verdict: override.verdict } : {}),
+		answeredAt: a.answeredAt || new Date((result.timestamp as number | undefined) ?? 0).toISOString(),
+	};
+}
+
+/** Build a MistakeDraft for one answered free-recall (`explain`/`recall`) call
+ *  when manually saved by the learner. Returns null when missing or ineligible. */
+export function findExplainMistakeByCallId(
+	chatId: string,
+	messages: readonly LhMessage[],
+	toolCallId: string,
+): MistakeDraft | null {
+	const targetId = toolCallId.trim();
+	if (!targetId) return null;
+	const calls = collectToolCalls(messages);
+	const entry = collectExplainResults(messages).get(targetId);
+	if (!entry) return null;
+	return buildExplainDraft(chatId, targetId, entry.result, calls.get(targetId)?.args);
+}
 
 function labelsFor(a: QuestionAnswerData): { yours: string; correct: string } {
 	const labelOf = (index: number) => a.options?.find((o) => o.index === index)?.label;
@@ -150,17 +272,18 @@ function quizDraft(chatId: string, id: string, origin: string, a: QuestionAnswer
 
 /** Every mistake in one session's record, oldest first. Pure. */
 export function findMistakes(chatId: string, messages: readonly LhMessage[]): MistakeDraft[] {
-	const calls = new Map<string, { args: Record<string, unknown> | undefined }>();
-	for (const m of messages) {
-		if ((m as { role?: string }).role !== "assistant") continue;
-		const content = (m as { content?: unknown }).content;
-		if (!Array.isArray(content)) continue;
-		for (const part of content as { type?: string; id?: string; arguments?: unknown }[]) {
-			if (part.type === "toolCall" && typeof part.id === "string") calls.set(part.id, { args: (part.arguments ?? undefined) as Record<string, unknown> | undefined });
-		}
-	}
+	const calls = collectToolCalls(messages);
+	const explainResults = collectExplainResults(messages);
 	const out: MistakeDraft[] = [];
-	for (const m of messages) {
+	const seenIds = new Set<string>();
+	const pushDraft = (d: MistakeDraft | null) => {
+		if (!d || seenIds.has(d.id)) return;
+		seenIds.add(d.id);
+		out.push(d);
+	};
+
+	for (let msgIndex = 0; msgIndex < messages.length; msgIndex++) {
+		const m = messages[msgIndex];
 		if ((m as { role?: string }).role !== "toolResult") continue;
 		const result = m as ToolResultMessage;
 		if (result.isError) continue;
@@ -171,13 +294,32 @@ export function findMistakes(chatId: string, messages: readonly LhMessage[]): Mi
 			if (!details) continue;
 			if (Array.isArray(details.batch)) {
 				details.batch.forEach((item: QuestionAnswerData, i: number) => {
-					const d = quizDraft(chatId, `${chatId}:${result.toolCallId}#${i}`, result.toolName, item);
-					if (d) out.push(d);
+					pushDraft(quizDraft(chatId, `${chatId}:${result.toolCallId}#${i}`, result.toolName, item));
 				});
 			} else {
-				const d = quizDraft(chatId, `${chatId}:${result.toolCallId}`, result.toolName, details);
-				if (d) out.push(d);
+				pushDraft(quizDraft(chatId, `${chatId}:${result.toolCallId}`, result.toolName, details));
 			}
+		} else if (result.toolName === FLAG_MISTAKE_TOOL) {
+			const args = calls.get(result.toolCallId)?.args;
+			const details = result.details as FlagMistakeDetails | undefined;
+			const requestedId =
+				typeof details?.targetToolCallId === "string"
+					? details.targetToolCallId
+					: typeof args?.toolCallId === "string"
+						? args.toolCallId
+						: undefined;
+			const targetId = resolveExplainTargetCallId(messages, requestedId, msgIndex);
+			if (!targetId) continue;
+			const target = explainResults.get(targetId);
+			if (!target) continue;
+			const verdict = parseFlagVerdict(details?.verdict) ?? parseFlagVerdict(args?.verdict);
+			const summary =
+				typeof details?.summary === "string"
+					? details.summary
+					: typeof args?.summary === "string"
+						? args.summary
+						: undefined;
+			pushDraft(buildExplainDraft(chatId, targetId, target.result, calls.get(targetId)?.args, { verdict, summary }));
 		} else if (result.toolName === PRACTICE_CONCLUDE_TOOL) {
 			const args = calls.get(result.toolCallId)?.args;
 			const outcome = typeof args?.outcome === "string" ? args.outcome : "";
@@ -185,7 +327,7 @@ export function findMistakes(chatId: string, messages: readonly LhMessage[]): Mi
 			const problem = problemInputForConclude(messages, result.toolCallId);
 			const statement = typeof problem?.statement === "string" ? problem.statement.trim() : "";
 			if (!statement) continue;
-			out.push({
+			pushDraft({
 				id: `${chatId}:${result.toolCallId}`,
 				chatId,
 				kind: "problem",

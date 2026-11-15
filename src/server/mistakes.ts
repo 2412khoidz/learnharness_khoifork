@@ -1,4 +1,4 @@
-import { findMistakes, mergeMistakes, type MistakeRecord } from "../core/mistakes.ts";
+import { findExplainMistakeByCallId, findMistakes, mergeMistakes, type MistakeDraft, type MistakeRecord } from "../core/mistakes.ts";
 import type { PiEngine } from "../agent/models.ts";
 import { readMistakes, updateMistakes } from "../store/mistakes.ts";
 import { effectiveSettings, stores } from "./stores.ts";
@@ -74,11 +74,11 @@ export function countNewMistakes(chatId: string): number {
 	return findMistakes(chatId, record.messages).filter((d) => !known.has(d.id)).length;
 }
 
-/** Record a session's new misses; returns their ids (analysis NOT started). */
-export function recordChatMistakes(chatId: string): string[] {
-	const record = stores.chatStore.getChat(chatId);
-	if (!record) return [];
-	const drafts = findMistakes(chatId, record.messages);
+function mergeSessionDrafts(
+	record: NonNullable<ReturnType<typeof stores.chatStore.getChat>>,
+	drafts: readonly MistakeDraft[],
+): MistakeRecord[] {
+	if (drafts.length === 0 && !readMistakes().some((r) => r.chatId === record.id)) return [];
 	let added: MistakeRecord[] = [];
 	const existing = readMistakes();
 	// Nothing new and nothing to refresh → no write, no event.
@@ -89,15 +89,36 @@ export function recordChatMistakes(chatId: string): string[] {
 	const sources: string[] = [];
 	const kind = kindOf(record.kind);
 	const stale = existing.some(
-		(r) => r.chatId === chatId && (r.sessionTitle !== record.title || r.sessionKind !== kind || r.sources.join("\n") !== sources.join("\n")),
+		(r) => r.chatId === record.id && (r.sessionTitle !== record.title || r.sessionKind !== kind || r.sources.join("\n") !== sources.join("\n")),
 	);
 	if (!stale && drafts.every((d) => known.has(d.id))) return [];
 	updateMistakes((records) => {
-		const merged = mergeMistakes(records, drafts, { chatId, title: record.title, kind, sources, now: new Date().toISOString() });
+		const merged = mergeMistakes(records, drafts, { chatId: record.id, title: record.title, kind, sources, now: new Date().toISOString() });
 		added = merged.added;
 		return merged.records;
 	});
-	return added.map((r) => r.id);
+	return added;
+}
+
+/** Record a session's new misses; returns their ids (analysis NOT started). */
+export function recordChatMistakes(chatId: string): string[] {
+	const record = stores.chatStore.getChat(chatId);
+	if (!record) return [];
+	const drafts = findMistakes(chatId, record.messages);
+	return mergeSessionDrafts(record, drafts).map((r) => r.id);
+}
+
+/** Manually record one answered free-recall (`explain` / `recall`) call into
+ *  the Mistake Log (analysis NOT started). Returns null when missing or ineligible. */
+export function recordExplainMistake(chatId: string, toolCallId: string): { mistake: MistakeRecord; created: boolean } | null {
+	const record = stores.chatStore.getChat(chatId);
+	if (!record) return null;
+	const draft = findExplainMistakeByCallId(chatId, record.messages, toolCallId);
+	if (!draft) return null;
+	const added = mergeSessionDrafts(record, [draft]);
+	const mistake = readMistakes().find((r) => r.id === draft.id);
+	if (!mistake) return null;
+	return { mistake, created: added.some((r) => r.id === draft.id) };
 }
 
 /** Record every session's misses (the backfill); returns the new ids. */

@@ -4,6 +4,15 @@ import { createContext, useCallback, useEffect, useRef, useState } from "react";
 import type { MistakeRecord } from "@/src/core";
 import { useServerEvent } from "@/components/server-events";
 
+const MISTAKE_UPSERT_EVENT = "lh:mistake-upserted";
+
+/** Push an immediately saved MistakeRecord into active chat views without waiting
+ *  for the debounced server-event refetch. */
+export function notifyMistakeUpserted(mistake: MistakeRecord): void {
+	if (typeof window === "undefined") return;
+	window.dispatchEvent(new CustomEvent<MistakeRecord>(MISTAKE_UPSERT_EVENT, { detail: mistake }));
+}
+
 /** The open session's recorded mistakes, keyed by `<chatId>:<toolCallId>` —
  *  the answer cards read their short "why" from here. Empty outside a chat
  *  (tests, previews), which renders no analysis. */
@@ -26,11 +35,22 @@ export function useChatMistakes(chatId: string): ReadonlyMap<string, MistakeReco
 	}, [chatId]);
 	useEffect(() => {
 		void load();
+		const onUpsert = (event: Event) => {
+			const detail = (event as CustomEvent<MistakeRecord>).detail;
+			if (!detail || detail.chatId !== chatId) return;
+			setMap((prev) => {
+				const next = new Map(prev);
+				next.set(detail.id, detail);
+				return next;
+			});
+		};
+		window.addEventListener(MISTAKE_UPSERT_EVENT, onUpsert);
 		return () => {
 			clearTimeout(timer.current);
 			clearTimeout(settleTimer.current);
+			window.removeEventListener(MISTAKE_UPSERT_EVENT, onUpsert);
 		};
-	}, [load]);
+	}, [load, chatId]);
 	const schedule = useCallback(() => {
 		clearTimeout(timer.current);
 		timer.current = setTimeout(() => void load(), 250);
