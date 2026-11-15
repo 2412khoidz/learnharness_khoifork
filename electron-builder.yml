@@ -9,8 +9,10 @@
 #   - signed + notarized since 2026-10-08 (Developer ID Application cert in
 #     the login keychain; notary credentials in the LH_NOTARY keychain
 #     profile; the profile + team env vars are baked into desktop:dist).
-appId: com.chronoharness.ChronoHarness
+appId: com.chronoharness.desktop
 productName: ChronoHarness
+extraMetadata:
+  name: chronoharness
 directories:
   output: dist
 # Icons (owner ruling, 2026-10-13) — per-platform sources in build/:
@@ -165,6 +167,7 @@ win:
 nsis:
   oneClick: true
   perMachine: false
+  include: build/installer.nsh
 linux:
   icon: build/icon.png
   target:

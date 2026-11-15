@@ -291,6 +291,17 @@ describe("desktop packaging policy", () => {
 		assert.equal(pkg.homepage, "https://github.com/amosblomqvist/learnharness");
 		assert.equal(pkg.desktopName, "learnharness.desktop");
 	});
+
+	it("isolates ChronoHarness Windows install path, GUID, and updater cache from LearnHarness", () => {
+		assert.equal(config.appId, "com.chronoharness.desktop");
+		assert.equal(config.extraMetadata?.name, "chronoharness");
+		assert.equal(config.nsis?.include, "build/installer.nsh");
+		const nsh = readFileSync(new URL("../build/installer.nsh", import.meta.url), "utf8");
+		assert.match(nsh, /!define APP_FILENAME "ChronoHarness"/);
+		assert.match(nsh, /!define APP_PACKAGE_NAME "chronoharness"/);
+		assert.match(nsh, /!define APP_INSTALLER_STORE_FILE "chronoharness-updater\\installer\.exe"/);
+		assert.doesNotMatch(nsh, /RMDir\s+\/r\s+\$0/i);
+	});
 });
 
 describe("workflow action versions", () => {

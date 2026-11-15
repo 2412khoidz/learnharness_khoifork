@@ -53,7 +53,7 @@ const PRODUCT_NAME = "ChronoHarness";
 // "ChronoHarness-dev".
 app.setName(PRODUCT_NAME);
 if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
-	app.setAppUserModelId("com.chronoharness.ChronoHarness");
+	app.setAppUserModelId("com.chronoharness.desktop");
 }
 const AUTH_FILE = () => path.join(app.getPath("userData"), "auth.json");
 const DATA_DIR = () => path.join(app.getPath("userData"), "data");
