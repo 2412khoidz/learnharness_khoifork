@@ -16,6 +16,7 @@ import {
 	createPhoneUploadSession,
 	pollPhoneUploadSession,
 	rankLanAddresses,
+	saveAttachmentFile,
 	saveAttachmentImage,
 	stopPhoneUploadTunnel,
 	warmPhoneUploadTunnel,
@@ -128,6 +129,34 @@ describe("saveAttachmentImage", () => {
 		);
 		assert.throws(() => saveAttachmentImage(Buffer.from("<svg>not png</svg>"), { attachmentsDir: dir }), (err: unknown) =>
 			err instanceof AttachmentError && err.status === 415,
+		);
+	});
+
+	it("saveAttachmentFile accepts both sniffed images and document files with sanitized names", () => {
+		const dir = makeTempDir();
+		const pdfBytes = Buffer.from("%PDF-1.4\n%fake-pdf\n");
+		const pdf = saveAttachmentFile(pdfBytes, {
+			prefix: "phone",
+			attachmentsDir: dir,
+			originalName: "../Lecture 01 (Final).pdf",
+			mimeType: "application/pdf",
+		});
+		assert.equal(pdf.mimeType, "application/pdf");
+		assert.match(pdf.filename, /^phone-\d{8}-\d{6}-[0-9a-f]{8}-Lecture-01-Final\.pdf$/);
+		assert.equal(path.dirname(pdf.path), dir);
+		assert.deepEqual(fs.readFileSync(pdf.path), pdfBytes);
+
+		// Sniffed image retains true image mimeType & extension regardless of filename
+		const png = saveAttachmentFile(VALID_PNG, {
+			prefix: "phone",
+			attachmentsDir: dir,
+			originalName: "camera_snap.jpg",
+		});
+		assert.equal(png.mimeType, "image/png");
+		assert.match(png.filename, /^phone-.*-camera_snap\.png$/);
+
+		assert.throws(() => saveAttachmentFile(Buffer.alloc(0), { attachmentsDir: dir }), (err: unknown) =>
+			err instanceof AttachmentError && err.status === 400,
 		);
 	});
 });

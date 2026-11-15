@@ -11,7 +11,14 @@ import type {
 	PhoneUploadSessionInfo,
 } from "../core/attachments.ts";
 import type { ExamPrepPatch } from "../core/exam-prep.ts";
-import { AttachmentError, MAX_ATTACHMENT_IMAGE_BYTES, saveAttachmentImage } from "./attachments.ts";
+import { quoteFilePath } from "../core/file-paths.ts";
+import {
+	AttachmentError,
+	MAX_ATTACHMENT_FILE_BYTES,
+	MAX_ATTACHMENT_IMAGE_BYTES,
+	saveAttachmentFile,
+	saveAttachmentImage,
+} from "./attachments.ts";
 import {
 	appendMobileCompanionSessionNoteOrReply,
 	getMobileCompanionSessionDetailAsync,
@@ -817,6 +824,7 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 				const body = JSON.parse(bytes.toString("utf8")) as {
 					chatId?: unknown;
 					replyText?: unknown;
+					attachmentPaths?: unknown;
 					note?: unknown;
 					selectedValues?: unknown;
 					dontKnow?: unknown;
@@ -824,10 +832,14 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 				const selectedValues = Array.isArray(body.selectedValues)
 					? body.selectedValues.filter((v): v is string => typeof v === "string")
 					: undefined;
+				const attachmentPaths = Array.isArray(body.attachmentPaths)
+					? body.attachmentPaths.filter((v): v is string => typeof v === "string")
+					: undefined;
 				const result = await appendMobileCompanionSessionNoteOrReply(
 					{
 						chatId: typeof body.chatId === "string" ? body.chatId : "",
 						replyText: typeof body.replyText === "string" ? body.replyText : undefined,
+						attachmentPaths,
 						note: typeof body.note === "string" ? body.note : undefined,
 						selectedValues,
 						dontKnow: body.dontKnow === true,
@@ -836,6 +848,7 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 						flashcardsFile: session.flashcardsFile,
 						examPrepFile: session.examPrepFile,
 						chatsDir: session.chatsDir,
+						attachmentsDir: session.attachmentsDir,
 					},
 				);
 				touchExpiry(session);
@@ -862,18 +875,24 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 				const body = JSON.parse(bytes.toString("utf8")) as {
 					mode?: unknown;
 					prompt?: unknown;
+					attachmentPaths?: unknown;
 					drill?: unknown;
 				};
+				const attachmentPaths = Array.isArray(body.attachmentPaths)
+					? body.attachmentPaths.filter((v): v is string => typeof v === "string")
+					: undefined;
 				const result = await startMobileCompanionSession(
 					{
 						mode: body.mode === "practice" ? "practice" : "teach",
 						prompt: typeof body.prompt === "string" ? body.prompt : undefined,
+						attachmentPaths,
 						drill: body.drill === true,
 					},
 					{
 						flashcardsFile: session.flashcardsFile,
 						examPrepFile: session.examPrepFile,
 						chatsDir: session.chatsDir,
+						attachmentsDir: session.attachmentsDir,
 					},
 				);
 				touchExpiry(session);
@@ -888,6 +907,41 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 					return;
 				}
 				sendJson(res, 400, { error: "Invalid new session payload" });
+			}
+		})();
+		return;
+	}
+
+	if (req.method === "POST" && segments.length === 4 && segments[2] === "companion" && segments[3] === "upload") {
+		void (async () => {
+			try {
+				const bytes = await readRequestBytes(req, MAX_ATTACHMENT_FILE_BYTES);
+				const headerName = typeof req.headers["x-filename"] === "string" ? req.headers["x-filename"] : undefined;
+				const originalName = url.searchParams.get("name") ?? headerName;
+				const contentType = url.searchParams.get("mime")
+					?? (typeof req.headers["content-type"] === "string" ? req.headers["content-type"] : undefined);
+				const saved = saveAttachmentFile(bytes, {
+					prefix: "phone",
+					attachmentsDir: session.attachmentsDir,
+					originalName,
+					mimeType: contentType,
+				});
+				touchExpiry(session);
+				sendJson(res, 200, {
+					ok: true,
+					path: saved.path,
+					filename: saved.filename,
+					mimeType: saved.mimeType,
+					size: saved.size,
+					quotedPath: quoteFilePath(saved.path),
+					...(saved.warning ? { warning: saved.warning } : {}),
+				});
+			} catch (err) {
+				if (err instanceof AttachmentError) {
+					sendJson(res, err.status, { error: err.message });
+					return;
+				}
+				sendJson(res, 500, { error: "Failed to save attachment" });
 			}
 		})();
 		return;

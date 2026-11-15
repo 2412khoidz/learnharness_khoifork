@@ -190,6 +190,14 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   .q-opt { display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 9px; padding: 8px 10px; font-size: 12.5px; margin-top: 6px; cursor: pointer; }
   .q-opt.selected { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
   .pulse { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--accent); padding: 6px 10px; border-radius: 8px; border: 1px dashed var(--border); background: var(--card); margin-bottom: 8px; }
+  .attach-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .attach-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .attach-strip.hidden { display: none !important; }
+  .attach-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); font-size: 11px; max-width: 100%; }
+  .attach-chip.uploading { border-color: var(--accent); color: var(--accent); }
+  .attach-chip.error { border-color: var(--error); color: var(--error); }
+  .attach-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 175px; }
+  .attach-chip-x { border: none; background: transparent; color: var(--muted); font-size: 13px; line-height: 1; padding: 0 2px; cursor: pointer; }
   .hidden { display: none !important; }
   .error-box { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--error); background: var(--card); font-size: 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
 </style>
@@ -306,9 +314,16 @@ export function buildMobileHtml(uploadEndpoint: string): string {
             <button type="button" class="pill-btn" id="new-mode-practice" data-new-mode="practice">Practice Problems</button>
           </div>
           <div style="display:flex;gap:6px">
-            <input type="text" class="field" id="new-session-prompt" placeholder="Topic or question to study right now..." />
+            <input type="text" class="field" id="new-session-prompt" placeholder="Topic, question, or attach photo/file..." />
             <button type="button" class="btn btn-primary" id="btn-start-session" style="flex-shrink:0">Start</button>
           </div>
+          <div class="attach-row" style="margin-top:8px">
+            <input id="new-cam" type="file" accept="image/*" capture="environment" />
+            <label class="btn btn-sm" for="new-cam">&#128247; Camera</label>
+            <input id="new-file" type="file" multiple />
+            <label class="btn btn-sm" for="new-file">&#128206; Attach File</label>
+          </div>
+          <div id="new-attachments" class="attach-strip hidden" aria-live="polite"></div>
         </div>
 
         <div class="row-between" style="margin:12px 0 8px">
@@ -352,6 +367,13 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         </div>
 
         <div style="display:grid;gap:6px;margin-top:8px">
+          <div class="attach-row">
+            <input id="reader-cam" type="file" accept="image/*" capture="environment" />
+            <label class="btn btn-sm" for="reader-cam">&#128247; Camera</label>
+            <input id="reader-file" type="file" multiple />
+            <label class="btn btn-sm" for="reader-file">&#128206; Attach File</label>
+          </div>
+          <div id="reader-attachments" class="attach-strip hidden" aria-live="polite"></div>
           <textarea id="reader-reply" class="field" placeholder="Write your answer, question, or reasoning..." style="min-height:58px"></textarea>
           <button type="button" class="btn btn-primary btn-block" id="reader-send-reply">Send to Tutor</button>
         </div>
@@ -388,7 +410,14 @@ export function buildMobileHtml(uploadEndpoint: string): string {
 
   function formatInlineMarkdown(escaped) {
     var html = escaped;
-    html = html.replace(/\`([^\`\\n]+)\`/g, "<code>$1</code>");
+    html = html.replace(/\`([^\`\\n]+)\`/g, function (_, code) {
+      var parts = code.split(String.fromCharCode(92)).join("/").split("/");
+      if (parts.indexOf("attachments") >= 0) {
+        var base = parts[parts.length - 1] || code;
+        return "<code>&#128206; " + base + "</code>";
+      }
+      return "<code>" + code + "</code>";
+    });
     html = html.replace(/\\*\\*([^*\\n]+)\\*\\*/g, "<strong>$1</strong>");
     html = html.replace(/\\*([^*\\n]+)\\*/g, "<em>$1</em>");
     return html;
@@ -511,6 +540,9 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     activeSession: null,
     selectedOptions: [],
     newSessionMode: "teach",
+    newAttachments: [],
+    readerAttachments: [],
+    attachmentSeq: 0,
     pollTimer: null
   };
 
@@ -835,6 +867,10 @@ export function buildMobileHtml(uploadEndpoint: string): string {
 
   function openSessionReader(chatId) {
     activateTab("exam");
+    if (!state.activeSession || state.activeSession.id !== chatId) {
+      state.readerAttachments = [];
+      renderAttachmentChips("reader");
+    }
     byId("reader-status").textContent = "Loading lesson...";
     return fetchJson(COMPANION_URL + "/session?chatId=" + encodeURIComponent(chatId), {}, 12000)
       .then(function (detail) {
@@ -860,10 +896,14 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       .then(function (res) {
         if (res && res.session) renderSessionDetail(res.session);
         if (payload.replyText !== undefined) byId("reader-reply").value = "";
+        if (payload.attachmentPaths && payload.attachmentPaths.length) {
+          state.readerAttachments = [];
+          renderAttachmentChips("reader");
+        }
         if (res && (res.triggeredAiTurn || (res.session && res.session.busy))) {
           byId("reader-status").textContent = "Tutor is responding (live polling)...";
           schedulePoll(state.activeSession.id, 70);
-        } else if (payload.note !== undefined && !payload.replyText && !payload.selectedValues && !payload.dontKnow) {
+        } else if (payload.note !== undefined && !payload.replyText && !payload.selectedValues && !payload.dontKnow && !(payload.attachmentPaths && payload.attachmentPaths.length)) {
           byId("reader-status").textContent = "Notes saved to desktop.";
         } else {
           byId("reader-status").textContent = "Delivered to session.";
@@ -888,11 +928,16 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       body: JSON.stringify({
         mode: opts.mode || state.newSessionMode,
         prompt: opts.prompt || "",
+        attachmentPaths: (opts.attachmentPaths && opts.attachmentPaths.length) ? opts.attachmentPaths : undefined,
         drill: !!opts.drill
       })
     }, 15000)
       .then(function (res) {
         byId("new-session-prompt").value = "";
+        if (opts.attachmentPaths && opts.attachmentPaths.length) {
+          state.newAttachments = [];
+          renderAttachmentChips("new");
+        }
         if (res && res.session) {
           renderSessionDetail(res.session);
           if (res.triggeredAiTurn || res.session.busy) {
@@ -971,12 +1016,23 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   });
 
   byId("btn-start-session").addEventListener("click", function () {
+    if (hasUploadingAttachments("new")) {
+      showErrorBox("companion-error", "Please wait for attachments to finish uploading.", function () { showErrorBox("companion-error", ""); });
+      return;
+    }
     var prompt = byId("new-session-prompt").value.trim();
-    if (!prompt) {
+    var paths = readyAttachmentPaths("new");
+    if (!prompt && !paths.length) {
       byId("new-session-prompt").focus();
       return;
     }
-    startNewSession({ mode: state.newSessionMode, prompt: prompt, drill: false, btn: byId("btn-start-session") });
+    startNewSession({
+      mode: state.newSessionMode,
+      prompt: prompt,
+      attachmentPaths: paths,
+      drill: false,
+      btn: byId("btn-start-session")
+    });
   });
 
   byId("btn-drill-weak").addEventListener("click", function () {
@@ -986,6 +1042,8 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   byId("reader-back").addEventListener("click", function () {
     stopPolling();
     state.activeSession = null;
+    state.readerAttachments = [];
+    renderAttachmentChips("reader");
     byId("session-reader").classList.add("hidden");
     byId("exam-home").classList.remove("hidden");
     loadCompanionState();
@@ -1000,26 +1058,37 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   });
 
   byId("reader-send-reply").addEventListener("click", function () {
+    if (hasUploadingAttachments("reader")) {
+      byId("reader-status").textContent = "Waiting for attachment upload to finish...";
+      return;
+    }
     var txt = byId("reader-reply").value.trim();
-    if (!txt && !state.selectedOptions.length) return;
+    var paths = readyAttachmentPaths("reader");
+    if (!txt && !state.selectedOptions.length && !paths.length) return;
     sendMobileSessionAction({
       replyText: txt || undefined,
+      attachmentPaths: paths.length ? paths : undefined,
       selectedValues: state.selectedOptions.length ? state.selectedOptions : undefined
     }, byId("reader-send-reply"));
   });
 
   byId("reader-submit-opts").addEventListener("click", function () {
-    if (!state.selectedOptions.length) return;
+    if (!state.selectedOptions.length || hasUploadingAttachments("reader")) return;
+    var paths = readyAttachmentPaths("reader");
     sendMobileSessionAction({
       selectedValues: state.selectedOptions,
-      replyText: byId("reader-reply").value.trim() || undefined
+      replyText: byId("reader-reply").value.trim() || undefined,
+      attachmentPaths: paths.length ? paths : undefined
     }, byId("reader-submit-opts"));
   });
 
   byId("reader-dont-know").addEventListener("click", function () {
+    if (hasUploadingAttachments("reader")) return;
+    var paths = readyAttachmentPaths("reader");
     sendMobileSessionAction({
       dontKnow: true,
-      replyText: byId("reader-reply").value.trim() || undefined
+      replyText: byId("reader-reply").value.trim() || undefined,
+      attachmentPaths: paths.length ? paths : undefined
     }, byId("reader-dont-know"));
   });
 
@@ -1099,11 +1168,11 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     });
   }
 
-  function sendPayload(payload, onProgress) {
+  function sendBinaryUpload(url, payload, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
-      xhr.open("POST", UPLOAD_URL, true);
-      xhr.timeout = 45000;
+      xhr.open("POST", url, true);
+      xhr.timeout = 60000;
       xhr.setRequestHeader("Content-Type", payload.type || "application/octet-stream");
       xhr.upload.onprogress = function (ev) {
         if (ev.lengthComputable && ev.total > 0) {
@@ -1122,6 +1191,86 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     });
   }
 
+  function attachmentBucket(scope) {
+    return scope === "new" ? state.newAttachments : state.readerAttachments;
+  }
+
+  function readyAttachmentPaths(scope) {
+    return attachmentBucket(scope).filter(function (a) { return !!a.path && !a.error; }).map(function (a) { return a.path; });
+  }
+
+  function hasUploadingAttachments(scope) {
+    return attachmentBucket(scope).some(function (a) { return !!a.uploading; });
+  }
+
+  function isImageAttachment(file) {
+    var mime = (file && file.type ? file.type : "").toLowerCase();
+    var name = file && file.name ? file.name : "";
+    return mime.indexOf("image/") === 0 || /\\.(png|jpe?g|webp|gif|bmp|heic|heif)$/i.test(name);
+  }
+
+  function renderAttachmentChips(scope) {
+    var strip = byId(scope === "new" ? "new-attachments" : "reader-attachments");
+    if (!strip) return;
+    var items = attachmentBucket(scope);
+    strip.innerHTML = "";
+    strip.classList.toggle("hidden", items.length === 0);
+    items.forEach(function (item) {
+      var chip = document.createElement("span");
+      chip.className = "attach-chip" + (item.uploading ? " uploading" : item.error ? " error" : "");
+      var label = item.name || "attachment";
+      if (item.uploading && item.stateText) label += " · " + item.stateText;
+      else if (item.error) label += " (" + item.error + ")";
+      chip.innerHTML = "<span class='attach-chip-name'></span><button type='button' class='attach-chip-x' aria-label='Remove'>&times;</button>";
+      chip.querySelector(".attach-chip-name").textContent = label;
+      chip.querySelector(".attach-chip-x").addEventListener("click", function () {
+        var bucket = attachmentBucket(scope);
+        var idx = bucket.indexOf(item);
+        if (idx >= 0) {
+          bucket.splice(idx, 1);
+          renderAttachmentChips(scope);
+        }
+      });
+      strip.appendChild(chip);
+    });
+  }
+
+  function uploadChatAttachment(scope, file) {
+    var bucket = attachmentBucket(scope);
+    var item = { id: ++state.attachmentSeq, name: file.name || "attachment", path: null, uploading: true, error: null, stateText: "Preparing..." };
+    bucket.push(item);
+    renderAttachmentChips(scope);
+
+    var prep = isImageAttachment(file) ? normalizeImage(file) : Promise.resolve(file);
+    prep.then(function (payload) {
+      var sizeLabel = formatBytes(payload.size);
+      item.stateText = sizeLabel;
+      renderAttachmentChips(scope);
+      var url = COMPANION_URL + "/upload?name=" + encodeURIComponent(file.name || "attachment") + "&mime=" + encodeURIComponent(payload.type || file.type || "application/octet-stream");
+      return sendBinaryUpload(url, payload, function (pct) {
+        item.stateText = pct + "%";
+        renderAttachmentChips(scope);
+      });
+    }).then(function (json) {
+      item.uploading = false;
+      item.path = json && json.path ? json.path : null;
+      if (!item.path) item.error = "Missing path";
+      renderAttachmentChips(scope);
+    }).catch(function (err) {
+      item.uploading = false;
+      item.error = err && err.message ? err.message : "Failed";
+      renderAttachmentChips(scope);
+    });
+  }
+
+  function handleChatAttachSelect(scope, input) {
+    var files = Array.from(input.files || []);
+    input.value = "";
+    for (var i = 0; i < files.length; i++) {
+      uploadChatAttachment(scope, files[i]);
+    }
+  }
+
   function uploadOne(file, entry) {
     return normalizeImage(file)
       .then(function (payload) {
@@ -1129,7 +1278,7 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         var t0 = Date.now();
         entry.stateEl.textContent = "Uploading " + sizeLabel + "...";
         entry.stateEl.className = "state muted mono";
-        return sendPayload(payload, function (pct) {
+        return sendBinaryUpload(UPLOAD_URL, payload, function (pct) {
           entry.stateEl.textContent = pct >= 99
             ? ("Saving " + sizeLabel + "...")
             : ("Uploading " + sizeLabel + " · " + pct + "%");
@@ -1167,6 +1316,10 @@ export function buildMobileHtml(uploadEndpoint: string): string {
 
   cam.addEventListener("change", function () { handleSelect(cam); });
   lib.addEventListener("change", function () { handleSelect(lib); });
+  byId("new-cam").addEventListener("change", function () { handleChatAttachSelect("new", byId("new-cam")); });
+  byId("new-file").addEventListener("change", function () { handleChatAttachSelect("new", byId("new-file")); });
+  byId("reader-cam").addEventListener("change", function () { handleChatAttachSelect("reader", byId("reader-cam")); });
+  byId("reader-file").addEventListener("change", function () { handleChatAttachSelect("reader", byId("reader-file")); });
 
   loadCompanionState();
 })();

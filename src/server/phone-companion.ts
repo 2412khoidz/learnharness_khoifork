@@ -6,6 +6,7 @@ import { chainsForSelection, formatChainLine } from "../core/chains.ts";
 import { titleFromPrompt, type ChatRecord } from "../core/contracts.ts";
 import { emit } from "../core/events.ts";
 import type { ExamPrepPatch, ExamPrepStatus } from "../core/exam-prep.ts";
+import { quoteFilePath } from "../core/file-paths.ts";
 import {
 	activeProblemOf,
 	danglingQuestionOf,
@@ -96,6 +97,7 @@ export interface MobileCompanionOptions {
 	flashcardsFile?: string;
 	examPrepFile?: string;
 	chatsDir?: string;
+	attachmentsDir?: string;
 	graphStore?: GraphStore;
 	now?: number;
 }
@@ -734,11 +736,52 @@ function buildSessionDetail(
 	};
 }
 
+function sanitizeMobileAttachmentPaths(rawPaths: unknown, attachmentsDir?: string): string[] {
+	if (!Array.isArray(rawPaths) || rawPaths.length === 0) return [];
+	const baseDir = path.resolve(/* turbopackIgnore: true */ attachmentsDir ?? PATHS.attachments);
+	let realBaseDir = baseDir;
+	try {
+		realBaseDir = fs.realpathSync(/* turbopackIgnore: true */ baseDir);
+	} catch {
+		// attachmentsDir may not exist yet before any valid file was written
+	}
+
+	const seen = new Set<string>();
+	const quoted: string[] = [];
+	for (const entry of rawPaths) {
+		if (typeof entry !== "string") continue;
+		const trimmed = entry.trim();
+		if (!trimmed) continue;
+		const resolved = path.resolve(/* turbopackIgnore: true */ trimmed);
+		const rel = path.relative(/* turbopackIgnore: true */ baseDir, resolved);
+		if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+			throw new MobileCompanionError("Invalid attachment path", 400);
+		}
+		if (!fs.existsSync(/* turbopackIgnore: true */ resolved) || !fs.statSync(/* turbopackIgnore: true */ resolved).isFile()) {
+			throw new MobileCompanionError("Attachment file not found", 400);
+		}
+		try {
+			const realFile = fs.realpathSync(/* turbopackIgnore: true */ resolved);
+			const realRel = path.relative(/* turbopackIgnore: true */ realBaseDir, realFile);
+			if (!realRel || realRel.startsWith("..") || path.isAbsolute(realRel)) {
+				throw new MobileCompanionError("Invalid attachment path", 400);
+			}
+		} catch (err) {
+			if (err instanceof MobileCompanionError) throw err;
+		}
+		if (seen.has(resolved)) continue;
+		seen.add(resolved);
+		quoted.push(quoteFilePath(resolved));
+	}
+	return quoted;
+}
+
 export async function appendMobileCompanionSessionNoteOrReply(
 	input: {
 		chatId: string;
 		note?: string;
 		replyText?: string;
+		attachmentPaths?: string[];
 		selectedValues?: string[];
 		dontKnow?: boolean;
 	},
@@ -761,7 +804,9 @@ export async function appendMobileCompanionSessionNoteOrReply(
 		modifiedRecord = true;
 	}
 
-	const reply = typeof input.replyText === "string" ? input.replyText.trim() : "";
+	const replyRaw = typeof input.replyText === "string" ? input.replyText.trim() : "";
+	const quotedAttachments = sanitizeMobileAttachmentPaths(input.attachmentPaths, opts.attachmentsDir);
+	const reply = [replyRaw, ...quotedAttachments].filter(Boolean).join("\n");
 	const hasSelection = Array.isArray(input.selectedValues) && input.selectedValues.length > 0;
 	const hasAnswerAction = Boolean(reply || hasSelection || input.dontKnow);
 
@@ -840,6 +885,7 @@ export async function startMobileCompanionSession(
 	input: {
 		mode?: "teach" | "practice";
 		prompt?: string;
+		attachmentPaths?: string[];
 		drill?: boolean;
 	},
 	opts: MobileCompanionOptions = {},
@@ -866,7 +912,9 @@ export async function startMobileCompanionSession(
 			},
 	);
 
-	let prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+	const rawPrompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+	const quotedAttachments = sanitizeMobileAttachmentPaths(input.attachmentPaths, opts.attachmentsDir);
+	let prompt = rawPrompt;
 	const picks: Array<{ id: string; name: string; statement: string }> = [];
 	let chainLines: string[] = [];
 
@@ -901,11 +949,18 @@ export async function startMobileCompanionSession(
 		}
 	}
 
-	if (!prompt) {
-		throw new MobileCompanionError("Prompt is required to start a session", 400);
+	if (!prompt && quotedAttachments.length > 0) {
+		prompt = "Review the attached material:";
+	}
+	if (quotedAttachments.length > 0) {
+		prompt = [prompt, ...quotedAttachments].filter(Boolean).join("\n");
 	}
 
-	const title = titleFromPrompt(prompt);
+	if (!prompt) {
+		throw new MobileCompanionError("Prompt or attachment is required to start a session", 400);
+	}
+
+	const title = titleFromPrompt(rawPrompt || (!input.drill && quotedAttachments.length > 0 ? "Review attached material" : prompt));
 
 	if (opts.chatsDir) {
 		fs.mkdirSync(chatsDir, { recursive: true });

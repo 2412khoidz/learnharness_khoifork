@@ -72,8 +72,11 @@ export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";
 export {
 	AttachmentError,
+	MAX_ATTACHMENT_FILE_BYTES,
 	MAX_ATTACHMENT_IMAGE_BYTES,
+	saveAttachmentFile,
 	saveAttachmentImage,
+	type SaveAttachmentFileOptions,
 	type SaveAttachmentOptions,
 } from "./attachments.ts";
 export {

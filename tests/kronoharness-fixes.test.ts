@@ -328,6 +328,12 @@ describe("Mobile Companion Redesigned UI, Assets & Dangling Questions", () => {
 		assert.ok(html.includes("renderRichMath"));
 		assert.ok(html.includes("fetchWithTimeout"));
 		assert.ok(html.includes("new-session"));
+		assert.ok(html.includes("id=\"new-cam\""));
+		assert.ok(html.includes("id=\"new-file\""));
+		assert.ok(html.includes("id=\"reader-cam\""));
+		assert.ok(html.includes("id=\"reader-file\""));
+		assert.ok(html.includes("id=\"new-attachments\""));
+		assert.ok(html.includes("id=\"reader-attachments\""));
 
 		const scriptMatch = /<script>([\s\S]*?)<\/script>/g;
 		let count = 0;
@@ -474,6 +480,100 @@ describe("Mobile Companion Redesigned UI, Assets & Dangling Questions", () => {
 			assert.equal(stateRes.status, 200);
 			const stateBody = (await stateRes.json()) as { recentSessions: Array<{ id: string }> };
 			assert.ok(stateBody.recentSessions.some((s) => s.id === created.chatId));
+		} finally {
+			await closePhoneUploadSession(info.sessionId);
+		}
+	});
+
+	it("uploads camera photos and files in Mobile Companion Chat and rejects traversal paths", async () => {
+		const dir = await makeTempDir("kh-mob-attach-");
+		const chatsDir = path.join(dir, "chats");
+		const attDir = path.join(dir, "att");
+		const outsideFile = path.join(dir, "secret.txt");
+		const examPrepFile = path.join(dir, "exam-prep.json");
+		const flashcardsFile = path.join(dir, "flashcards.json");
+		await fs.mkdir(chatsDir, { recursive: true });
+		await fs.writeFile(outsideFile, "do not attach", "utf8");
+		await fs.writeFile(flashcardsFile, JSON.stringify({ propositions: {}, reviews: [] }), "utf8");
+
+		const info = await createPhoneUploadSession({
+			host: "127.0.0.1",
+			attachmentsDir: attDir,
+			flashcardsFile,
+			examPrepFile,
+			chatsDir,
+			enableTunnel: false,
+		});
+		const base = `http://127.0.0.1:${info.port}/p/${info.token}`;
+		try {
+			// Wrong token fails cleanly
+			const badTokenRes = await fetch(`http://127.0.0.1:${info.port}/p/bad-token/companion/upload`, {
+				method: "POST",
+				body: Buffer.from("hello"),
+			});
+			assert.equal(badTokenRes.status, 404);
+
+			// Upload a PDF file + a PNG camera snap via /companion/upload
+			const pdfRes = await fetch(`${base}/companion/upload?name=${encodeURIComponent("btvn-01.pdf")}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/pdf" },
+				body: Buffer.from("%PDF-1.4\n%test\n"),
+			});
+			assert.equal(pdfRes.status, 200);
+			const pdfJson = (await pdfRes.json()) as { ok: boolean; path: string; filename: string; quotedPath: string };
+			assert.equal(pdfJson.ok, true);
+			assert.match(pdfJson.filename, /btvn-01\.pdf$/);
+			assert.equal((await fs.stat(pdfJson.path)).isFile(), true);
+
+			const pngBytes = Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+				"base64",
+			);
+			const imgRes = await fetch(`${base}/companion/upload?name=${encodeURIComponent("solution.jpg")}`, {
+				method: "POST",
+				headers: { "Content-Type": "image/png" },
+				body: pngBytes,
+			});
+			assert.equal(imgRes.status, 200);
+			const imgJson = (await imgRes.json()) as { ok: boolean; path: string; mimeType: string };
+			assert.equal(imgJson.mimeType, "image/png");
+
+			// Start a new session with attachments only (no text prompt needed)
+			const newRes = await fetch(`${base}/companion/new-session`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ mode: "teach", attachmentPaths: [pdfJson.path] }),
+			});
+			assert.equal(newRes.status, 200);
+			const newJson = (await newRes.json()) as {
+				ok: boolean;
+				chatId: string;
+				session: { messages: Array<{ role: string; text: string }> };
+			};
+			assert.equal(newJson.ok, true);
+			assert.ok(newJson.session.messages[0]?.text.includes(pdfJson.path));
+
+			// Reply in session reader with image attachment only
+			const replyRes = await fetch(`${base}/companion/session`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ chatId: newJson.chatId, attachmentPaths: [imgJson.path] }),
+			});
+			assert.equal(replyRes.status, 200);
+			const replyJson = (await replyRes.json()) as {
+				ok: boolean;
+				session: { messages: Array<{ role: string; text: string }> };
+			};
+			assert.equal(replyJson.session.messages.at(-1)?.role, "user");
+			assert.ok(replyJson.session.messages.at(-1)?.text.includes(imgJson.path));
+
+			// Reject traversal paths outside session.attachmentsDir
+			const traversalRes = await fetch(`${base}/companion/session`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ chatId: newJson.chatId, replyText: "check", attachmentPaths: [outsideFile] }),
+			});
+			assert.equal(traversalRes.status, 400);
 		} finally {
 			await closePhoneUploadSession(info.sessionId);
 		}
