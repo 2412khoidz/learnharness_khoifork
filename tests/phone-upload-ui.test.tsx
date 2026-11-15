@@ -185,15 +185,21 @@ describe("PathInput Ctrl+V clipboard image paste", () => {
 });
 
 describe("PhoneUploadButton QR modal and docks", () => {
-	it("opens QR dialog, lets user switch IP, inserts received phone photos, and stops server on close", async () => {
+	it("keeps companion alive on Done/close, supports New code forceNew, and stops server on Disconnect", async () => {
 		let deletedSession = "";
 		let pollCount = 0;
+		const postBodies: Array<Record<string, unknown> | null> = [];
 		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = String(input);
 			if (url === "/api/attachments/phone" && init?.method === "POST") {
+				let parsed: Record<string, unknown> | null = null;
+				if (typeof init.body === "string") {
+					parsed = JSON.parse(init.body) as Record<string, unknown>;
+				}
+				postBodies.push(parsed);
 				return new Response(JSON.stringify({
-					sessionId: "sess-1",
-					token: "tok-abc",
+					sessionId: parsed?.forceNew ? "sess-2" : "sess-1",
+					token: parsed?.forceNew ? "tok-xyz" : "tok-abc",
 					port: 49999,
 					defaultAddress: "192.168.1.42",
 					addresses: [
@@ -203,7 +209,7 @@ describe("PhoneUploadButton QR modal and docks", () => {
 					expiresAt: Date.now() + 60_000,
 				}), { status: 200 });
 			}
-			if (url.startsWith("/api/attachments/phone?sessionId=sess-1") && (!init?.method || init.method === "GET")) {
+			if (url.startsWith("/api/attachments/phone?sessionId=") && (!init?.method || init.method === "GET")) {
 				pollCount++;
 				if (pollCount === 1) {
 					return new Response(JSON.stringify({
@@ -222,8 +228,8 @@ describe("PhoneUploadButton QR modal and docks", () => {
 				}
 				return new Response(JSON.stringify({ active: true, expiresAt: Date.now() + 60_000, uploads: [], nextIndex: 1 }), { status: 200 });
 			}
-			if (url.startsWith("/api/attachments/phone?sessionId=sess-1") && init?.method === "DELETE") {
-				deletedSession = "sess-1";
+			if (url.startsWith("/api/attachments/phone?sessionId=") && init?.method === "DELETE") {
+				deletedSession = new URL(`http://localhost${url}`).searchParams.get("sessionId") ?? "";
 				return new Response(JSON.stringify({ closed: true }), { status: 200 });
 			}
 			return new Response("{}", { status: 404 });
@@ -258,14 +264,36 @@ describe("PhoneUploadButton QR modal and docks", () => {
 		assert.match(dialog.querySelector('[data-testid="phone-upload-received"]')?.textContent ?? "", /phone-page1\.jpg/);
 		assert.equal(readPathInput(editor), "`C:\\data\\attachments\\phone-page1.jpg`");
 
-		// Close via Done button -> closes server session cleanly
+		// Close via Done button -> hides dialog WITHOUT tearing down the phone session (no HTTP 404 on phone)
 		const doneBtn = Array.from(dialog.querySelectorAll("button")).find((b) => b.textContent?.includes("Done"))!;
 		await act(async () => {
 			doneBtn.click();
 			await new Promise((r) => setTimeout(r, 30));
 		});
 		assert.equal(dom.document.body.querySelector('[data-testid="phone-upload-dialog"]'), null);
-		assert.equal(deletedSession, "sess-1");
+		assert.equal(deletedSession, "");
+		assert.ok(host.querySelector('[data-testid="phone-connected-dot"]'), "Background indicator stays lit");
+
+		// Reopen QR dialog, trigger New code (forceNew), then explicitly click Disconnect -> calls DELETE
+		await act(async () => {
+			button.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
+		const reopened = dom.document.body.querySelector('[data-testid="phone-upload-dialog"]')!;
+		const newCodeBtn = Array.from(reopened.querySelectorAll("button")).find((b) => b.textContent?.includes("New code"))!;
+		await act(async () => {
+			newCodeBtn.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
+		assert.ok(postBodies.some((b) => b?.forceNew === true));
+
+		const disconnectBtn = Array.from(reopened.querySelectorAll("button")).find((b) => b.textContent?.includes("Disconnect"))!;
+		await act(async () => {
+			disconnectBtn.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
+		assert.equal(deletedSession, "sess-2");
+		assert.equal(host.querySelector('[data-testid="phone-connected-dot"]'), null);
 	});
 
 	it("renders PhoneUploadButton inside Composer, QuestionDock, and PracticeDock", async () => {

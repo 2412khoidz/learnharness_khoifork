@@ -267,11 +267,42 @@ describe("Subject-Scoped Exam Mode & Multi-Exam Profiles", () => {
 		assert.equal(switchedBack.examTitle, "Linear Algebra Midterm");
 		assert.deepEqual(switchedBack.clusterIds, [laScope.id]);
 
-		// Deleting active exam removes it cleanly
+		// Deleting active exam removes it cleanly; deleting the last remaining exam also clears legacy title/date
 		writeExamPrepConfig({ deleteExamId: "exam_la" }, examPrepFile);
 		const afterDelete = readExamPrepConfig(examPrepFile);
 		assert.equal(afterDelete.exams.some((e) => e.id === "exam_la"), false);
 		assert.notEqual(afterDelete.activeExamId, "exam_la");
+
+		writeExamPrepConfig({ deleteExamId: afterDelete.activeExamId! }, examPrepFile);
+		const afterLastDelete = readExamPrepConfig(examPrepFile);
+		assert.equal(afterLastDelete.exams.length, 0);
+		assert.equal(afterLastDelete.activeExamId, null);
+		assert.equal(afterLastDelete.examTitle, "");
+		assert.equal(afterLastDelete.examDate, null);
+
+		// Legacy single-exam JSON (exams: [], non-empty examTitle) auto-migrates into a deletable profile
+		await fs.writeFile(
+			examPrepFile,
+			JSON.stringify({
+				mode: "exam",
+				examTitle: "Vòng loại 1 OLP sinh viên",
+				examDate: "2026-11-28",
+				pace: "thorough",
+				clusterIds: [],
+				exams: [],
+				activeExamId: null,
+			}),
+			"utf8",
+		);
+		const migrated = readExamPrepConfig(examPrepFile);
+		assert.equal(migrated.exams.length, 1);
+		assert.equal(migrated.activeExamId, migrated.exams[0]?.id);
+		assert.equal(migrated.examTitle, "Vòng loại 1 OLP sinh viên");
+		writeExamPrepConfig({ deleteExamId: migrated.activeExamId! }, examPrepFile);
+		const afterMigratedDelete = readExamPrepConfig(examPrepFile);
+		assert.equal(afterMigratedDelete.exams.length, 0);
+		assert.equal(afterMigratedDelete.examTitle, "");
+		assert.equal(afterMigratedDelete.examDate, null);
 	});
 
 	it("stays compatible with legacy ExamPrepConfigInput passed directly to computeExamPrepStatus", () => {

@@ -11,13 +11,19 @@ export const runtime = "nodejs";
 export async function POST(request?: Request): Promise<Response> {
 	let warm = false;
 	let refreshTunnel = false;
+	let forceNew = false;
 	if (request) {
 		try {
-			const body = (await request.json()) as { warm?: unknown; refreshTunnel?: unknown } | null;
+			const body = (await request.json()) as {
+				warm?: unknown;
+				refreshTunnel?: unknown;
+				forceNew?: unknown;
+			} | null;
 			warm = body?.warm === true;
 			refreshTunnel = body?.refreshTunnel === true;
+			forceNew = body?.forceNew === true;
 		} catch {
-			// Empty or non-JSON POST body starts a standard phone upload session.
+			// Empty or non-JSON POST body starts/reuses a standard phone companion session.
 		}
 	}
 	try {
@@ -30,6 +36,7 @@ export async function POST(request?: Request): Promise<Response> {
 		const session = await createPhoneUploadSession({
 			enableTunnel: process.env.NODE_ENV !== "test",
 			refreshTunnel,
+			reuseExisting: !forceNew && !refreshTunnel,
 		});
 		return NextResponse.json(session);
 	} catch {

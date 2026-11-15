@@ -24,8 +24,8 @@ import {
 import { buildMobileHtml, resolveMobileAsset } from "./phone-mobile-ui.ts";
 import { ensureCloudflaredBinary, waitForTunnelReadiness } from "./tunnel-binary.ts";
 
-const SESSION_TTL_MS = 15 * 60 * 1000;
-const TUNNEL_IDLE_TTL_MS = 30 * 60 * 1000;
+const SESSION_TTL_MS = 60 * 60 * 1000;
+const TUNNEL_IDLE_TTL_MS = 60 * 60 * 1000;
 const SSH_TUNNEL_STARTUP_TIMEOUT_MS = 12_000;
 const CF_TUNNEL_STARTUP_TIMEOUT_MS = 20_000;
 const ANSI_CSI_RE = new RegExp("\\x1b\\[[0-9;]*[A-Za-z]", "g");
@@ -698,6 +698,7 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 	}
 
 	if (req.method === "GET" && segments.length === 2) {
+		touchExpiry(session);
 		const html = buildMobileHtml(`/p/${encodeURIComponent(session.token)}/upload`);
 		res.writeHead(200, {
 			"Content-Type": "text/html; charset=utf-8",
@@ -960,14 +961,58 @@ export interface CreatePhoneSessionOptions {
 	interfaces?: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
 	/** Open a public HTTPS reverse tunnel (`trycloudflare.com` / `localhost.run`) so phones work off-Wi-Fi. */
 	enableTunnel?: boolean;
+	/** Reuse an already-active phone companion session instead of closing it when reopening QR UI. */
+	reuseExisting?: boolean;
 	/** Force restarting the reusable standby tunnel instead of keeping the warm connection. */
 	refreshTunnel?: boolean;
 	tunnelSpawner?: PhoneTunnelSpawner;
 }
 
-/** Start an ephemeral tokenized LAN HTTP server for phone camera uploads (closes any prior session). */
+function toPhoneSessionInfo(session: InternalPhoneSession): PhoneUploadSessionInfo {
+	return {
+		sessionId: session.id,
+		token: session.token,
+		port: session.port,
+		addresses: session.addresses,
+		defaultAddress: session.defaultAddress,
+		expiresAt: session.expiresAt,
+		tunnelStatus: session.tunnelStatus,
+		tunnelUrl: session.tunnelUrl,
+		tunnelError: session.tunnelError,
+	};
+}
+
+/** Start (or optionally reuse) an ephemeral tokenized LAN HTTP server for the mobile companion. */
 export async function createPhoneUploadSession(options: CreatePhoneSessionOptions = {}): Promise<PhoneUploadSessionInfo> {
 	const existing = getActiveSession();
+	if (existing && !existing.closed && options.reuseExisting && !options.refreshTunnel) {
+		const freshAddresses = rankLanAddresses(options.interfaces);
+		existing.addresses = freshAddresses;
+		existing.defaultAddress = freshAddresses[0]?.address ?? null;
+		touchExpiry(existing);
+		if (existing.usesStandbyTunnel) {
+			const standby = getStandbyTunnel();
+			existing.tunnelStatus = standby.status;
+			existing.tunnelUrl = standby.url;
+			existing.tunnelError = standby.error;
+		} else if (options.enableTunnel && existing.tunnelStatus === "off" && !options.tunnelSpawner) {
+			try {
+				existing.usesStandbyTunnel = true;
+				const standby = await ensureStandbyTunnel();
+				if (!existing.closed && getActiveSession() === existing) {
+					existing.tunnelStatus = standby.status;
+					existing.tunnelUrl = standby.url;
+					existing.tunnelError = standby.error;
+				}
+			} catch (err) {
+				existing.usesStandbyTunnel = false;
+				existing.tunnelStatus = "error";
+				existing.tunnelUrl = null;
+				existing.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
+			}
+		}
+		return toPhoneSessionInfo(existing);
+	}
 	if (existing) await closeSession(existing);
 
 	const id = crypto.randomBytes(8).toString("hex");
@@ -1085,17 +1130,7 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 		}
 	}
 
-	return {
-		sessionId: session.id,
-		token: session.token,
-		port: session.port,
-		addresses: session.addresses,
-		defaultAddress: session.defaultAddress,
-		expiresAt: session.expiresAt,
-		tunnelStatus: session.tunnelStatus,
-		tunnelUrl: session.tunnelUrl,
-		tunnelError: session.tunnelError,
-	};
+	return toPhoneSessionInfo(session);
 }
 
 export function pollPhoneUploadSession(sessionId: string, since = 0): PhoneUploadPollResponse {

@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { CheckCircle2Icon, CopyIcon, RefreshCwIcon, SmartphoneIcon, XIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from "react";
+import { CheckCircle2Icon, CopyIcon, PowerIcon, RefreshCwIcon, SmartphoneIcon, XIcon } from "lucide-react";
 import {
 	buildPhoneTunnelUploadUrl,
 	buildPhoneUploadUrl,
@@ -45,7 +45,10 @@ export function PhoneUploadButton({
 	disabled?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
+	const [bgSessionId, setBgSessionId] = useState<string | null>(null);
 	const prewarmRequestedRef = useRef(false);
+	const sharedSinceRef = useRef(0);
+	const prevSessionIdRef = useRef<string | null>(null);
 
 	useEffect(() => {
 		if (disabled || prewarmRequestedRef.current || typeof fetch !== "function") return;
@@ -58,9 +61,44 @@ export function PhoneUploadButton({
 		}).catch(() => {});
 	}, [disabled]);
 
+	// Keep polling received camera uploads quietly in the background after the QR modal closes.
+	useEffect(() => {
+		if (open || !bgSessionId || disabled || typeof fetch !== "function") return;
+		let cancelled = false;
+		const pollBackground = async () => {
+			if (cancelled) return;
+			try {
+				const res = await fetch(
+					`/api/attachments/phone?sessionId=${encodeURIComponent(bgSessionId)}&since=${sharedSinceRef.current}`,
+				);
+				if (!res.ok || cancelled) return;
+				const data = (await res.json()) as PhoneUploadPollResponse;
+				if (cancelled) return;
+				if (!data.active) {
+					setBgSessionId(null);
+					return;
+				}
+				if (data.uploads.length > 0) {
+					sharedSinceRef.current = data.nextIndex;
+					const paths = data.uploads.map((item: AttachmentUploadResult) => item.path);
+					editorRef.current?.dispatchEvent(
+						new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: { paths, focus: false } }),
+					);
+				}
+			} catch {
+				// Ignore transient polling hiccups while companion server runs.
+			}
+		};
+		const timer = setInterval(() => { void pollBackground(); }, 1200);
+		return () => {
+			cancelled = true;
+			clearInterval(timer);
+		};
+	}, [open, bgSessionId, disabled, editorRef]);
+
 	return (
 		<>
-			<Hint label="Upload photos from phone">
+			<Hint label={bgSessionId ? "Phone Companion connected (runs in background)" : "Upload photos from phone"}>
 				<button
 					type="button"
 					data-testid="phone-upload"
@@ -70,11 +108,18 @@ export function PhoneUploadButton({
 					disabled={disabled}
 					onClick={() => { if (!disabled) setOpen(true); }}
 					className={cn(
-						"flex shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground",
+						"relative flex shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground",
 						compact ? "size-8 rounded-md" : "size-10 rounded-[10px]",
 					)}
 				>
 					<SmartphoneIcon className="size-4" aria-hidden />
+					{bgSessionId && !disabled && (
+						<span
+							data-testid="phone-connected-dot"
+							className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-success ring-1 ring-background"
+							aria-hidden
+						/>
+					)}
 				</button>
 			</Hint>
 			<HostDialog
@@ -94,7 +139,15 @@ export function PhoneUploadButton({
 					className: "fixed inset-0 flex items-center justify-center bg-black/50 p-4 backdrop-blur-[1px]",
 				}}
 			>
-				{open && <PhoneUploadDialogBody editorRef={editorRef} onClose={() => setOpen(false)} />}
+				{open && (
+					<PhoneUploadDialogBody
+						editorRef={editorRef}
+						sinceRef={sharedSinceRef}
+						prevSessionIdRef={prevSessionIdRef}
+						onSessionActive={setBgSessionId}
+						onClose={() => setOpen(false)}
+					/>
+				)}
 			</HostDialog>
 		</>
 	);
@@ -102,9 +155,15 @@ export function PhoneUploadButton({
 
 function PhoneUploadDialogBody({
 	editorRef,
+	sinceRef,
+	prevSessionIdRef,
+	onSessionActive,
 	onClose,
 }: {
 	editorRef: RefObject<HTMLDivElement | null>;
+	sinceRef: MutableRefObject<number>;
+	prevSessionIdRef: MutableRefObject<string | null>;
+	onSessionActive: (sessionId: string | null) => void;
 	onClose: () => void;
 }) {
 	const [session, setSession] = useState<PhoneUploadSessionInfo | null>(null);
@@ -120,36 +179,35 @@ function PhoneUploadDialogBody({
 	const [reloadNonce, setReloadNonce] = useState(0);
 
 	const sessionIdRef = useRef<string | null>(null);
-	const sinceRef = useRef(0);
 	const receivedCountRef = useRef(0);
 	const refreshTunnelRef = useRef(false);
+	const forceNewRef = useRef(false);
 
 	const startSession = useCallback(async (signal: AbortSignal) => {
 		const refreshTunnel = refreshTunnelRef.current;
+		const forceNew = forceNewRef.current;
 		refreshTunnelRef.current = false;
+		forceNewRef.current = false;
 		setLoading(true);
 		setError("");
 		setReceived([]);
 		setTunnelStatus("off");
 		setTunnelUrl(null);
 		setTunnelError(null);
-		sinceRef.current = 0;
 		receivedCountRef.current = 0;
 
-		const previous = sessionIdRef.current;
-		if (previous) {
-			sessionIdRef.current = null;
-			stopSessionRequest(previous);
-		}
-
 		try {
+			const bodyPayload: { refreshTunnel?: boolean; forceNew?: boolean } = {};
+			if (refreshTunnel) bodyPayload.refreshTunnel = true;
+			if (forceNew) bodyPayload.forceNew = true;
+			const hasBody = Object.keys(bodyPayload).length > 0;
 			const response = await fetch(
 				"/api/attachments/phone",
-				refreshTunnel
+				hasBody
 					? {
 						method: "POST",
 						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ refreshTunnel: true }),
+						body: JSON.stringify(bodyPayload),
 						signal,
 					}
 					: { method: "POST", signal },
@@ -158,13 +216,15 @@ function PhoneUploadDialogBody({
 			if (!response.ok || !payload.sessionId || !payload.token || !payload.port) {
 				throw new Error(payload.error || "Could not start phone upload server.");
 			}
-			if (signal.aborted) {
-				stopSessionRequest(payload.sessionId);
-				return;
-			}
+			if (signal.aborted) return;
 			const info = payload as PhoneUploadSessionInfo;
+			if (forceNew || prevSessionIdRef.current !== info.sessionId) {
+				sinceRef.current = 0;
+				prevSessionIdRef.current = info.sessionId;
+			}
 			const nextLan = info.defaultAddress ?? info.addresses[0]?.address ?? "";
 			sessionIdRef.current = info.sessionId;
+			onSessionActive(info.sessionId);
 			setSession(info);
 			setSelectedAddress(nextLan);
 			setTunnelStatus(info.tunnelStatus ?? "off");
@@ -179,23 +239,26 @@ function PhoneUploadDialogBody({
 		} finally {
 			if (!signal.aborted) setLoading(false);
 		}
-	}, []);
+	}, [onSessionActive, prevSessionIdRef, sinceRef]);
 
 	useEffect(() => {
 		const abort = new AbortController();
 		void startSession(abort.signal);
-		const onPageHide = () => {
-			if (sessionIdRef.current) stopSessionRequest(sessionIdRef.current);
-		};
-		window.addEventListener("pagehide", onPageHide);
 		return () => {
 			abort.abort();
-			window.removeEventListener("pagehide", onPageHide);
-			const activeId = sessionIdRef.current;
-			sessionIdRef.current = null;
-			if (activeId) stopSessionRequest(activeId);
+			// Intentionally keep the phone companion session alive when closing the QR dialog.
 		};
 	}, [startSession, reloadNonce]);
+
+	const disconnectSession = () => {
+		const activeId = sessionIdRef.current ?? prevSessionIdRef.current;
+		sessionIdRef.current = null;
+		prevSessionIdRef.current = null;
+		sinceRef.current = 0;
+		if (activeId) stopSessionRequest(activeId);
+		onSessionActive(null);
+		onClose();
+	};
 
 	useEffect(() => () => {
 		if (receivedCountRef.current > 0) {
@@ -219,7 +282,8 @@ function PhoneUploadDialogBody({
 				const data = await res.json() as PhoneUploadPollResponse;
 				if (cancelled) return;
 				if (!data.active) {
-					setError("Phone upload session expired. Click Refresh QR to start a new one.");
+					onSessionActive(null);
+					setError("Phone upload session expired. Click New code to start a new one.");
 					return;
 				}
 				if (data.tunnelStatus !== undefined) setTunnelStatus(data.tunnelStatus);
@@ -485,22 +549,42 @@ function PhoneUploadDialogBody({
 				</p>
 			)}
 
-			<div className="flex items-center justify-end gap-2 pt-1">
-				<Button
-					type="button"
-					variant="outline"
-					size="sm"
-					onClick={() => {
-						refreshTunnelRef.current = tunnelStatus === "error";
-						setReloadNonce((n) => n + 1);
-					}}
-				>
-					<RefreshCwIcon className="size-3.5" aria-hidden />
-					New code
-				</Button>
-				<Button type="button" size="sm" onClick={onClose}>
-					{received.length > 0 ? `Done (${received.length})` : "Done"}
-				</Button>
+			<div className="space-y-1.5 pt-1">
+				<p className="text-[11px] text-muted-foreground">
+					Closing this dialog keeps your phone connected in the background.
+				</p>
+				<div className="flex items-center justify-between gap-2">
+					<Button
+						type="button"
+						variant="ghost"
+						size="sm"
+						disabled={!session?.sessionId}
+						onClick={disconnectSession}
+						className="text-muted-foreground hover:bg-error/10 hover:text-error"
+						title="Close phone companion server and invalidate the current QR link"
+					>
+						<PowerIcon className="size-3.5" aria-hidden />
+						Disconnect
+					</Button>
+					<div className="flex items-center gap-2">
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={() => {
+								forceNewRef.current = true;
+								refreshTunnelRef.current = tunnelStatus === "error";
+								setReloadNonce((n) => n + 1);
+							}}
+						>
+							<RefreshCwIcon className="size-3.5" aria-hidden />
+							New code
+						</Button>
+						<Button type="button" size="sm" onClick={onClose}>
+							{received.length > 0 ? `Done (${received.length})` : "Done"}
+						</Button>
+					</div>
+				</div>
 			</div>
 		</div>
 	);

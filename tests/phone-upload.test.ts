@@ -369,6 +369,11 @@ describe("phone upload cross-network tunnel support", () => {
 		const s2 = await createPhoneUploadSession({ host: "127.0.0.1", enableTunnel: true });
 		assert.equal(s2.tunnelStatus, "ready");
 		assert.equal(s2.tunnelUrl, "https://warm-demo.trycloudflare.com");
+		// Reusing an active session returns the same sessionId/token/port instead of returning 404 on phone.
+		const reused = await createPhoneUploadSession({ host: "127.0.0.1", enableTunnel: true, reuseExisting: true });
+		assert.equal(reused.sessionId, s2.sessionId);
+		assert.equal(reused.token, s2.token);
+		assert.equal(reused.port, s2.port);
 		await closePhoneUploadSession(s2.sessionId);
 	});
 });

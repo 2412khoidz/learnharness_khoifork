@@ -44,6 +44,7 @@ export type ExamPrepPatch = Partial<ExamPrepConfig> & {
 		clusterIds?: string[];
 	};
 	deleteExamId?: string;
+	clearExam?: boolean;
 };
 
 export interface ExamScopeContext {
@@ -151,7 +152,7 @@ export function sanitizeExamPrepConfig(raw: unknown, fallback: ExamPrepConfig = 
 		: fallback.examTitle;
 	const examDate = sanitizeDate(input.examDate, fallback.examDate);
 	const clusterIds = sanitizeClusterIds(input.clusterIds, fallback.clusterIds);
-	const exams = sanitizeExams(input.exams, fallback.exams);
+	let exams = sanitizeExams(input.exams, fallback.exams);
 	let activeExamId: string | null = fallback.activeExamId;
 	if (input.activeExamId === null || input.activeExamId === "") {
 		activeExamId = null;
@@ -159,6 +160,20 @@ export function sanitizeExamPrepConfig(raw: unknown, fallback: ExamPrepConfig = 
 		activeExamId = input.activeExamId;
 	} else if (activeExamId && !exams.some((e) => e.id === activeExamId)) {
 		activeExamId = null;
+	}
+	// Migrate pre-profile single-exam config into a real profile so users can switch or delete it.
+	if (exams.length === 0 && (examTitle !== "" || examDate !== null)) {
+		const migratedId = "exam_legacy";
+		exams = [
+			{
+				id: migratedId,
+				title: examTitle || "Exam",
+				date: examDate,
+				pace,
+				clusterIds: [...clusterIds],
+			},
+		];
+		activeExamId = migratedId;
 	}
 	const updatedAt = typeof input.updatedAt === "string" ? input.updatedAt : fallback.updatedAt;
 	return { mode, examTitle, examDate, pace, clusterIds, exams, activeExamId, updatedAt };
@@ -186,20 +201,28 @@ export function applyExamPrepPatch(
 		}
 	}
 
-	if (typeof patch.deleteExamId === "string" && patch.deleteExamId) {
-		exams = exams.filter((e) => e.id !== patch.deleteExamId);
-		if (activeExamId === patch.deleteExamId) {
-			const nextProfile = exams[0] ?? null;
-			if (nextProfile) {
-				activeExamId = nextProfile.id;
-				examTitle = nextProfile.title;
-				examDate = nextProfile.date;
-				pace = nextProfile.pace;
-				clusterIds = [...nextProfile.clusterIds];
-			} else {
-				activeExamId = null;
-				clusterIds = [];
-			}
+	const removeExamId =
+		typeof patch.deleteExamId === "string" && patch.deleteExamId
+			? patch.deleteExamId
+			: patch.clearExam && activeExamId
+				? activeExamId
+				: null;
+	if (removeExamId) {
+		exams = exams.filter((e) => e.id !== removeExamId);
+	}
+	if ((removeExamId && activeExamId === removeExamId) || (patch.clearExam && !removeExamId)) {
+		const nextProfile = exams[0] ?? null;
+		if (nextProfile) {
+			activeExamId = nextProfile.id;
+			examTitle = nextProfile.title;
+			examDate = nextProfile.date;
+			pace = nextProfile.pace;
+			clusterIds = [...nextProfile.clusterIds];
+		} else {
+			activeExamId = null;
+			examTitle = "";
+			examDate = null;
+			clusterIds = [];
 		}
 	}
 
