@@ -14,7 +14,11 @@ import {
 	type FsrsSchedule,
 	type FsrsSettings,
 } from "../src/core/fsrs-scheduler.ts";
-import { computeExamPrepStatus, DEFAULT_EXAM_PREP_CONFIG } from "../src/core/exam-prep.ts";
+import {
+	computeExamPrepStatus,
+	DEFAULT_EXAM_PREP_CONFIG,
+	formatExamPrepDirectiveForRole,
+} from "../src/core/exam-prep.ts";
 import type { GraphChain, GraphNode } from "../src/core/contracts/graph.ts";
 import type { GraphStore } from "../src/core/ports.ts";
 import { readExamPrepConfig, readExamPrepStatus, writeExamPrepConfig } from "../src/server/exam-prep.ts";
@@ -577,5 +581,105 @@ describe("Mobile Companion Redesigned UI, Assets & Dangling Questions", () => {
 		} finally {
 			await closePhoneUploadSession(info.sessionId);
 		}
+	});
+});
+
+describe("Role-tailored pace directives (TobiasSamsonsen overrides)", () => {
+	const emptySummary = {
+		examReadinessPct: 55,
+		counts: {
+			tracked: 2,
+			strong: 1,
+			decaying: 1,
+			overdue: 0,
+			prereqRisk: 0,
+			untrackedFoundations: 0,
+			weakFoundations: 1,
+		},
+		nodes: {},
+		hasCustomWeights: false,
+		reviewCount: 4,
+		dueIds: ["n1"],
+		weakFoundationIds: ["n1"],
+		untrackedFoundationIds: [],
+		dueNames: ["Mean Value Theorem"],
+		weakFoundationNames: ["Mean Value Theorem"],
+		untrackedFoundationNames: [],
+	};
+
+	it("keeps pure default Long-Term + Thorough unscoped completely null across all agent roles", () => {
+		const status = computeExamPrepStatus(DEFAULT_EXAM_PREP_CONFIG, emptySummary, Date.UTC(2026, 10, 15));
+		assert.equal(status.promptDirective, null);
+		assert.equal(formatExamPrepDirectiveForRole(status, "prober"), null);
+		assert.equal(formatExamPrepDirectiveForRole(status, "teacher"), null);
+		assert.equal(formatExamPrepDirectiveForRole(status, "practice"), null);
+	});
+
+	it("emits sharp role-specific base doctrine overrides for Prober, Teacher, and Practice", () => {
+		const status = computeExamPrepStatus(
+			{
+				mode: "exam",
+				examTitle: "Calculus Final",
+				examDate: "2026-11-22",
+				pace: "crash-course",
+				updatedAt: "2026-11-15T00:00:00.000Z",
+			},
+			emptySummary,
+			Date.UTC(2026, 10, 15, 12, 0, 0),
+		);
+
+		const prober = formatExamPrepDirectiveForRole(status, "prober");
+		const teacher = formatExamPrepDirectiveForRole(status, "teacher");
+		const practice = formatExamPrepDirectiveForRole(status, "practice");
+
+		assert.ok(prober && teacher && practice);
+		assert.equal(status.promptDirective, teacher);
+
+		// Prober: short placement + immediate probe_done handoff, no teacher plan/proof rules
+		assert.match(prober, /fewest questions needed/i);
+		assert.match(prober, /probe_done/);
+		assert.ok(!prober.includes("ONE check question per plan node"));
+
+		// Teacher: explicit overrides against 05-method / 10-planning + 3 essentials + 1 check + skipped note
+		assert.match(teacher, /thorough, deep, real understanding — not coverage/);
+		assert.match(teacher, /No size ceiling/);
+		assert.match(teacher, /never rush forward/);
+		assert.match(teacher, /ONE check question per plan node/);
+		assert.match(teacher, /cue for when to use it/);
+		assert.match(teacher, /what depth was skipped/);
+		assert.match(teacher, /Exam Triage:/);
+
+		// Practice: explicit anti-stall override + movedOn conclude guidance
+		assert.match(practice, /A failed attempt is never a reason to reveal the correction or conclude the problem/);
+		assert.match(practice, /outcome movedOn/);
+		assert.ok(!practice.includes("probe_done"));
+
+		// Keep tail directive compact for prompt caching & token efficiency
+		assert.ok(prober.length < 1800);
+		assert.ok(teacher.length < 1800);
+		assert.ok(practice.length < 1800);
+	});
+
+	it("distinguishes Long-Term + Crash from Exam Prep + Thorough cleanly", () => {
+		const ltCrash = computeExamPrepStatus(
+			{ mode: "long-term", examTitle: "", examDate: null, pace: "crash-course", updatedAt: "2026-11-15T00:00:00.000Z" },
+			emptySummary,
+			Date.UTC(2026, 10, 15, 12, 0, 0),
+		);
+		assert.ok(ltCrash.promptDirective);
+		assert.match(ltCrash.promptDirective!, /Active Mode: Long-Term Mastery/);
+		assert.match(ltCrash.promptDirective!, /Crash Course/);
+		assert.ok(!ltCrash.promptDirective!.includes("Exam Triage:"));
+
+		const examThorough = computeExamPrepStatus(
+			{ mode: "exam", examTitle: "Algebra", examDate: "2026-11-28", pace: "thorough", updatedAt: "2026-11-15T00:00:00.000Z" },
+			emptySummary,
+			Date.UTC(2026, 10, 15, 12, 0, 0),
+		);
+		assert.ok(examThorough.promptDirective);
+		assert.match(examThorough.promptDirective!, /Active Mode: Dedicated Exam Prep \(Algebra\)/);
+		assert.match(examThorough.promptDirective!, /Exam Triage:/);
+		assert.match(examThorough.promptDirective!, /preserving full derivation depth/i);
+		assert.match(examThorough.promptDirective!, /Pace \(Thorough\)/);
 	});
 });

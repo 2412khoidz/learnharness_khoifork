@@ -21,8 +21,8 @@ const COLLAPSE_STORAGE_KEY = "chronoharness.examCardCollapsed";
 
 const PACE_LABELS: ReadonlyArray<{ id: StudyPace; label: string; hint: string }> = [
 	{ id: "thorough", label: "Thorough", hint: "Full proofs & deep understanding" },
-	{ id: "efficient", label: "Efficient", hint: "Focused core proofs & due concepts" },
-	{ id: "crash-course", label: "Crash", hint: "High-yield exam tactics & speed" },
+	{ id: "efficient", label: "Efficient", hint: "Core proofs, 1-2 checks/node & due roots" },
+	{ id: "crash-course", label: "Crash", hint: "Key idea + cue + 1 check/node, skip deep proofs" },
 ];
 
 export function ExamPrepSidebarCard() {

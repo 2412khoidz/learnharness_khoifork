@@ -323,14 +323,113 @@ export function computeDaysRemaining(examDate: string | null, now = Date.now()):
 	return Math.round((targetUtc - todayUtc) / DAY_MS);
 }
 
-const PACE_DIRECTIVE: Record<StudyPace, string> = {
-	thorough:
-		"Pace (Thorough): Prioritize deep derivation, conceptual proof understanding, and full foundational grounding before advancing.",
-	efficient:
-		"Pace (Efficient): Balance intuition with core proofs, reinforce due or decaying foundations first, and skip redundant detours.",
-	"crash-course":
-		"Pace (Crash Course): Maximize exam score per minute — focus on high-yield theorems, weak/due foundations, worked problem templates, and rapid retrieval checks over lengthy background derivations.",
+export type StudyDirectiveRole = "prober" | "teacher" | "practice";
+
+const PACE_ROLE_DIRECTIVE: Record<StudyDirectiveRole, Record<StudyPace, string>> = {
+	prober: {
+		thorough:
+			"Pace (Thorough): Map all relevant strands (floor and ceiling) thoroughly before calling probe_done.",
+		efficient:
+			"Pace (Efficient): Overrides exhaustive multi-round probing in your base doctrine. Keep placement short: ask roughly half as many questions as usual, avoid redundant cross-checks once adjacent strands are clear, prioritize weak or due FSRS foundations, and call probe_done as soon as the map is clear enough to plan.",
+		"crash-course":
+			"Pace (Crash Course): Overrides exhaustive multi-round probing in your base doctrine. The learner is short on time: ask the fewest questions needed (~2-4 total) to locate their starting point and critical weak or due FSRS gaps, and call probe_done immediately once the picture is clear.",
+	},
+	teacher: {
+		thorough:
+			"Pace (Thorough): Prioritize deep derivation, conceptual proof understanding, and full foundational grounding before advancing.",
+		efficient:
+			"Pace (Efficient): Overrides \"thorough, deep, real understanding — not coverage\" and \"never rush forward\" in your base method. Balance intuition with core proofs, reinforcing weak or due FSRS foundations first and skipping redundant detours. Give each plan node only the questions it needs (usually 1-2): when one unhinted answer shows the step, accept it and advance without extra confirmation quizzes (exception: if a hint was needed, verify that step once more on a fresh case). Repair only real gaps briefly — never re-teach what the learner already holds, though a wrong answer on a step or prerequisite IS a real gap that must be repaired and retried before moving on.",
+		"crash-course":
+			"Pace (Crash Course): Optimize for high-yield mastery per minute. Overrides \"thorough, deep, real understanding — not coverage\", \"No size ceiling\", and \"never rush forward\" in your base method. Keep the lesson map small (only high-yield nodes toward the goal, prioritizing weak/due FSRS foundations). For each concept teach: (1) core idea, (2) solution procedure, and (3) cue for when to use it. Ask ONE check question per plan node instead of quizzing every sub-step (exception: a hinted answer requires one fresh-case check). Keep repairs tight: show the missing step, get one clean retry, then move on — never build on an unverified wrong answer and never skip a prerequisite the learner demonstrably lacks. When omitting deeper proofs, state in one concise line what depth was skipped so the learner can ask for it.",
+	},
+	practice: {
+		thorough:
+			"Pace (Thorough): Keep full Socratic nudging without premature reveals, prioritizing deep structural mastery before advancing.",
+		efficient:
+			"Pace (Efficient): Keep feedback crisp (a few lines: what worked in one phrase, first break, smallest nudge; never restate confirmed parts). Prioritize weak and due FSRS foundations when selecting problem targets. Overrides \"A failed attempt is never a reason to reveal the correction or conclude the problem\" if nudges stall: keep nudging while the learner moves forward, but if the same break survives two nudges or they are far off, state the core idea and missing step concisely and conclude with outcome movedOn (retest: true for key gaps) rather than dragging.",
+		"crash-course":
+			"Pace (Crash Course): Optimize practice throughput per minute. Overrides \"A failed attempt is never a reason to reveal the correction or conclude the problem\" and multi-round stalling in your base doctrine. Keep feedback ultra-short (what worked, first break, smallest cue). Target weak/due FSRS foundations and exam-style transfer problems over easy warmups. Stop nudging once the same break survives two nudges or a new wrong turn follows each fix: state the core idea, applicability cue, and missing worked step in one short paragraph, conclude with outcome movedOn (retest: true on critical gaps), then move on.",
+	},
 };
+
+function examSelectionLine(pace: StudyPace): string {
+	return pace === "thorough"
+		? "Exam Triage: Use the exam target/countdown and FSRS weak/due foundations to prioritize what to cover first and trim off-target tangents, while preserving full derivation depth unless the learner asks to move faster."
+		: "Exam Triage: Let the exam target and countdown guide what to cut vs. drill — weight high-yield exam topics and weak/due FSRS foundations ahead of low-yield detours.";
+}
+
+interface DirectiveSummaryInput {
+	mode: StudyMode;
+	pace: StudyPace;
+	examTitle: string;
+	daysRemaining: number | null;
+	activeScopeLabels: readonly string[];
+	scopedNodeCount: number;
+	totalNodeCount: number;
+	examReadinessPct: number;
+	trackedCount: number;
+	dueCount: number;
+	weakFoundationsCount: number;
+	untrackedFoundationsCount: number;
+	weakFoundationNames: readonly string[];
+	duePropositionNames: readonly string[];
+	untrackedFoundationNames: readonly string[];
+}
+
+function renderStudyModeDirective(input: DirectiveSummaryInput, role: StudyDirectiveRole): string | null {
+	if (input.mode === "long-term" && input.pace === "thorough" && input.activeScopeLabels.length === 0) {
+		return null;
+	}
+	const header = input.mode === "exam"
+		? [
+			"Active Mode: Dedicated Exam Prep",
+			input.examTitle ? `(${input.examTitle})` : "",
+			input.daysRemaining !== null
+				? `— ${input.daysRemaining > 0 ? `${input.daysRemaining} day(s) remaining` : input.daysRemaining === 0 ? "Exam day today" : `${Math.abs(input.daysRemaining)} day(s) past target date`}`
+				: "",
+		].filter(Boolean).join(" ")
+		: "Active Mode: Long-Term Mastery";
+
+	const metrics = `Current FSRS-6 Metrics: Exam Readiness ${input.examReadinessPct}% · Tracked ${input.trackedCount} · Due/Decaying ${input.dueCount} · Weak foundations ${input.weakFoundationsCount} · Untracked foundations ${input.untrackedFoundationsCount}.`;
+	const briefingLines = [
+		header,
+		input.activeScopeLabels.length > 0 ? `Focused Subject Scope: ${input.activeScopeLabels.join(", ")} (${input.scopedNodeCount}/${input.totalNodeCount} propositions).` : "",
+		metrics,
+		input.weakFoundationNames.length > 0 ? `Priority Weak Foundations (reinforce first): ${input.weakFoundationNames.join(", ")}.` : "",
+		input.duePropositionNames.length > 0 ? `Due/Decaying Propositions: ${input.duePropositionNames.join(", ")}.` : "",
+		input.untrackedFoundationNames.length > 0 ? `Untracked Foundations (no FSRS cards yet): ${input.untrackedFoundationNames.join(", ")}.` : "",
+		input.mode === "exam" ? examSelectionLine(input.pace) : "",
+		PACE_ROLE_DIRECTIVE[role][input.pace],
+	].filter(Boolean);
+	return `[ChronoHarness Study Mode Directive]\n${briefingLines.join("\n")}`;
+}
+
+/** Render a role-tailored Study Mode + FSRS directive, or null when in pure default Long-Term/Thorough mode. */
+export function formatExamPrepDirectiveForRole(
+	status: ExamPrepStatus,
+	role: StudyDirectiveRole = "teacher",
+): string | null {
+	return renderStudyModeDirective(
+		{
+			mode: status.config.mode,
+			pace: status.config.pace,
+			examTitle: status.config.examTitle,
+			daysRemaining: status.daysRemaining,
+			activeScopeLabels: status.activeScopeLabels,
+			scopedNodeCount: status.scopedNodeCount,
+			totalNodeCount: status.totalNodeCount,
+			examReadinessPct: status.examReadinessPct,
+			trackedCount: status.trackedCount,
+			dueCount: status.dueCount,
+			weakFoundationsCount: status.weakFoundationsCount,
+			untrackedFoundationsCount: status.untrackedFoundationsCount,
+			weakFoundationNames: status.weakFoundationNames,
+			duePropositionNames: status.duePropositionNames,
+			untrackedFoundationNames: status.untrackedFoundationNames,
+		},
+		role,
+	);
+}
 
 export function computeExamPrepStatus(
 	config: ExamPrepConfigInput,
@@ -389,30 +488,26 @@ export function computeExamPrepStatus(
 	const totalNodeCount = scopeContext?.totalNodeCount ?? nodes.length;
 	const priorityPropositionIds = scopeContext?.priorityPropositionIds ?? priorityIds;
 
-	let promptDirective: string | null = null;
-	if (!(normalized.mode === "long-term" && normalized.pace === "thorough") || activeScopeLabels.length > 0) {
-		const header = normalized.mode === "exam"
-			? [
-				"Active Mode: Dedicated Exam Prep",
-				normalized.examTitle ? `(${normalized.examTitle})` : "",
-				daysRemaining !== null
-					? `— ${daysRemaining > 0 ? `${daysRemaining} day(s) remaining` : daysRemaining === 0 ? "Exam day today" : `${Math.abs(daysRemaining)} day(s) past target date`}`
-					: "",
-			].filter(Boolean).join(" ")
-			: "Active Mode: Long-Term Mastery";
-
-		const metrics = `Current FSRS-6 Metrics: Exam Readiness ${fsrs.examReadinessPct}% · Tracked ${fsrs.counts.tracked} · Due/Decaying ${dueCount} · Weak foundations ${weakFoundationsCount} · Untracked foundations ${untrackedFoundationsCount}.`;
-		const briefingLines = [
-			header,
-			activeScopeLabels.length > 0 ? `Focused Subject Scope: ${activeScopeLabels.join(", ")} (${scopedNodeCount}/${totalNodeCount} propositions).` : "",
-			metrics,
-			weakFoundationNames.length > 0 ? `Priority Weak Foundations (reinforce first): ${weakFoundationNames.join(", ")}.` : "",
-			duePropositionNames.length > 0 ? `Due/Decaying Propositions: ${duePropositionNames.join(", ")}.` : "",
-			untrackedFoundationNames.length > 0 ? `Untracked Foundations (no FSRS cards yet): ${untrackedFoundationNames.join(", ")}.` : "",
-			PACE_DIRECTIVE[normalized.pace],
-		].filter(Boolean);
-		promptDirective = `[ChronoHarness Study Mode Directive]\n${briefingLines.join("\n")}`;
-	}
+	const promptDirective = renderStudyModeDirective(
+		{
+			mode: normalized.mode,
+			pace: normalized.pace,
+			examTitle: normalized.examTitle,
+			daysRemaining,
+			activeScopeLabels,
+			scopedNodeCount,
+			totalNodeCount,
+			examReadinessPct: fsrs.examReadinessPct,
+			trackedCount: fsrs.counts.tracked,
+			dueCount,
+			weakFoundationsCount,
+			untrackedFoundationsCount,
+			weakFoundationNames,
+			duePropositionNames,
+			untrackedFoundationNames,
+		},
+		"teacher",
+	);
 
 	return {
 		config: normalized,

@@ -41,6 +41,7 @@ import { preparePluginProblemSubmission, requirePluginProblemTarget, type Proble
 import { providerKeyPresent } from "./keys.ts";
 import { recordPracticeFsrsOutcome } from "./graph-fsrs.ts";
 import { readExamPrepStatus } from "./exam-prep.ts";
+import { formatExamPrepDirectiveForRole } from "../core/exam-prep.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
 import {
 	extractionEnabled,
@@ -679,7 +680,9 @@ export async function handleChatInput(
 	if (process.env.NODE_ENV !== "test" || process.env.LH_EXAM_PREP_PROMPT === "1") {
 		try {
 			const examStatus = readExamPrepStatus({ graphStore: stores.graphStore });
-			if (examStatus.promptDirective) extraInstructions = [examStatus.promptDirective];
+			const agentRole = record.kind === "practice" ? "practice" : teaching ? "teacher" : "prober";
+			const directive = formatExamPrepDirectiveForRole(examStatus, agentRole);
+			if (directive) extraInstructions = [directive];
 		} catch {
 			// Best-effort study mode directive: never block a turn on config read failure.
 		}
