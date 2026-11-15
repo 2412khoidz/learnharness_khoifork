@@ -99,6 +99,25 @@ for (const extra of ["plugins", "dist", path.join("node_modules", "electron")]) 
 	}
 }
 
+// Bundle local KaTeX assets (CSS, JS, and woff2 fonts) for Mobile Companion offline/LAN rendering.
+const katexSrc = path.resolve("node_modules", "katex", "dist");
+if (exists(katexSrc)) {
+	const nodeFs = await import("node:fs");
+	const katexDst = path.join(STANDALONE, "node_modules", "katex", "dist");
+	const katexFontsDst = path.join(katexDst, "fonts");
+	nodeFs.mkdirSync(katexFontsDst, { recursive: true });
+	for (const file of ["katex.min.css", "katex.min.js"]) {
+		const srcFile = path.join(katexSrc, file);
+		if (exists(srcFile)) nodeFs.copyFileSync(srcFile, path.join(katexDst, file));
+	}
+	const fontsSrc = path.join(katexSrc, "fonts");
+	if (exists(fontsSrc)) {
+		for (const f of nodeFs.readdirSync(fontsSrc)) {
+			if (f.endsWith(".woff2")) nodeFs.copyFileSync(path.join(fontsSrc, f), path.join(katexFontsDst, f));
+		}
+	}
+}
+
 // 3) Sanity: the runtime-read prompt assets must be present (the teacher
 //    agent reads them from disk at request time).
 for (const asset of [
