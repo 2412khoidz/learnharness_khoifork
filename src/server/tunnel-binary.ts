@@ -156,15 +156,86 @@ export async function ensureCloudflaredBinary(options: EnsureCloudflaredOptions 
 	return task;
 }
 
+export interface TunnelReadinessDeps {
+	resolvePublic?: (hostname: string) => Promise<string[]>;
+	lookupOs?: (hostname: string) => Promise<string>;
+	fetchFn?: typeof fetch;
+	pollIntervalMs?: number;
+}
+
+function isDnsNotFoundError(err: unknown): boolean {
+	const code = (err as { code?: string } | null)?.code;
+	return code === "ENOTFOUND" || code === "ENODATA";
+}
+
+function createPublicResolver(): (hostname: string) => Promise<string[]> {
+	const resolver = new dns.Resolver({ timeout: 1_500, tries: 1 });
+	resolver.setServers(["1.1.1.1", "8.8.8.8"]);
+	return async (hostname: string) => {
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		try {
+			return await Promise.race([
+				resolver.resolve4(hostname),
+				new Promise<string[]>((_, reject) => {
+					timer = setTimeout(
+						() => reject(Object.assign(new Error("Public DNS timeout"), { code: "ETIMEOUT" })),
+						2_000,
+					);
+				}),
+			]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	};
+}
+
+async function resolveTunnelHostname(
+	hostname: string,
+	isCancelled: () => boolean,
+	startTime: number,
+	deadline: number,
+	headstartMs: number,
+	pollMs: number,
+	resolvePublic: (hostname: string) => Promise<string[]>,
+	lookupOs: (hostname: string) => Promise<string>,
+): Promise<boolean> {
+	while (!isCancelled() && Date.now() < deadline) {
+		let allowOsFallback = Date.now() - startTime >= headstartMs;
+		try {
+			const ips = await resolvePublic(hostname);
+			if (ips.length > 0) return true;
+		} catch (err) {
+			// If direct UDP 53 to 1.1.1.1/8.8.8.8 is blocked or unreachable, fall back immediately to OS DNS.
+			if (!isDnsNotFoundError(err)) {
+				allowOsFallback = true;
+			}
+		}
+
+		if (allowOsFallback && !isCancelled()) {
+			try {
+				const address = await lookupOs(hostname);
+				if (address) return true;
+			} catch {
+				// keep polling until OS resolver catches up or deadline expires
+			}
+		}
+
+		await new Promise((r) => setTimeout(r, pollMs));
+	}
+	return false;
+}
+
 /**
  * Wait for a new Quick Tunnel hostname to resolve on Cloudflare/Google public DNS before calling OS fetch,
  * preventing Windows DNS Client from caching an early NXDOMAIN while the subdomain finishes propagating.
+ * Falls back to OS DNS resolution if public DNS port 53 is blocked or slow to answer.
  */
 export async function waitForTunnelReadiness(
 	tunnelUrl: string,
 	pingPath: string,
 	isCancelled: () => boolean,
-	timeoutMs = 18_000,
+	timeoutMs = 24_000,
+	deps?: TunnelReadinessDeps,
 ): Promise<boolean> {
 	let hostname = "";
 	try {
@@ -173,23 +244,24 @@ export async function waitForTunnelReadiness(
 		return false;
 	}
 
-	const resolver = new dns.Resolver();
-	resolver.setServers(["1.1.1.1", "8.8.8.8"]);
-	const deadline = Date.now() + timeoutMs;
+	const startTime = Date.now();
+	const deadline = startTime + timeoutMs;
+	const headstartMs = Math.min(6_000, Math.floor(timeoutMs * 0.35));
+	const pollMs = deps?.pollIntervalMs ?? 400;
+	const resolvePublic = deps?.resolvePublic ?? createPublicResolver();
+	const lookupOs = deps?.lookupOs ?? (async (host: string) => (await dns.lookup(host)).address);
+	const fetchFn = deps?.fetchFn ?? fetch;
 
-	let dnsReady = false;
-	while (!isCancelled() && Date.now() < deadline) {
-		try {
-			const ips = await resolver.resolve4(hostname);
-			if (ips.length > 0) {
-				dnsReady = true;
-				break;
-			}
-		} catch {
-			// keep polling public DNS until propagation completes
-		}
-		await new Promise((r) => setTimeout(r, 400));
-	}
+	const dnsReady = await resolveTunnelHostname(
+		hostname,
+		isCancelled,
+		startTime,
+		deadline,
+		headstartMs,
+		pollMs,
+		resolvePublic,
+		lookupOs,
+	);
 	if (!dnsReady || isCancelled()) return false;
 
 	const normalizedPing = pingPath.startsWith("/") ? pingPath : `/${pingPath}`;
@@ -197,7 +269,7 @@ export async function waitForTunnelReadiness(
 		const controller = new AbortController();
 		const reqTimer = setTimeout(() => controller.abort(), 3_000);
 		try {
-			const res = await fetch(`${tunnelUrl.replace(/\/+$/, "")}${normalizedPing}`, {
+			const res = await fetchFn(`${tunnelUrl.replace(/\/+$/, "")}${normalizedPing}`, {
 				method: "GET",
 				cache: "no-store",
 				signal: controller.signal,
@@ -208,7 +280,7 @@ export async function waitForTunnelReadiness(
 		} finally {
 			clearTimeout(reqTimer);
 		}
-		await new Promise((r) => setTimeout(r, 450));
+		await new Promise((r) => setTimeout(r, pollMs));
 	}
 	return false;
 }

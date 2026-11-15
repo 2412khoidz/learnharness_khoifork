@@ -34,7 +34,9 @@ import { ensureCloudflaredBinary, waitForTunnelReadiness } from "./tunnel-binary
 const SESSION_TTL_MS = 60 * 60 * 1000;
 const TUNNEL_IDLE_TTL_MS = 60 * 60 * 1000;
 const SSH_TUNNEL_STARTUP_TIMEOUT_MS = 12_000;
-const CF_TUNNEL_STARTUP_TIMEOUT_MS = 20_000;
+const CF_TUNNEL_STARTUP_TIMEOUT_MS = 28_000;
+const CF_TUNNEL_MAX_ATTEMPTS = 2;
+const CF_TUNNEL_RETRY_DELAY_MS = 1_500;
 const ANSI_CSI_RE = new RegExp("\\x1b\\[[0-9;]*[A-Za-z]", "g");
 const LHR_URL_RE = /https:\/\/[a-z0-9.-]+\.lhr\.life\b/i;
 const CF_URL_RE = /https:\/\/[a-z0-9.-]+\.trycloudflare\.com\b/i;
@@ -133,11 +135,26 @@ function startSshTunnel(port: number, callbacks: TunnelSpawnerCallbacks): { clos
 	};
 }
 
+function extractCloudflareDiagnostic(text: string): string | null {
+	const cleaned = text.replace(ANSI_CSI_RE, "");
+	const lines = cleaned
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i];
+		if (line && /\bERR\b|error|failed|lookup|timeout|refused/i.test(line)) {
+			return line.replace(/^\d{4}-\d{2}-\d{2}T\S+\s+(?:ERR|WRN|INF)\s+/i, "").slice(0, 140);
+		}
+	}
+	return null;
+}
+
 function startCloudflareTunnel(
 	port: number,
 	binaryPath: string,
 	callbacks: TunnelSpawnerCallbacks,
-	onPreReadyFailure: () => void,
+	onPreReadyFailure: (reason?: string) => void,
 ): { close: () => void } {
 	const child = spawn(
 		binaryPath,
@@ -156,6 +173,7 @@ function startCloudflareTunnel(
 	let verifying = false;
 	let tunnelUrl: string | null = null;
 	let registered = false;
+	let lastErrorDetail: string | null = null;
 
 	const killChild = () => {
 		try {
@@ -170,11 +188,10 @@ function startCloudflareTunnel(
 		settled = true;
 		clearTimeout(timer);
 		killChild();
-		if (message) {
-			// Startup failed before readiness — allow fallback if configured.
-			void message;
-		}
-		onPreReadyFailure();
+		const reason = message
+			? (lastErrorDetail ? `${message}: ${lastErrorDetail}` : message)
+			: (lastErrorDetail ?? undefined);
+		onPreReadyFailure(reason);
 	};
 
 	const timer = setTimeout(() => {
@@ -201,6 +218,8 @@ function startCloudflareTunnel(
 	const handleOutput = (chunk: Buffer | string) => {
 		if (closed || settled) return;
 		const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+		const diagnostic = extractCloudflareDiagnostic(text);
+		if (diagnostic) lastErrorDetail = diagnostic;
 		if (!tunnelUrl) {
 			const match = CF_URL_RE.exec(text);
 			if (match) tunnelUrl = match[0];
@@ -213,7 +232,8 @@ function startCloudflareTunnel(
 
 	child.stdout?.on("data", handleOutput);
 	child.stderr?.on("data", handleOutput);
-	child.on("error", () => {
+	child.on("error", (err) => {
+		if (!lastErrorDetail && err?.message) lastErrorDetail = err.message;
 		failStartup("Failed to launch cloudflared");
 	});
 	child.on("close", () => {
@@ -239,29 +259,61 @@ function startCloudflareTunnel(
 function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbacks): { close: () => void } {
 	let closed = false;
 	let activeHandle: { close: () => void } | null = null;
+	let retryTimer: ReturnType<typeof setTimeout> | null = null;
+	let lastCfError: string | undefined;
 
 	const startFallback = () => {
 		if (closed) return;
-		activeHandle = startSshTunnel(port, callbacks);
+		activeHandle = startSshTunnel(port, {
+			...callbacks,
+			onError: (sshMessage) => {
+				const combined =
+					lastCfError && !sshMessage.includes(lastCfError)
+						? `${sshMessage} — Cloudflare: ${lastCfError}`
+						: sshMessage;
+				callbacks.onError(combined);
+			},
+		});
 	};
 
-	void ensureCloudflaredBinary().then((binaryPath) => {
+	const launchCloudflareAttempt = (binaryPath: string, attempt: number) => {
 		if (closed) return;
-		if (!binaryPath) {
-			startFallback();
-			return;
-		}
-		activeHandle = startCloudflareTunnel(port, binaryPath, callbacks, () => {
+		activeHandle = startCloudflareTunnel(port, binaryPath, callbacks, (reason) => {
 			if (closed) return;
 			activeHandle = null;
+			if (reason) lastCfError = reason;
+			if (attempt < CF_TUNNEL_MAX_ATTEMPTS) {
+				retryTimer = setTimeout(() => {
+					retryTimer = null;
+					launchCloudflareAttempt(binaryPath, attempt + 1);
+				}, CF_TUNNEL_RETRY_DELAY_MS);
+				retryTimer.unref?.();
+				return;
+			}
 			startFallback();
 		});
-	});
+	};
+
+	void ensureCloudflaredBinary()
+		.catch(() => null)
+		.then((binaryPath) => {
+			if (closed) return;
+			if (!binaryPath) {
+				lastCfError = "cloudflared binary unavailable";
+				startFallback();
+				return;
+			}
+			launchCloudflareAttempt(binaryPath, 1);
+		});
 
 	return {
 		close() {
 			if (closed) return;
 			closed = true;
+			if (retryTimer) {
+				clearTimeout(retryTimer);
+				retryTimer = null;
+			}
 			if (activeHandle) {
 				activeHandle.close();
 				activeHandle = null;
@@ -347,6 +399,10 @@ interface InternalPhoneSession {
 	usesStandbyTunnel: boolean;
 }
 
+function formatLanSignature(addresses: LanAddressCandidate[]): string {
+	return addresses.map((a) => `${a.interfaceName}:${a.address}`).join(",");
+}
+
 interface StandbyTunnelState {
 	server: http.Server | null;
 	port: number;
@@ -355,6 +411,7 @@ interface StandbyTunnelState {
 	status: PhoneTunnelStatus;
 	url: string | null;
 	error: string | null;
+	lanSignature: string | null;
 	idleTimer: ReturnType<typeof setTimeout> | null;
 	serverPromise: Promise<number> | null;
 	generation: number;
@@ -384,6 +441,7 @@ function getStandbyTunnel(): StandbyTunnelState {
 			status: "off",
 			url: null,
 			error: null,
+			lanSignature: null,
 			idleTimer: null,
 			serverPromise: null,
 			generation: 0,
@@ -498,12 +556,16 @@ async function ensureStandbyServer(standby: StandbyTunnelState): Promise<number>
 async function ensureStandbyTunnel(options?: {
 	forceRestart?: boolean;
 	tunnelSpawner?: PhoneTunnelSpawner;
+	lanSignature?: string;
 }): Promise<StandbyTunnelState> {
 	const standby = getStandbyTunnel();
 	const forceRestart = Boolean(options?.forceRestart);
+	const lanSignature = options?.lanSignature ?? formatLanSignature(rankLanAddresses());
+	const networkChanged = standby.lanSignature !== null && standby.lanSignature !== lanSignature;
 
 	if (
 		!forceRestart &&
+		!networkChanged &&
 		standby.handle &&
 		(standby.status === "ready" || standby.status === "starting")
 	) {
@@ -526,6 +588,7 @@ async function ensureStandbyTunnel(options?: {
 	standby.status = "starting";
 	standby.url = null;
 	standby.error = null;
+	standby.lanSignature = lanSignature;
 	syncStandbyToActiveSession(standby);
 	resetStandbyIdleTimer(standby);
 
@@ -574,11 +637,13 @@ async function ensureStandbyTunnel(options?: {
 export async function warmPhoneUploadTunnel(options?: {
 	refresh?: boolean;
 	tunnelSpawner?: PhoneTunnelSpawner;
+	interfaces?: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
 }): Promise<void> {
 	try {
 		await ensureStandbyTunnel({
 			forceRestart: options?.refresh,
 			tunnelSpawner: options?.tunnelSpawner,
+			lanSignature: options?.interfaces ? formatLanSignature(rankLanAddresses(options.interfaces)) : undefined,
 		});
 	} catch {
 		// Pre-warm errors are surfaced lazily when opening the upload dialog.
@@ -604,6 +669,7 @@ export async function stopPhoneUploadTunnel(): Promise<void> {
 	standby.status = "off";
 	standby.url = null;
 	standby.error = null;
+	standby.lanSignature = null;
 	standby.port = 0;
 	const server = standby.server;
 	standby.server = null;
@@ -1036,6 +1102,29 @@ function toPhoneSessionInfo(session: InternalPhoneSession): PhoneUploadSessionIn
 	};
 }
 
+async function attachSessionToStandbyTunnel(
+	session: InternalPhoneSession,
+	options: { forceRestart?: boolean; lanSignature: string },
+): Promise<void> {
+	try {
+		session.usesStandbyTunnel = true;
+		const standby = await ensureStandbyTunnel({
+			forceRestart: options.forceRestart,
+			lanSignature: options.lanSignature,
+		});
+		if (!session.closed && getActiveSession() === session) {
+			session.tunnelStatus = standby.status;
+			session.tunnelUrl = standby.url;
+			session.tunnelError = standby.error;
+		}
+	} catch (err) {
+		session.usesStandbyTunnel = false;
+		session.tunnelStatus = "error";
+		session.tunnelUrl = null;
+		session.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
+	}
+}
+
 /** Start (or optionally reuse) an ephemeral tokenized LAN HTTP server for the mobile companion. */
 export async function createPhoneUploadSession(options: CreatePhoneSessionOptions = {}): Promise<PhoneUploadSessionInfo> {
 	const existing = getActiveSession();
@@ -1044,26 +1133,15 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 		existing.addresses = freshAddresses;
 		existing.defaultAddress = freshAddresses[0]?.address ?? null;
 		touchExpiry(existing);
-		if (existing.usesStandbyTunnel) {
+		if (existing.usesStandbyTunnel && options.enableTunnel === false) {
 			const standby = getStandbyTunnel();
 			existing.tunnelStatus = standby.status;
 			existing.tunnelUrl = standby.url;
 			existing.tunnelError = standby.error;
-		} else if (options.enableTunnel && existing.tunnelStatus === "off" && !options.tunnelSpawner) {
-			try {
-				existing.usesStandbyTunnel = true;
-				const standby = await ensureStandbyTunnel();
-				if (!existing.closed && getActiveSession() === existing) {
-					existing.tunnelStatus = standby.status;
-					existing.tunnelUrl = standby.url;
-					existing.tunnelError = standby.error;
-				}
-			} catch (err) {
-				existing.usesStandbyTunnel = false;
-				existing.tunnelStatus = "error";
-				existing.tunnelUrl = null;
-				existing.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
-			}
+		} else if ((existing.usesStandbyTunnel || options.enableTunnel) && options.enableTunnel !== false && !options.tunnelSpawner) {
+			await attachSessionToStandbyTunnel(existing, {
+				lanSignature: formatLanSignature(freshAddresses),
+			});
 		}
 		return toPhoneSessionInfo(existing);
 	}
@@ -1167,20 +1245,10 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 				session.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
 			}
 		} else {
-			try {
-				session.usesStandbyTunnel = true;
-				const standby = await ensureStandbyTunnel({ forceRestart: Boolean(options.refreshTunnel) });
-				if (!session.closed && getActiveSession() === session) {
-					session.tunnelStatus = standby.status;
-					session.tunnelUrl = standby.url;
-					session.tunnelError = standby.error;
-				}
-			} catch (err) {
-				session.usesStandbyTunnel = false;
-				session.tunnelStatus = "error";
-				session.tunnelUrl = null;
-				session.tunnelError = err instanceof Error ? err.message : "Failed to start cross-network tunnel";
-			}
+			await attachSessionToStandbyTunnel(session, {
+				forceRestart: Boolean(options.refreshTunnel),
+				lanSignature: formatLanSignature(addresses),
+			});
 		}
 	}
 

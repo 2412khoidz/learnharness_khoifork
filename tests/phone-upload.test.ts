@@ -28,7 +28,11 @@ import {
 	GET as getPhoneRoute,
 	POST as postPhoneRoute,
 } from "../app/api/attachments/phone/route.ts";
-import { findInstalledCloudflared, resolveCloudflaredAsset } from "../src/server/tunnel-binary.ts";
+import {
+	findInstalledCloudflared,
+	resolveCloudflaredAsset,
+	waitForTunnelReadiness,
+} from "../src/server/tunnel-binary.ts";
 
 // Minimal valid 1x1 transparent PNG.
 const VALID_PNG = Buffer.from(
@@ -404,5 +408,102 @@ describe("phone upload cross-network tunnel support", () => {
 		assert.equal(reused.token, s2.token);
 		assert.equal(reused.port, s2.port);
 		await closePhoneUploadSession(s2.sessionId);
+	});
+
+	it("falls back to OS DNS in waitForTunnelReadiness when public DNS port 53 is blocked", async () => {
+		let osCalls = 0;
+		let fetchCalls = 0;
+		const ok = await waitForTunnelReadiness(
+			"https://demo-fallback.trycloudflare.com",
+			"/__probe/test",
+			() => false,
+			500,
+			{
+				pollIntervalMs: 5,
+				resolvePublic: async () => {
+					throw Object.assign(new Error("queryA ETIMEOUT"), { code: "ETIMEOUT" });
+				},
+				lookupOs: async () => {
+					osCalls++;
+					return "104.16.231.132";
+				},
+				fetchFn: async () => {
+					fetchCalls++;
+					if (fetchCalls < 2) {
+						throw new Error("OS DNS lag");
+					}
+					return new Response("ok", { status: 200 });
+				},
+			},
+		);
+		assert.equal(ok, true);
+		assert.equal(osCalls, 1);
+		assert.equal(fetchCalls, 2);
+
+		const cancelled = await waitForTunnelReadiness(
+			"https://demo-cancelled.trycloudflare.com",
+			"/__probe/test",
+			() => true,
+			500,
+			{
+				pollIntervalMs: 5,
+				resolvePublic: async () => ["104.16.231.132"],
+				lookupOs: async () => "104.16.231.132",
+				fetchFn: async () => new Response("ok", { status: 200 }),
+			},
+		);
+		assert.equal(cancelled, false);
+	});
+
+	it("restarts standby tunnel when host switches Wi-Fi networks", async () => {
+		const wifiA: NodeJS.Dict<os.NetworkInterfaceInfo[]> = {
+			"Wi-Fi": [
+				{
+					address: "192.168.1.42",
+					netmask: "255.255.255.0",
+					family: "IPv4",
+					mac: "00:11:22:33:44:55",
+					internal: false,
+					cidr: "192.168.1.42/24",
+				},
+			],
+		};
+		const wifiB: NodeJS.Dict<os.NetworkInterfaceInfo[]> = {
+			"Wi-Fi": [
+				{
+					address: "10.20.30.40",
+					netmask: "255.255.255.0",
+					family: "IPv4",
+					mac: "00:11:22:33:44:55",
+					internal: false,
+					cidr: "10.20.30.40/24",
+				},
+			],
+		};
+
+		let spawnCount = 0;
+		let closedCount = 0;
+		const spawner: PhoneTunnelSpawner = (_port, callbacks) => {
+			const idx = ++spawnCount;
+			callbacks.onReady(`https://switch-${idx}.trycloudflare.com`);
+			return {
+				close() {
+					closedCount++;
+				},
+			};
+		};
+
+		await warmPhoneUploadTunnel({ interfaces: wifiA, tunnelSpawner: spawner });
+		assert.equal(spawnCount, 1);
+
+		// Same Wi-Fi signature keeps warm tunnel alive.
+		await warmPhoneUploadTunnel({ interfaces: wifiA, tunnelSpawner: spawner });
+		assert.equal(spawnCount, 1);
+		assert.equal(closedCount, 0);
+
+		// Different Wi-Fi subnet invalidates stale handle and spawns fresh tunnel.
+		await warmPhoneUploadTunnel({ interfaces: wifiB, tunnelSpawner: spawner });
+		assert.equal(spawnCount, 2);
+		assert.equal(closedCount, 1);
 	});
 });
