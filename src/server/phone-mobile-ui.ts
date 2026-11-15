@@ -122,13 +122,13 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 10px 12px; background: var(--card); border-bottom: 1px solid var(--border); }
   .tab-btn { border: 1px solid transparent; background: transparent; color: var(--muted); border-radius: 9px; padding: 8px 6px; font-size: 12px; font-weight: 600; cursor: pointer; text-align: center; transition: background 0.15s, color 0.15s, border-color 0.15s; }
   .tab-btn.active { background: var(--bg); color: var(--fg); border-color: var(--border); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
-  .panel { display: none; padding: 14px 14px 16px; }
+  .panel { display: none; padding: 14px 14px 16px; min-width: 0; overflow-x: hidden; }
   .panel.active { display: block; }
   p { margin: 0 0 12px; font-size: 13px; line-height: 1.5; }
   .muted { color: var(--muted); }
   .mono { font-family: var(--font-mono); }
   .serif { font-family: var(--font-serif); }
-  .subcard { padding: 13px; border-radius: 12px; border: 1px solid var(--border); background: var(--card); margin-bottom: 12px; }
+  .subcard { padding: 13px; border-radius: 12px; border: 1px solid var(--border); background: var(--card); margin-bottom: 12px; min-width: 0; }
   .row-between { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; border-radius: 10px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--fg); transition: background 0.12s, opacity 0.12s; text-decoration: none; }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -171,22 +171,24 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   .session-title { font-family: var(--font-serif); font-size: 15px; font-weight: 700; line-height: 1.3; }
   .session-meta { font-family: var(--font-mono); font-size: 10px; color: var(--muted); display: flex; gap: 6px; align-items: center; margin-top: 3px; }
   .session-snippet { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .msg-list { display: grid; gap: 10px; margin: 12px 0; max-height: 46dvh; overflow-y: auto; padding-right: 2px; }
-  .msg { padding: 10px 12px; border-radius: 11px; font-size: 13.5px; line-height: 1.55; word-break: break-word; border: 1px solid var(--border); }
-  .msg.user { background: var(--hover); margin-left: 20px; }
+  .msg-list { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 10px; margin: 12px 0; max-height: 46dvh; overflow-y: auto; overflow-x: hidden; padding-right: 2px; }
+  .msg { min-width: 0; max-width: 100%; padding: 10px 12px; border-radius: 11px; font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; border: 1px solid var(--border); }
+  .msg.user { background: var(--hover); margin-left: 20px; border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
   .msg.assistant { background: var(--card); }
   .msg-role { font-family: var(--font-mono); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 4px; }
+  .msg.user .msg-role { color: var(--accent); }
+  .rich { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
   .rich p { margin: 0 0 8px; font-size: inherit; }
   .rich p:last-child { margin-bottom: 0; }
   .rich strong { color: var(--ink-strong); font-weight: 700; }
   .rich code { font-family: var(--font-mono); font-size: 0.88em; color: var(--ink-code); background: var(--bg); padding: 1px 4px; border-radius: 4px; border: 1px solid var(--border); }
-  .rich pre { font-family: var(--font-mono); font-size: 12px; background: var(--bg); padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); overflow-x: auto; margin: 6px 0; }
+  .rich pre { font-family: var(--font-mono); font-size: 12px; background: var(--bg); padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); max-width: 100%; overflow-x: auto; margin: 6px 0; }
   .rich ul { margin: 4px 0 8px 18px; padding: 0; }
   .rich li { margin-bottom: 3px; }
-  .rich .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 6px 0; }
+  .rich .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 6px 0; }
   .field, textarea.field, input.field { width: 100%; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); padding: 9px 11px; font-size: 13px; font-family: inherit; outline: none; }
   textarea.field { min-height: 68px; resize: vertical; }
-  .q-card { padding: 11px 12px; border-radius: 11px; border: 1px solid var(--warning); background: var(--card); margin-bottom: 10px; }
+  .q-card { min-width: 0; max-width: 100%; overflow-x: hidden; padding: 11px 12px; border-radius: 11px; border: 1px solid var(--warning); background: var(--card); margin-bottom: 10px; }
   .q-opt { display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 9px; padding: 8px 10px; font-size: 12.5px; margin-top: 6px; cursor: pointer; }
   .q-opt.selected { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
   .pulse { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--accent); padding: 6px 10px; border-radius: 8px; border: 1px dashed var(--border); background: var(--card); margin-bottom: 8px; }
@@ -491,6 +493,14 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       if (hMatch) {
         flushPara();
         out.push("<p><strong>" + formatInlineMarkdown(escapeHtml(hMatch[1])) + "</strong></p>");
+        continue;
+      }
+      var bqMatch = /^>\\s?(.*)$/.exec(trimmed);
+      if (bqMatch) {
+        flushPara();
+        if (bqMatch[1].trim()) {
+          out.push("<blockquote style='margin:6px 0;padding:4px 10px;border-left:3px solid var(--border);color:var(--muted)'>" + formatInlineMarkdown(escapeHtml(bqMatch[1].trim())) + "</blockquote>");
+        }
         continue;
       }
       para.push(trimmed);
@@ -802,18 +812,24 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     byId("reader-busy").classList.toggle("hidden", !detail.busy);
 
     var msgBox = byId("reader-messages");
-    msgBox.innerHTML = "";
     var msgs = detail.messages || [];
-    if (!msgs.length) {
-      msgBox.innerHTML = "<div class='muted' style='font-size:12px'>Starting lesson...</div>";
-    } else {
-      msgs.forEach(function (m) {
-        var el = document.createElement("div");
-        el.className = "msg " + (m.role === "user" ? "user" : "assistant");
-        el.innerHTML = "<div class='msg-role'>" + (m.role === "user" ? "You" : "Tutor") + "</div><div class='rich'>" + renderRichMath(m.text) + "</div>";
-        msgBox.appendChild(el);
-      });
-      msgBox.scrollTop = msgBox.scrollHeight;
+    var sig = (detail.id || "") + "::" + msgs.map(function (m) {
+      return (m.id || "") + ":" + (m.role || "") + ":" + (m.text || "").length;
+    }).join("|");
+    if (msgBox.dataset.sig !== sig || !msgBox.children.length) {
+      msgBox.dataset.sig = sig;
+      msgBox.innerHTML = "";
+      if (!msgs.length) {
+        msgBox.innerHTML = "<div class='muted' style='font-size:12px'>Starting lesson...</div>";
+      } else {
+        msgs.forEach(function (m) {
+          var el = document.createElement("div");
+          el.className = "msg " + (m.role === "user" ? "user" : "assistant");
+          el.innerHTML = "<div class='msg-role'>" + (m.role === "user" ? "You" : "Tutor") + "</div><div class='rich'>" + renderRichMath(m.text) + "</div>";
+          msgBox.appendChild(el);
+        });
+        msgBox.scrollTop = msgBox.scrollHeight;
+      }
     }
 
     var pendingWrap = byId("reader-pending-wrap");

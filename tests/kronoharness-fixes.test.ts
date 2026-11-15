@@ -338,6 +338,8 @@ describe("Mobile Companion Redesigned UI, Assets & Dangling Questions", () => {
 		assert.ok(html.includes("id=\"reader-file\""));
 		assert.ok(html.includes("id=\"new-attachments\""));
 		assert.ok(html.includes("id=\"reader-attachments\""));
+		assert.ok(html.includes("grid-template-columns: minmax(0, 1fr)"));
+		assert.ok(html.includes("overflow-wrap: anywhere"));
 
 		const scriptMatch = /<script>([\s\S]*?)<\/script>/g;
 		let count = 0;
@@ -437,6 +439,98 @@ describe("Mobile Companion Redesigned UI, Assets & Dangling Questions", () => {
 		assert.equal(detail.pendingQuestion?.options.length, 3);
 		assert.equal("correctIndices" in (detail.pendingQuestion ?? {}), false);
 		assert.equal("explanation" in (detail.pendingQuestion ?? {}), false);
+	});
+
+	it("includes learner toolResult answers and practice thinking messages in session history", async () => {
+		const dir = await makeTempDir("kh-mob-learner-msgs-");
+		const chatsDir = path.join(dir, "chats");
+		await fs.mkdir(chatsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(chatsDir, "chat_answers.json"),
+			JSON.stringify({
+				id: "chat_answers",
+				title: "Rolle's Theorem",
+				kind: "teach",
+				createdAt: "2026-11-15T10:00:00.000Z",
+				updatedAt: "2026-11-15T10:05:00.000Z",
+				messages: [
+					{
+						id: "m_u1",
+						role: "user",
+						content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+					},
+					{
+						id: "m_a1",
+						role: "assistant",
+						content: [
+							{ type: "text", text: "Hãy thử xét $F(1)=0$." },
+							{ type: "toolCall", id: "tc_exp_1", name: "explain", arguments: { question: "Dùng định lý nào?" } },
+						],
+					},
+					{
+						id: "m_tr_exp",
+						role: "toolResult",
+						toolCallId: "tc_exp_1",
+						toolName: "explain",
+						content: [{ type: "text", text: "{\"kind\":\"explain\",\"text\":\"Dùng định lý Rolle vì F(0)=F(1)=0\"}" }],
+						details: {
+							kind: "explain",
+							text: "Dùng định lý Rolle vì F(0)=F(1)=0",
+							thinking: "Dùng định lý Rolle vì F(0)=F(1)=0",
+						},
+						isError: false,
+					},
+					{
+						id: "m_a2",
+						role: "assistant",
+						content: [{ type: "toolCall", id: "tc_quiz_1", name: "quiz", arguments: { question: "Chọn đáp án đúng" } }],
+					},
+					{
+						id: "m_tr_quiz",
+						role: "toolResult",
+						toolCallId: "tc_quiz_1",
+						toolName: "quiz",
+						content: [{ type: "text", text: "{\"kind\":\"quiz\",\"answers\":[{\"index\":1,\"label\":\"Định lý Rolle\"}]}" }],
+						details: {
+							kind: "quiz",
+							answers: [{ index: 1, label: "Định lý Rolle" }],
+							note: "Kiểm tra điều kiện liên tục trước",
+						},
+						isError: false,
+					},
+					{
+						id: "m_tr_read",
+						role: "toolResult",
+						toolCallId: "tc_read_1",
+						toolName: "read",
+						content: [{ type: "text", text: "Internal read output" }],
+						isError: false,
+					},
+					{
+						id: "m_custom_think",
+						role: "custom",
+						customType: "practice-thinking",
+						content: "Your thinking:\nXét g(x) = F(x)",
+						display: true,
+						details: { problemCallId: "tc_prob_1", text: "Xét g(x) = F(x)" },
+					},
+				],
+			}),
+			"utf8",
+		);
+
+		const detail = getMobileCompanionSessionDetail("chat_answers", { chatsDir });
+		assert.deepEqual(
+			detail.messages.map((m) => ({ role: m.role, text: m.text })),
+			[
+				{ role: "user", text: "[Attached image]" },
+				{ role: "assistant", text: "Hãy thử xét $F(1)=0$.\n\n[Question] Dùng định lý nào?" },
+				{ role: "user", text: "Dùng định lý Rolle vì F(0)=F(1)=0" },
+				{ role: "assistant", text: "[Question] Chọn đáp án đúng" },
+				{ role: "user", text: "Định lý Rolle\n\n*(Thinking: Kiểm tra điều kiện liên tục trước)*" },
+				{ role: "user", text: "Xét g(x) = F(x)" },
+			],
+		);
 	});
 
 	it("serves local KaTeX/font assets and creates new sessions over HTTP", async () => {

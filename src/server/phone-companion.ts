@@ -10,11 +10,14 @@ import { quoteFilePath } from "../core/file-paths.ts";
 import {
 	activeProblemOf,
 	danglingQuestionOf,
+	failedOutputCallIds,
 	newGraphContextMessage,
 	newUserMessage,
 	userFacingTextOf,
 } from "../core/native-messages.ts";
-import { toolQuestionKind } from "../core/pending.ts";
+import { QUESTION_TOOLS, toolQuestionKind } from "../core/pending.ts";
+import { readPluginProblemSubmission } from "../core/plugin-problems.ts";
+import { readPluginQuestionAnswer, readPluginQuestionCancellation } from "../core/plugin-questions.ts";
 import type { GraphStore } from "../core/ports.ts";
 import {
 	buildAnswer,
@@ -669,6 +672,138 @@ export function getMobileCompanionSessionDetail(
 	return buildSessionDetail(chatId, opts, false);
 }
 
+interface ToolAnswerShape {
+	dismissed?: unknown;
+	dontKnow?: unknown;
+	text?: unknown;
+	other?: unknown;
+	thinking?: unknown;
+	note?: unknown;
+	readingThinking?: unknown;
+	thinkingWhileReading?: unknown;
+	answers?: unknown;
+}
+
+function parseFallbackToolAnswerJson(content: unknown): ToolAnswerShape | null {
+	if (!Array.isArray(content)) return null;
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const text = (block as { type?: unknown; text?: unknown }).type === "text"
+			? (block as { text?: unknown }).text
+			: null;
+		if (typeof text !== "string" || !text.trim().startsWith("{")) continue;
+		try {
+			const parsed = JSON.parse(text) as unknown;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				return parsed as ToolAnswerShape;
+			}
+		} catch {
+			// ignore non-JSON tool output
+		}
+	}
+	return null;
+}
+
+function extractQuestionToolResultUserText(msg: {
+	toolName?: unknown;
+	details?: unknown;
+	content?: unknown;
+	isError?: unknown;
+}): string | null {
+	if (msg.isError === true) return null;
+
+	const cancellation = readPluginQuestionCancellation(msg.details);
+	if (cancellation) return "[Skipped question]";
+
+	const pluginAnswer = readPluginQuestionAnswer(msg.details);
+	if (pluginAnswer) {
+		const rawAnswer = typeof pluginAnswer.answer === "string"
+			? pluginAnswer.answer.trim()
+			: JSON.stringify(pluginAnswer.answer);
+		const parts = [rawAnswer || "[Submitted answer]"];
+		if (typeof pluginAnswer.thinking === "string" && pluginAnswer.thinking.trim() && pluginAnswer.thinking.trim() !== rawAnswer) {
+			parts.push(`*(Thinking: ${pluginAnswer.thinking.trim()})*`);
+		}
+		if (typeof pluginAnswer.readingThinking === "string" && pluginAnswer.readingThinking.trim()) {
+			parts.push(`*(Reading note: ${pluginAnswer.readingThinking.trim()})*`);
+		}
+		return parts.join("\n\n");
+	}
+
+	if (typeof msg.toolName !== "string" || !(QUESTION_TOOLS as readonly string[]).includes(msg.toolName)) {
+		return null;
+	}
+
+	const raw = (msg.details && typeof msg.details === "object" && !Array.isArray(msg.details)
+		? msg.details
+		: parseFallbackToolAnswerJson(msg.content)) as ToolAnswerShape | null;
+	if (!raw) return null;
+	if (raw.dismissed === true) return "[Skipped question]";
+
+	const parts: string[] = [];
+	const selectedLabels = Array.isArray(raw.answers)
+		? raw.answers
+			.map((a) => (a && typeof a === "object" && typeof (a as { label?: unknown }).label === "string"
+				? (a as { label: string }).label.trim()
+				: ""))
+			.filter(Boolean)
+		: [];
+	if (selectedLabels.length > 0) parts.push(selectedLabels.join("; "));
+
+	const textVal = typeof raw.text === "string" ? raw.text.trim() : "";
+	const otherVal = typeof raw.other === "string" ? raw.other.trim() : "";
+	if (textVal) parts.push(textVal);
+	if (otherVal && otherVal !== textVal) parts.push(otherVal);
+
+	if (parts.length === 0 && raw.dontKnow === true) {
+		parts.push("I don't know");
+	}
+
+	const thinkingVal = typeof raw.thinking === "string"
+		? raw.thinking.trim()
+		: (typeof raw.note === "string" ? raw.note.trim() : "");
+	if (thinkingVal && thinkingVal !== textVal && thinkingVal !== otherVal) {
+		parts.push(`*(Thinking: ${thinkingVal})*`);
+	}
+
+	const readingVal = typeof raw.readingThinking === "string"
+		? raw.readingThinking.trim()
+		: (typeof raw.thinkingWhileReading === "string" ? raw.thinkingWhileReading.trim() : "");
+	if (readingVal) {
+		parts.push(`*(Reading note: ${readingVal})*`);
+	}
+
+	return parts.length > 0 ? parts.join("\n\n") : null;
+}
+
+function extractCustomUserText(msg: { customType?: unknown; content?: unknown; details?: unknown }): string | null {
+	if (msg.customType === "practice-thinking") {
+		const details = msg.details as { text?: unknown; images?: unknown[] } | undefined;
+		const detailText = typeof details?.text === "string" ? details.text.trim() : "";
+		if (detailText) return detailText;
+		if (typeof msg.content === "string") {
+			const stripped = msg.content.replace(/^Your thinking:\s*\r?\n?/i, "").trim();
+			if (stripped) return stripped;
+		}
+		if (Array.isArray(details?.images) && details.images.length > 0) return "[Sent work photo]";
+		return null;
+	}
+	if (msg.customType === "plugin-problem-submission") {
+		const sub = readPluginProblemSubmission(msg.details);
+		if (!sub) return null;
+		const parts: string[] = [];
+		if (typeof sub.submission === "string" && sub.submission.trim()) {
+			parts.push(sub.submission.trim());
+		} else if (sub.submission != null) {
+			parts.push(JSON.stringify(sub.submission));
+		}
+		if (sub.thinking.trim()) parts.push(sub.thinking.trim());
+		if (parts.length === 0 && sub.images) return "[Submitted problem image]";
+		return parts.length > 0 ? parts.join("\n\n") : "[Submitted problem solution]";
+	}
+	return null;
+}
+
 function buildSessionDetail(
 	chatId: string,
 	opts: MobileCompanionOptions,
@@ -676,17 +811,31 @@ function buildSessionDetail(
 ): MobileCompanionSessionDetail {
 	const chatsDir = opts.chatsDir ?? PATHS.chats;
 	const record = readChatRecord(chatsDir, chatId);
+	const failedOutputs = failedOutputCallIds(record.messages);
 
 	const items: MobileCompanionMessageItem[] = [];
 	for (const msg of record.messages) {
 		if (!msg) continue;
 		if (msg.role === "user") {
-			const text = userFacingTextOf(msg.content).join("\n").trim();
+			let text = userFacingTextOf(msg.content).join("\n").trim();
+			if (!text && Array.isArray(msg.content) && msg.content.some((b) => b && typeof b === "object" && (b as { type?: unknown }).type === "image")) {
+				text = "[Attached image]";
+			}
+			if (text) {
+				items.push({ id: msg.id, role: "user", text, timestamp: msg.timestamp });
+			}
+		} else if (msg.role === "toolResult") {
+			const text = extractQuestionToolResultUserText(msg);
+			if (text) {
+				items.push({ id: msg.id, role: "user", text, timestamp: msg.timestamp });
+			}
+		} else if (msg.role === "custom") {
+			const text = extractCustomUserText(msg);
 			if (text) {
 				items.push({ id: msg.id, role: "user", text, timestamp: msg.timestamp });
 			}
 		} else if (msg.role === "assistant") {
-			const parts = [...userFacingTextOf(msg.content)];
+			const parts = [...userFacingTextOf(msg.content, failedOutputs)];
 			if (Array.isArray(msg.content)) {
 				for (const block of msg.content) {
 					const prompt = extractPromptFromToolBlock(block);
@@ -732,7 +881,7 @@ function buildSessionDetail(
 		pendingQuestionPrompt,
 		pendingQuestion,
 		messageCount: items.length,
-		messages: items.slice(-30),
+		messages: items.slice(-60),
 	};
 }
 
