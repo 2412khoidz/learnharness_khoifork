@@ -8,9 +8,24 @@ on:
         type: boolean
         required: true
         default: false
+      release_tag:
+        description: "Optional GitHub release tag to publish automatically (e.g. chronoharness-0.6.1-r7)"
+        type: string
+        required: false
+        default: ""
+      release_title:
+        description: "Optional GitHub release title"
+        type: string
+        required: false
+        default: ""
+      release_notes:
+        description: "Optional GitHub release summary markdown"
+        type: string
+        required: false
+        default: ""
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -85,3 +100,30 @@ jobs:
           path: dist/*.exe
           if-no-files-found: error
           retention-days: 1
+
+      - name: Publish GitHub Release (optional)
+        if: ${{ inputs.release_tag != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TITLE: ${{ inputs.release_title }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          $exe = Get-ChildItem dist\*.exe | Select-Object -First 1
+          if (-not $exe) { throw "No installer .exe found in dist/" }
+          $sha256 = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $title = if ($env:RELEASE_TITLE) { $env:RELEASE_TITLE } else { "ChronoHarness ($env:RELEASE_TAG)" }
+          $summary = if ($env:RELEASE_NOTES) { $env:RELEASE_NOTES } else { "Built cleanly from commit ``$shortSha``." }
+          $lines = @(
+            $summary,
+            "",
+            "#### Verification",
+            "- File: ``$($exe.Name)``",
+            "- Size: ``$($exe.Length)`` bytes",
+            "- SHA256: ``$sha256``"
+          )
+          $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          Set-Content -Path $notesFile -Value ($lines -join "`n") -Encoding utf8
+          gh release create $env:RELEASE_TAG $exe.FullName --target $env:GITHUB_SHA --title $title --notes-file $notesFile --latest
