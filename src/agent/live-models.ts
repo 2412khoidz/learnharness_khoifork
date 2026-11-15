@@ -354,8 +354,8 @@ function ensurePersistenceLoaded(): void {
 	const filePath = activeCachePath(state);
 	if (!filePath) return;
 	try {
-		if (!fs.existsSync(filePath)) return;
-		const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<PersistedLiveModelState>;
+		if (!fs.existsSync(/* turbopackIgnore: true */ filePath)) return;
+		const parsed = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ filePath, "utf8")) as Partial<PersistedLiveModelState>;
 		if (Array.isArray(parsed.pausedProviders)) {
 			for (const p of parsed.pausedProviders) {
 				if (typeof p === "string" && p.trim()) state.pausedProviders.add(p.trim());
@@ -413,8 +413,8 @@ function persistState(): void {
 		discoveredModels,
 	};
 	try {
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
+		fs.mkdirSync(/* turbopackIgnore: true */ path.dirname(/* turbopackIgnore: true */ filePath), { recursive: true });
+		fs.writeFileSync(/* turbopackIgnore: true */ filePath, JSON.stringify(payload, null, 2), "utf8");
 	} catch {
 		// Best-effort disk cache write.
 	}

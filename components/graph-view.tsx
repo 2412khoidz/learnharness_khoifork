@@ -978,7 +978,7 @@ export function GraphView({
 	 *  (Done instead of Delete). */
 	chainSelectOpen?: boolean;
 	practiceSelection?: ReadonlySet<string>;
-	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[]) => void;
+	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[], options?: { activatePractice?: boolean }) => void;
 	onChainSelectClose?: () => void;
 }) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
@@ -997,6 +997,13 @@ export function GraphView({
 	const [query, setQuery] = useState("");
 	const [fsrsSummary, setFsrsSummary] = useState<GraphFsrsSummary | null>(null);
 	const [fsrsFilter, setFsrsFilter] = useState<FsrsGraphFilter>("heatmap");
+	const [fsrsFeedback, setFsrsFeedback] = useState<string | null>(null);
+	const triggerFsrsFeedback = useCallback((message: string) => {
+		setFsrsFeedback(message);
+		window.setTimeout(() => {
+			setFsrsFeedback((cur) => (cur === message ? null : cur));
+		}, 2800);
+	}, []);
 	// Surface-scoped Find: the chains overlay owns it while open.
 	const searchInputRef = useRef<HTMLInputElement>(null);
 	// Render settings: SERVER-persisted (data/render-settings.json via
@@ -1709,6 +1716,7 @@ export function GraphView({
 					{onPracticeSelectionChange && (fsrsSummary.counts.overdue + fsrsSummary.counts.decaying + fsrsSummary.counts.prereqRisk) > 0 && (
 						<button
 							type="button"
+							data-testid="practice-weak-button"
 							onClick={() => {
 								if (!snapshot) return;
 								const weakIds = new Set<string>();
@@ -1720,12 +1728,23 @@ export function GraphView({
 								const picked = pool
 									.filter((node) => weakIds.has(node.id))
 									.map((node) => ({ id: node.id, name: node.name, statement: node.statement }));
-								if (picked.length > 0) onPracticeSelectionChange(picked);
+								if (picked.length > 0) {
+									onPracticeSelectionChange(picked, { activatePractice: true });
+									triggerFsrsFeedback(`Ready in Practice: ${picked.length} weak node${picked.length === 1 ? "" : "s"}`);
+								} else {
+									triggerFsrsFeedback("No weak nodes matched");
+								}
 							}}
-							className="rounded-md border border-border/70 px-1.5 py-0.5 font-medium text-foreground transition-colors hover:bg-accent"
+							className="cursor-pointer rounded-md border border-primary/35 bg-primary/10 px-2 py-0.5 font-medium text-foreground transition-colors hover:bg-primary/20"
+							title="Select due, decaying, and weak prerequisite nodes and switch composer to Practice mode"
 						>
 							Practice weak
 						</button>
+					)}
+					{fsrsFeedback && (
+						<span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-foreground">
+							{fsrsFeedback}
+						</span>
 					)}
 				</div>
 			)}
@@ -1810,9 +1829,12 @@ export function GraphView({
 											const picked = pool
 												.filter((node) => ids.has(node.id))
 												.map((node) => ({ id: node.id, name: node.name, statement: node.statement }));
-											if (picked.length > 0) onPracticeSelectionChange(picked);
+											if (picked.length > 0) {
+												onPracticeSelectionChange(picked, { activatePractice: true });
+												triggerFsrsFeedback(`Selected ${picked.length} node${picked.length === 1 ? "" : "s"} for Practice`);
+											}
 										}}
-										className="mt-2 rounded-md border px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent"
+										className="mt-2 cursor-pointer rounded-md border border-primary/35 bg-primary/10 px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-primary/20"
 									>
 										Select for Practice
 									</button>

@@ -17,7 +17,7 @@ import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
 import { SessionStarter } from "@/components/start-session";
-import type { ChatSettings, GraphSnapshot } from "@/src/core";
+import type { ChatSettings, ExamPrepStatus, GraphSnapshot } from "@/src/core";
 
 /** The draft's pick set (owner round 10): the SAME shape the home pick
  *  bar lifts — resolved nodes as the learner SAW them at pick time. */
@@ -239,7 +239,15 @@ export function DraftShell({
 	);
 }
 
-export function NewSession({ initialConfigured, mode = "teach" }: { initialConfigured: boolean; mode?: "teach" | "practice" }) {
+export function NewSession({
+	initialConfigured,
+	mode = "teach",
+	drill = false,
+}: {
+	initialConfigured: boolean;
+	mode?: "teach" | "practice";
+	drill?: boolean;
+}) {
 	const router = useRouter();
 	const [text, setText] = useState("");
 	/* The draft MIRROR ("nothing gets lost" round, 2026-10-01): the shell's
@@ -266,6 +274,43 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	};
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
+	const seededDrillRef = useRef(false);
+
+	useEffect(() => {
+		if (!drill || mode !== "practice" || seededDrillRef.current) return;
+		seededDrillRef.current = true;
+		let cancelled = false;
+		void Promise.all([
+			fetch("/api/exam-prep", { cache: "no-store" }).then((r) => (r.ok ? (r.json() as Promise<ExamPrepStatus>) : null)),
+			fetch("/api/graph", { cache: "no-store" }).then((r) => (r.ok ? (r.json() as Promise<GraphSnapshot>) : null)),
+		])
+			.then(([exam, graph]) => {
+				if (cancelled || !exam || !graph) return;
+				setSnapshot(graph);
+				const pool = graph.propositions.length > 0 ? graph.propositions : graph.nodes;
+				const byId = new Map(pool.map((n) => [n.id, n]));
+				const targetIds = exam.priorityPropositionIds ?? [];
+				const seeded = targetIds
+					.map((id) => byId.get(id))
+					.filter((n): n is GraphSnapshot["nodes"][number] => Boolean(n))
+					.slice(0, 8)
+					.map((n) => ({ id: n.id, name: n.name, statement: n.statement }));
+				if (seeded.length > 0 && picksRef.current.length === 0) {
+					applyPicks(seeded);
+				}
+				if (!textRef.current.trim()) {
+					const label = exam.config.examTitle || exam.activeScopeLabels.join(", ") || "Weak & Due Topics";
+					const names = seeded.slice(0, 3).map((s) => s.name).join(", ");
+					applyText(names ? `Exam Drill (${label}): practice ${names}` : `Exam Drill (${label}): drill weak roots and due concepts`);
+				}
+			})
+			.catch(() => {
+				/* ignore when offline or mocked */
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [drill, mode]);
 	const openPicker = () => {
 		if (snapshot) {
 			setPickerOpen(true);

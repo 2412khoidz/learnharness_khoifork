@@ -107,20 +107,45 @@ export function Home({
 	// The chain table is CONTROLLED off this id set (the lifted pick).
 	const pickedIds = useMemo(() => new Set(practiceProps.map((p) => p.id)), [practiceProps]);
 
+	const handlePracticeSelectionChange = useCallback(
+		(nodes: { id: string; name: string; statement: string }[], options?: { activatePractice?: boolean }) => {
+			setPracticeProps(nodes);
+			if (options?.activatePractice && nodes.length > 0) {
+				setMode("practice");
+				if (!topicRef.current.trim()) {
+					const names = nodes.slice(0, 3).map((n) => n.name).join(", ");
+					const suffix = nodes.length > 3 ? ` (+${nodes.length - 3} more)` : "";
+					const starter = `Practice ${names}${suffix}`;
+					topicRef.current = starter;
+					setTopic(starter);
+				}
+				requestAnimationFrame(() => topicInputRef.current?.focus());
+			}
+		},
+		[],
+	);
+
 	/* FINISH DICTATION FIRST (owner, 2026-10-01): Enter may arrive while a
 	 * run is live with the topic still deferred in the run's buffer — stop
 	 * the run, let the last finals land, THEN read the REF mirror (not the
 	 * state closure) and run. Applies before the setup/key guards too, so
 	 * an intercepted draft is the complete one. */
-	const start = () => {
+	const start = (forcePractice = false) => {
 		if (!dictation.active) {
-			void begin();
+			void begin(forcePractice);
 			return;
 		}
-		void dictation.finish().then(() => begin());
+		void dictation.finish().then(() => begin(forcePractice));
 	};
-	const begin = async () => {
-		const t = topicRef.current.trim();
+	const begin = async (forcePractice = false) => {
+		const effectiveMode = forcePractice ? "practice" : mode;
+		let t = topicRef.current.trim();
+		if (!t && forcePractice && practiceProps.length > 0) {
+			const names = practiceProps.slice(0, 3).map((n) => n.name).join(", ");
+			t = `Practice ${names}${practiceProps.length > 3 ? ` (+${practiceProps.length - 3} more)` : ""}`;
+			topicRef.current = t;
+			setTopic(t);
+		}
 		if (!t || startingRef.current) return;
 		// Unconfigured: the send INTERCEPTS into the setup flow (the draft
 		// stays in the textarea; the learner sends it after Save).
@@ -155,7 +180,7 @@ export function Home({
 			// chains among them); the prompt stays the learner's own words.
 			const target = await starterRef.current.start({
 				title: t,
-				...(mode === "practice" ? { kind: "practice" } : {}),
+				...(effectiveMode === "practice" ? { kind: "practice" } : {}),
 				...(practiceProps.length > 0 ? { graphContext: { propositions: practiceProps } } : {}),
 			}, fetch, JSON.stringify(catalog?.slots.strong));
 			router.push(target);
@@ -192,14 +217,14 @@ export function Home({
 					<GraphView
 						chainSelectOpen={chainSelectOpen}
 						practiceSelection={pickedIds}
-						onPracticeSelectionChange={setPracticeProps}
+						onPracticeSelectionChange={handlePracticeSelectionChange}
 						onChainSelectClose={() => setChainSelectOpen(false)}
 					/>
 				) : (
 					<MinimalHome
 						chainSelectOpen={chainSelectOpen}
 						practiceSelection={pickedIds}
-						onPracticeSelectionChange={setPracticeProps}
+						onPracticeSelectionChange={handlePracticeSelectionChange}
 						onChainSelectClose={() => setChainSelectOpen(false)}
 					/>
 				)}
@@ -221,11 +246,27 @@ export function Home({
 					    teaching mode with nothing picked renders nothing. */}
 					<ComposerActions
 						picker={(practiceProps.length > 0 || mode === "practice") && (
-							<NodePickerControl
-								count={practiceProps.length}
-								onOpen={() => setChainSelectOpen(true)}
-								onClear={() => setPracticeProps([])}
-							/>
+							<div className="flex items-center gap-1.5">
+								<NodePickerControl
+									count={practiceProps.length}
+									onOpen={() => setChainSelectOpen(true)}
+									onClear={() => setPracticeProps([])}
+								/>
+								{practiceProps.length > 0 && (
+									<button
+										type="button"
+										disabled={busy}
+										data-testid="start-practice-selection"
+										onClick={() => {
+											setMode("practice");
+											start(true);
+										}}
+										className="pointer-events-auto cursor-pointer rounded-full border border-primary/40 bg-primary/15 px-3 py-1.5 font-ui text-xs font-medium text-foreground transition-colors hover:bg-primary/25 disabled:opacity-50"
+									>
+										Start Practice →
+									</button>
+								)}
+							</div>
 						)}
 						setup={zeroKeys ? (
 							<ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />

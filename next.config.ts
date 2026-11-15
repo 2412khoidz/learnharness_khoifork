@@ -104,6 +104,10 @@ const nextConfig: NextConfig = {
 			"node_modules/gcp-metadata/**/*",
 			"node_modules/json-bigint/**/*",
 			"node_modules/bignumber.js/**/*",
+			// Mobile Companion math rendering (served locally over LAN/tunnel).
+			"node_modules/katex/dist/katex.min.css",
+			"node_modules/katex/dist/katex.min.js",
+			"node_modules/katex/dist/fonts/*.woff2",
 		],
 	},
 	// Framework-free core lives in src/ (plain TS, imported by routes and CLI alike).

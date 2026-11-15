@@ -91,7 +91,7 @@ export function MinimalHome({
 	 * of the delete fence); the chip in home's composer reflects it. */
 	chainSelectOpen?: boolean;
 	practiceSelection?: ReadonlySet<string>;
-	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[]) => void;
+	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[], options?: { activatePractice?: boolean }) => void;
 	onChainSelectClose?: () => void;
 }) {
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);

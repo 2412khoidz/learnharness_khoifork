@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { PATHS } from "../../config.ts";
 import {
@@ -9,6 +8,7 @@ import {
 	type FlashcardsStoreSnapshot,
 	type GraphFsrsSummary,
 } from "../core/fsrs-graph.ts";
+import { BUNDLED_FSRS_SCHEDULER } from "../core/fsrs-scheduler.ts";
 import type { GraphSnapshot } from "../core/contracts.ts";
 import { graphView } from "./graph.ts";
 
@@ -34,26 +34,31 @@ export interface FlashcardsSchedulerModule {
 	studyDay(now: number, startHour?: number): string;
 }
 
-const require = createRequire(import.meta.url);
-let cachedScheduler: FlashcardsSchedulerModule | undefined;
-
+/** Return the pure-TS bundled FSRS-6 scheduler (never hits external plugins/ paths at runtime). */
 export function loadFlashcardsScheduler(): FlashcardsSchedulerModule {
-	if (cachedScheduler) return cachedScheduler;
-	const candidates = [
-		path.join(/* turbopackIgnore: true */ PATHS.root, "plugins", "flashcards", "src", "scheduler.cjs"),
-		path.join(/* turbopackIgnore: true */ PATHS.root, "core-plugins", "flashcards", "src", "scheduler.cjs"),
-	];
-	for (const candidate of candidates) {
-		if (fs.existsSync(candidate)) {
-			cachedScheduler = require(candidate) as FlashcardsSchedulerModule;
-			return cachedScheduler;
-		}
-	}
-	throw new Error("Flashcards FSRS scheduler module not found");
+	return BUNDLED_FSRS_SCHEDULER as unknown as FlashcardsSchedulerModule;
 }
 
 export function defaultFlashcardsStorePath(): string {
 	return path.join(/* turbopackIgnore: true */ PATHS.data, "core-plugin-data", "flashcards", "flashcards.json");
+}
+
+/** Read and parse the Flashcards FSRS-6 JSON snapshot safely (`null` when unreadable/corrupt). */
+export function readFlashcardsSnapshot(
+	flashcardsFile = defaultFlashcardsStorePath(),
+): FlashcardsStoreSnapshot | null {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(/* turbopackIgnore: true */ flashcardsFile, "utf8");
+	} catch {
+		return { propositions: {} };
+	}
+	try {
+		const parsed = JSON.parse(raw) as FlashcardsStoreSnapshot;
+		return parsed && typeof parsed === "object" ? parsed : null;
+	} catch {
+		return null;
+	}
 }
 
 /** Read Flashcards FSRS-6 state and project it onto the current Knowledge Graph. */
@@ -62,18 +67,9 @@ export function readGraphFsrsSummary(
 	flashcardsFile = defaultFlashcardsStorePath(),
 	now = Date.now(),
 ): GraphFsrsSummary {
-	let raw: string;
-	try {
-		raw = fs.readFileSync(flashcardsFile, "utf8");
-	} catch {
-		return computeGraphFsrsSummary(snapshot, { propositions: {} }, now);
-	}
-	try {
-		const parsed = JSON.parse(raw) as FlashcardsStoreSnapshot;
-		return computeGraphFsrsSummary(snapshot, parsed, now);
-	} catch {
-		return emptyGraphFsrsSummary();
-	}
+	const parsed = readFlashcardsSnapshot(flashcardsFile);
+	if (!parsed) return emptyGraphFsrsSummary();
+	return computeGraphFsrsSummary(snapshot, parsed, now);
 }
 
 export interface PracticeFsrsUpdateInput {

@@ -2,20 +2,34 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { PATHS } from "../../config.ts";
-import type { ChatRecord } from "../core/contracts.ts";
+import { chainsForSelection, formatChainLine } from "../core/chains.ts";
+import { titleFromPrompt, type ChatRecord } from "../core/contracts.ts";
 import { emit } from "../core/events.ts";
-import type { ExamPrepConfig, ExamPrepStatus } from "../core/exam-prep.ts";
+import type { ExamPrepPatch, ExamPrepStatus } from "../core/exam-prep.ts";
 import {
 	activeProblemOf,
 	danglingQuestionOf,
+	newGraphContextMessage,
 	newUserMessage,
 	userFacingTextOf,
 } from "../core/native-messages.ts";
+import { toolQuestionKind } from "../core/pending.ts";
 import type { GraphStore } from "../core/ports.ts";
+import {
+	buildAnswer,
+	normalizeOptions,
+	resolveCorrect,
+	seededRandom,
+	shuffleOptions,
+	type AnswerRequest,
+	type QuestionData,
+	type QuizOption,
+} from "../core/question-core.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
 import { readExamPrepStatus, writeExamPrepConfig } from "./exam-prep.ts";
-import { defaultFlashcardsStorePath, loadFlashcardsScheduler } from "./graph-fsrs.ts";
-import { stores } from "./stores.ts";
+import { graphView } from "./graph.ts";
+import { defaultFlashcardsStorePath, loadFlashcardsScheduler, readFlashcardsSnapshot } from "./graph-fsrs.ts";
+import { effectiveSettings, stores } from "./stores.ts";
 
 export interface MobileCompanionDueCard {
 	propositionId: string;
@@ -36,6 +50,7 @@ export interface MobileCompanionSessionItem {
 	id: string;
 	title: string;
 	mode: string;
+	pinned?: boolean;
 	updatedAt: string;
 	messageCount: number;
 	lastAssistantSnippet: string;
@@ -48,12 +63,23 @@ export interface MobileCompanionMessageItem {
 	timestamp?: number;
 }
 
+export interface MobilePendingQuestion {
+	toolCallId: string;
+	tool: string;
+	kind: "quiz" | "ask" | "explain";
+	question: string;
+	multiSelect: boolean;
+	options: Array<{ label: string; value: string; description?: string }>;
+}
+
 export interface MobileCompanionSessionDetail {
 	id: string;
 	title: string;
 	mode: "teach" | "practice";
 	notes: string;
+	busy: boolean;
 	pendingQuestionPrompt: string | null;
+	pendingQuestion?: MobilePendingQuestion | null;
 	messageCount: number;
 	messages: MobileCompanionMessageItem[];
 }
@@ -133,14 +159,16 @@ export class MobileCompanionError extends Error {
 }
 
 function readFlashcardsStore(file: string): StoredFlashcardsFile | null {
-	try {
-		if (!fs.existsSync(file)) return null;
-		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as StoredFlashcardsFile;
-		if (!parsed || typeof parsed !== "object") return null;
-		return parsed;
-	} catch {
-		return null;
+	const snap = readFlashcardsSnapshot(file);
+	if (!snap || !snap.propositions || Object.keys(snap.propositions).length === 0) {
+		// Re-check existence in case store file was missing vs empty valid JSON.
+		try {
+			if (!fs.existsSync(/* turbopackIgnore: true */ file)) return null;
+		} catch {
+			return null;
+		}
 	}
+	return snap as unknown as StoredFlashcardsFile | null;
 }
 
 function formatIntervalLabel(
@@ -160,16 +188,33 @@ function formatIntervalLabel(
 	return `${mins}m`;
 }
 
-function readRecentSessions(chatsDir = PATHS.chats, limit = 6): MobileCompanionSessionItem[] {
+/**
+ * Fast recent-session reader: stats files by mtime first and parses only the newest records,
+ * skipping archived sessions so multi-year desktop histories never stall Mobile Companion.
+ */
+function readRecentSessions(chatsDir = PATHS.chats, limit = 10): MobileCompanionSessionItem[] {
 	try {
-		if (!fs.existsSync(chatsDir)) return [];
-		const files = fs.readdirSync(/* turbopackIgnore: true */ chatsDir).filter((f) => f.endsWith(".json"));
-		const items: MobileCompanionSessionItem[] = [];
-		for (const file of files) {
+		if (!fs.existsSync(/* turbopackIgnore: true */ chatsDir)) return [];
+		const fileEntries: Array<{ file: string; mtimeMs: number }> = [];
+		for (const file of fs.readdirSync(/* turbopackIgnore: true */ chatsDir)) {
+			if (!file.endsWith(".json")) continue;
 			try {
-				const raw = fs.readFileSync(path.join(/* turbopackIgnore: true */ chatsDir, file), "utf8");
+				const st = fs.statSync(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ chatsDir, file));
+				fileEntries.push({ file, mtimeMs: st.mtimeMs });
+			} catch {
+				// Ignore transient/unreadable stat
+			}
+		}
+		fileEntries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+		const items: MobileCompanionSessionItem[] = [];
+		// Read up to 24 newest files so archived records don't starve the active list.
+		for (const entry of fileEntries.slice(0, 24)) {
+			try {
+				const raw = fs.readFileSync(path.join(/* turbopackIgnore: true */ chatsDir, entry.file), "utf8");
 				const record = JSON.parse(raw) as ChatRecord;
 				if (!record || typeof record !== "object" || !Array.isArray(record.messages)) continue;
+				if (record.archived) continue;
 				let snippet = "";
 				for (let i = record.messages.length - 1; i >= 0; i--) {
 					const msg = record.messages[i];
@@ -177,15 +222,18 @@ function readRecentSessions(chatsDir = PATHS.chats, limit = 6): MobileCompanionS
 					const texts = userFacingTextOf(msg.content);
 					if (texts.length > 0) {
 						const joined = texts.join("\n").replace(/\s+/g, " ").trim();
-						snippet = joined.length > 240 ? `${joined.slice(0, 237)}...` : joined;
+						snippet = joined.length > 220 ? `${joined.slice(0, 217)}...` : joined;
 						break;
 					}
 				}
 				items.push({
-					id: record.id || file.slice(0, -5),
+					id: record.id || entry.file.slice(0, -5),
 					title: record.title || "Untitled session",
 					mode: record.kind === "practice" ? "practice" : "teach",
-					updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+					...(record.pinned ? { pinned: true } : {}),
+					updatedAt: typeof record.updatedAt === "string"
+						? record.updatedAt
+						: new Date(entry.mtimeMs).toISOString(),
 					messageCount: record.messages.length,
 					lastAssistantSnippet: snippet,
 				});
@@ -193,7 +241,10 @@ function readRecentSessions(chatsDir = PATHS.chats, limit = 6): MobileCompanionS
 				// Ignore unreadable/corrupt individual chat records
 			}
 		}
-		items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+		items.sort((a, b) => {
+			const pinDiff = (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+			return pinDiff !== 0 ? pinDiff : b.updatedAt.localeCompare(a.updatedAt);
+		});
 		return items.slice(0, limit);
 	} catch {
 		return [];
@@ -203,13 +254,20 @@ function readRecentSessions(chatsDir = PATHS.chats, limit = 6): MobileCompanionS
 export function getMobileCompanionState(opts: MobileCompanionOptions = {}): MobileCompanionState {
 	const now = opts.now ?? Date.now();
 	const flashcardsFile = opts.flashcardsFile ?? defaultFlashcardsStorePath();
-	const graphStore = opts.graphStore ?? stores.graphStore;
-	const examPrep = readExamPrepStatus({
-		graphStore,
-		examPrepFile: opts.examPrepFile,
-		flashcardsFile,
-		now,
-	});
+	const examPrep = readExamPrepStatus(
+		opts.graphStore
+			? {
+				graphStore: opts.graphStore,
+				examPrepFile: opts.examPrepFile,
+				flashcardsFile,
+				now,
+			}
+			: {
+				examPrepFile: opts.examPrepFile,
+				flashcardsFile,
+				now,
+			},
+	);
 	const recentSessions = readRecentSessions(opts.chatsDir ?? PATHS.chats);
 
 	const store = readFlashcardsStore(flashcardsFile);
@@ -224,12 +282,18 @@ export function getMobileCompanionState(opts: MobileCompanionOptions = {}): Mobi
 	}
 
 	const nodeLookup = new Map<string, { name: string; statement: string }>();
-	if (graphStore) {
-		for (const node of graphStore.readNodes()) {
-			nodeLookup.set(node.id, { name: node.name, statement: node.statement });
+	const resolvedGraphStore = opts.graphStore ?? stores.graphStore;
+	if (resolvedGraphStore) {
+		try {
+			for (const node of resolvedGraphStore.readNodes()) {
+				nodeLookup.set(node.id, { name: node.name, statement: node.statement });
+			}
+		} catch {
+			// Ignore if store unavailable in test
 		}
 	}
 
+	const prioritySet = new Set(examPrep.priorityPropositionIds ?? []);
 	const scheduler = loadFlashcardsScheduler();
 	const settings = store.settings ?? {};
 	const dayStart = typeof settings.dayStart === "number" ? settings.dayStart : 4;
@@ -290,6 +354,11 @@ export function getMobileCompanionState(opts: MobileCompanionOptions = {}): Mobi
 		const aLearn = a.state === 1 || a.state === 3 ? 0 : 1;
 		const bLearn = b.state === 1 || b.state === 3 ? 0 : 1;
 		if (aLearn !== bLearn) return aLearn - bLearn;
+		if (examPrep.activeScopeLabels.length > 0) {
+			const aScope = prioritySet.has(a.propositionId) ? 0 : 1;
+			const bScope = prioritySet.has(b.propositionId) ? 0 : 1;
+			if (aScope !== bScope) return aScope - bScope;
+		}
 		return a.retrievability - b.retrievability;
 	});
 
@@ -399,16 +468,24 @@ export function rateMobileCompanionCard(input: {
 }
 
 export function updateMobileCompanionExamPrep(
-	patch: Partial<ExamPrepConfig>,
+	patch: ExamPrepPatch,
 	opts: MobileCompanionOptions = {},
 ): { ok: boolean; examPrep: ExamPrepStatus } {
 	writeExamPrepConfig(patch, opts.examPrepFile);
-	const examPrep = readExamPrepStatus({
-		graphStore: opts.graphStore,
-		examPrepFile: opts.examPrepFile,
-		flashcardsFile: opts.flashcardsFile,
-		now: opts.now,
-	});
+	const examPrep = readExamPrepStatus(
+		opts.graphStore
+			? {
+				graphStore: opts.graphStore,
+				examPrepFile: opts.examPrepFile,
+				flashcardsFile: opts.flashcardsFile,
+				now: opts.now,
+			}
+			: {
+				examPrepFile: opts.examPrepFile,
+				flashcardsFile: opts.flashcardsFile,
+				now: opts.now,
+			},
+	);
 	return { ok: true, examPrep };
 }
 
@@ -457,9 +534,143 @@ function extractPromptFromToolBlock(block: unknown): string | null {
 	return null;
 }
 
+function parsePendingQuestion(dangling: { toolCallId: string; tool: string; input: unknown }): {
+	qd: QuestionData;
+	pending: MobilePendingQuestion;
+} | null {
+	const raw = dangling.input;
+	if (!raw || typeof raw !== "object") return null;
+	const inp = raw as Record<string, unknown>;
+	const kind = toolQuestionKind(dangling.tool);
+	const question = typeof inp.question === "string" ? inp.question.trim() : "";
+	let options: QuizOption[] = [];
+	try {
+		options = normalizeOptions(
+			inp.options as string | Array<{ label: string; value?: string; description?: string }> | undefined,
+		);
+	} catch {
+		options = [];
+	}
+	if (kind === "quiz" && options.length > 0) {
+		options = shuffleOptions(options, seededRandom(dangling.toolCallId));
+	}
+	const multiSelect = inp.multiSelect === true;
+	const mode = options.length > 0 ? (multiSelect ? "multi-select" : "single-select") : "text";
+	let correctIndices: number[] | undefined;
+	let explanation: string | undefined;
+	let committedAnswer: string | undefined;
+	if (kind === "quiz") {
+		const resolved = resolveCorrect(inp.correctAnswer as string | string[] | undefined, options);
+		correctIndices = resolved.indices;
+		if (typeof inp.explanation === "string") explanation = inp.explanation;
+	}
+	if (kind === "explain" && typeof inp.committedAnswer === "string") {
+		committedAnswer = inp.committedAnswer;
+	}
+	const qd: QuestionData = {
+		id: dangling.toolCallId,
+		kind,
+		questionType: inp.questionType === "predict" || inp.questionType === "check" ? inp.questionType : undefined,
+		question,
+		context: typeof inp.details === "string" ? inp.details : typeof inp.context === "string" ? inp.context : undefined,
+		mode,
+		options,
+		correctIndices,
+		committedAnswer,
+		explanation,
+		createdAt: new Date().toISOString(),
+	};
+	return {
+		qd,
+		pending: {
+			toolCallId: dangling.toolCallId,
+			tool: dangling.tool,
+			kind,
+			question,
+			multiSelect,
+			options: options.map((o) => ({
+				label: o.label,
+				value: o.value,
+				...(o.description ? { description: o.description } : {}),
+			})),
+		},
+	};
+}
+
+function buildMobileQuestionAnswerRequest(
+	qd: QuestionData,
+	opts: { selectedValues?: string[]; replyText?: string; dontKnow?: boolean },
+): AnswerRequest {
+	const reply = opts.replyText?.trim() ?? "";
+	let values = Array.isArray(opts.selectedValues) ? opts.selectedValues.filter((v) => typeof v === "string" && v) : [];
+
+	if (opts.dontKnow) {
+		return { dontKnow: true, ...(reply ? { thinking: reply } : {}) };
+	}
+
+	// If learner typed a 1-based option index ("1", "2") or exact option label in chat box, match it automatically.
+	if (values.length === 0 && reply && qd.options.length > 0) {
+		const idxMatch = /^([1-9][0-9]*)$/.exec(reply);
+		if (idxMatch) {
+			const idx = Number(idxMatch[1]) - 1;
+			if (idx >= 0 && idx < qd.options.length) {
+				values = [qd.options[idx]!.value];
+			}
+		} else {
+			const normalized = reply.toLowerCase();
+			const matched = qd.options.find(
+				(o) => o.value.toLowerCase() === normalized || o.label.toLowerCase() === normalized,
+			);
+			if (matched) values = [matched.value];
+		}
+	}
+
+	if (qd.kind === "explain") {
+		return {
+			text: reply || undefined,
+			thinking: reply || undefined,
+		};
+	}
+	if (qd.kind === "ask") {
+		if (values.length > 0) {
+			return { values, ...(reply && values[0] !== reply ? { other: reply } : {}) };
+		}
+		return qd.options.length > 0 ? { other: reply } : { text: reply };
+	}
+	// quiz / probe
+	return {
+		...(values.length > 0 ? { values } : { other: reply, thinking: reply }),
+		confidence: 70,
+	};
+}
+
+export async function getMobileCompanionSessionDetailAsync(
+	chatId: string,
+	opts: MobileCompanionOptions = {},
+): Promise<MobileCompanionSessionDetail> {
+	let busy = false;
+	if (!opts.chatsDir) {
+		try {
+			const { isTurnRunning } = await import("./turn-liveness.ts");
+			busy = isTurnRunning(chatId);
+		} catch {
+			busy = false;
+		}
+	}
+	return buildSessionDetail(chatId, opts, busy);
+}
+
 export function getMobileCompanionSessionDetail(
 	chatId: string,
 	opts: MobileCompanionOptions = {},
+): MobileCompanionSessionDetail {
+	return buildSessionDetail(chatId, opts, false);
+}
+
+function buildSessionDetail(
+	chatId: string,
+	opts: MobileCompanionOptions,
+	busy: boolean,
 ): MobileCompanionSessionDetail {
 	const chatsDir = opts.chatsDir ?? PATHS.chats;
 	const record = readChatRecord(chatsDir, chatId);
@@ -488,8 +699,14 @@ export function getMobileCompanionSessionDetail(
 	}
 
 	let pendingQuestionPrompt: string | null = null;
+	let pendingQuestion: MobilePendingQuestion | null = null;
 	const dangling = danglingQuestionOf(record.messages);
 	const activeProb = activeProblemOf(record.messages);
+
+	if (dangling) {
+		pendingQuestion = parsePendingQuestion(dangling)?.pending ?? null;
+	}
+
 	const targetCallId = dangling?.toolCallId ?? activeProb?.toolCallId;
 	if (targetCallId) {
 		for (let i = record.messages.length - 1; i >= 0; i--) {
@@ -509,14 +726,22 @@ export function getMobileCompanionSessionDetail(
 		title: record.title || "Untitled session",
 		mode: record.kind === "practice" ? "practice" : "teach",
 		notes: typeof record.notes === "string" ? record.notes : "",
+		busy,
 		pendingQuestionPrompt,
+		pendingQuestion,
 		messageCount: items.length,
-		messages: items.slice(-24),
+		messages: items.slice(-30),
 	};
 }
 
 export async function appendMobileCompanionSessionNoteOrReply(
-	input: { chatId: string; note?: string; replyText?: string },
+	input: {
+		chatId: string;
+		note?: string;
+		replyText?: string;
+		selectedValues?: string[];
+		dontKnow?: boolean;
+	},
 	opts: MobileCompanionOptions = {},
 ): Promise<{
 	ok: boolean;
@@ -537,6 +762,9 @@ export async function appendMobileCompanionSessionNoteOrReply(
 	}
 
 	const reply = typeof input.replyText === "string" ? input.replyText.trim() : "";
+	const hasSelection = Array.isArray(input.selectedValues) && input.selectedValues.length > 0;
+	const hasAnswerAction = Boolean(reply || hasSelection || input.dontKnow);
+
 	if (modifiedRecord) {
 		writeFileAtomicSync(resolveChatJsonPath(chatsDir, chatId), JSON.stringify(record, null, "\t"), {
 			allowInPlaceFallback: true,
@@ -544,8 +772,7 @@ export async function appendMobileCompanionSessionNoteOrReply(
 	}
 
 	let triggeredAiTurn = false;
-	if (reply) {
-		// In live desktop mode (no custom test chatsDir), ask the conversation agent to respond.
+	if (hasAnswerAction) {
 		if (!opts.chatsDir) {
 			try {
 				const [{ handleChatInput }, { isTurnRunning }] = await Promise.all([
@@ -554,25 +781,44 @@ export async function appendMobileCompanionSessionNoteOrReply(
 				]);
 				if (!isTurnRunning(chatId)) {
 					const activeProb = activeProblemOf(record.messages);
-					const turnInput = activeProb
-						? ({ type: "thinking", problemCallId: activeProb.toolCallId, text: reply } as const)
-						: !danglingQuestionOf(record.messages)
-							? ({ type: "text", text: reply } as const)
-							: null;
+					const dangling = danglingQuestionOf(record.messages);
+					let turnInput: Parameters<typeof handleChatInput>[1] | null = null;
+
+					if (activeProb) {
+						if (reply) {
+							turnInput = { type: "thinking", problemCallId: activeProb.toolCallId, text: reply };
+						}
+					} else if (dangling) {
+						const parsed = parsePendingQuestion(dangling);
+						if (parsed) {
+							const req = buildMobileQuestionAnswerRequest(parsed.qd, {
+								selectedValues: input.selectedValues,
+								replyText: reply,
+								dontKnow: input.dontKnow,
+							});
+							const answer = buildAnswer(parsed.qd, req, dangling.tool);
+							turnInput = { type: "answer", toolCallId: dangling.toolCallId, answer };
+						}
+					} else if (reply) {
+						turnInput = { type: "text", text: reply };
+					}
+
 					if (turnInput) {
 						const res = await handleChatInput(chatId, turnInput);
 						if (res.ok) {
 							triggeredAiTurn = true;
 							void res.arrayBuffer().catch(() => {});
+							// Give the streaming turn a brief beat so initial state & turn liveness settle.
+							await new Promise((resolve) => setTimeout(resolve, 120));
 						}
 					}
 				}
 			} catch {
-				// Fall back to persisting the learner's message directly on disk.
+				// Fall back to persisting the learner's text directly on disk.
 			}
 		}
 
-		if (!triggeredAiTurn) {
+		if (!triggeredAiTurn && reply) {
 			const fresh = readChatRecord(chatsDir, chatId);
 			fresh.messages.push(newUserMessage(reply));
 			fresh.updatedAt = new Date().toISOString();
@@ -586,6 +832,138 @@ export async function appendMobileCompanionSessionNoteOrReply(
 	return {
 		ok: true,
 		triggeredAiTurn,
-		session: getMobileCompanionSessionDetail(chatId, opts),
+		session: await getMobileCompanionSessionDetailAsync(chatId, opts),
+	};
+}
+
+export async function startMobileCompanionSession(
+	input: {
+		mode?: "teach" | "practice";
+		prompt?: string;
+		drill?: boolean;
+	},
+	opts: MobileCompanionOptions = {},
+): Promise<{
+	ok: boolean;
+	chatId: string;
+	triggeredAiTurn: boolean;
+	session: MobileCompanionSessionDetail;
+}> {
+	const chatsDir = opts.chatsDir ?? PATHS.chats;
+	const mode: "teach" | "practice" = input.mode === "practice" ? "practice" : "teach";
+	const examStatus = readExamPrepStatus(
+		opts.graphStore
+			? {
+				graphStore: opts.graphStore,
+				examPrepFile: opts.examPrepFile,
+				flashcardsFile: opts.flashcardsFile,
+				now: opts.now,
+			}
+			: {
+				examPrepFile: opts.examPrepFile,
+				flashcardsFile: opts.flashcardsFile,
+				now: opts.now,
+			},
+	);
+
+	let prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+	const picks: Array<{ id: string; name: string; statement: string }> = [];
+	let chainLines: string[] = [];
+
+	if (input.drill) {
+		const graph = opts.graphStore
+			? {
+				propositions: opts.graphStore.readNodes(),
+				nodes: opts.graphStore.readNodes(),
+				chains: opts.graphStore.readChains(),
+			}
+			: graphView();
+		const pool = graph.propositions.length > 0 ? graph.propositions : graph.nodes;
+		const byId = new Map(pool.map((n) => [n.id, n]));
+		const pickedNodes: Array<(typeof pool)[number]> = [];
+		for (const id of examStatus.priorityPropositionIds.slice(0, 8)) {
+			const node = byId.get(id);
+			if (node) {
+				pickedNodes.push(node);
+				picks.push({ id: node.id, name: node.name, statement: node.statement });
+			}
+		}
+		if (pickedNodes.length > 0) {
+			const propMap = Object.fromEntries(byId);
+			chainLines = chainsForSelection(pickedNodes, graph.chains).map((c) => formatChainLine(c, propMap));
+		}
+		if (!prompt) {
+			const label = examStatus.config.examTitle || examStatus.activeScopeLabels.join(", ") || "Weak & Due Concepts";
+			const topNames = picks.slice(0, 3).map((p) => p.name).join(", ");
+			prompt = topNames
+				? `Exam Drill (${label}): practice ${topNames}`
+				: `Exam Drill (${label}): review weak roots and due topics`;
+		}
+	}
+
+	if (!prompt) {
+		throw new MobileCompanionError("Prompt is required to start a session", 400);
+	}
+
+	const title = titleFromPrompt(prompt);
+
+	if (opts.chatsDir) {
+		fs.mkdirSync(chatsDir, { recursive: true });
+		const chatId = `chat_${randomUUID().slice(0, 8)}`;
+		const nowIso = new Date().toISOString();
+		const messages = [
+			...(picks.length > 0 ? [newGraphContextMessage(picks, chainLines)] : []),
+			newUserMessage(prompt),
+		];
+		const record: ChatRecord = {
+			id: chatId,
+			title,
+			kind: mode,
+			createdAt: nowIso,
+			updatedAt: nowIso,
+			messages,
+		};
+		writeFileAtomicSync(resolveChatJsonPath(chatsDir, chatId), JSON.stringify(record, null, "\t"), {
+			allowInPlaceFallback: true,
+		});
+		return {
+			ok: true,
+			chatId,
+			triggeredAiTurn: false,
+			session: getMobileCompanionSessionDetail(chatId, opts),
+		};
+	}
+
+	const created = stores.chatStore.createChat(title, mode === "practice" ? "practice" : undefined);
+	const strong = effectiveSettings().models.strong;
+	if (strong) {
+		stores.chatStore.saveSettings(created.id, {
+			model: { provider: strong.provider, id: strong.id },
+			thinkingLevel: strong.thinkingLevel,
+		});
+	}
+	if (picks.length > 0) {
+		stores.chatStore.saveMessages(created.id, [newGraphContextMessage(picks, chainLines)]);
+	}
+
+	let triggeredAiTurn = false;
+	try {
+		const { handleChatInput } = await import("./chat-handler.ts");
+		const res = await handleChatInput(created.id, { type: "text", text: prompt });
+		if (res.ok) {
+			triggeredAiTurn = true;
+			void res.arrayBuffer().catch(() => {});
+			await new Promise((resolve) => setTimeout(resolve, 120));
+		}
+	} catch {
+		const existing = stores.chatStore.getChat(created.id)?.messages ?? [];
+		stores.chatStore.saveMessages(created.id, [...existing, newUserMessage(prompt)]);
+	}
+
+	return {
+		ok: true,
+		chatId: created.id,
+		triggeredAiTurn,
+		session: await getMobileCompanionSessionDetailAsync(created.id, opts),
 	};
 }
