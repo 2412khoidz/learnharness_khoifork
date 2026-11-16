@@ -1,7 +1,7 @@
 "use client";
 
 import { useContext, useState } from "react";
-import { MistakesContext } from "@/components/mistakes-context";
+import { MistakesContext, RecallGradesContext } from "@/components/mistakes-context";
 import { ERROR_TYPE_LABELS } from "@/src/core";
 import { useTranscriptState } from "./transcript-row-state";
 import { ConfidenceRail } from "@/components/confidence-rail";
@@ -43,6 +43,7 @@ export function AnsweredCard({
 	const answer = answerForPresentation(savedAnswer, input);
 	const isExplain = answer.kind === "explain";
 	const mistake = useContext(MistakesContext).get(mistakeId ?? "");
+	const recallGrade = useContext(RecallGradesContext).get(mistakeId ?? "");
 	const analysis = mistake?.status === "ready" ? mistake.analysis : undefined;
 	const hasAnalysis = Boolean(analysis) || mistake?.status === "pending" || (isExplain && mistake?.status === "failed" && !answer.explanation);
 	const [whyOpen, setWhyOpen] = useTranscriptState(`why:${stateKey ?? savedAnswer.questionText}`, false); // retained across virtual unmounts
@@ -110,6 +111,7 @@ export function AnsweredCard({
 					) : (
 						<StatusBadge text="incorrect" color="var(--lh-error)" />
 					))}
+				{isExplain && recallGrade && <StatusBadge text={{ correct: "correct", partial: "partly correct", wrong: "incorrect", dont_know: "didn't know", uncertain: "needs review" }[recallGrade.verdict]} />}
 				{isExplain && mistake && <StatusBadge text="in mistakes" />}
 			</div>
 			<div className="mb-3 font-medium">
@@ -229,6 +231,14 @@ export function AnsweredCard({
 					<span className="font-medium text-foreground">The answer: </span>
 					<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{answer.committed}</ToolContentResponse>
 				</div>
+			)}
+			{isExplain && recallGrade && (recallGrade.strengths || recallGrade.missing || recallGrade.correction) && (
+				<details className="mt-3 rounded-lg border px-3 py-2 text-sm" data-testid="recall-assessment">
+					<summary className="cursor-pointer font-medium">Assessment details</summary>
+					{recallGrade.strengths && <div className="mt-2"><strong>What you got right: </strong><ToolContentResponse>{recallGrade.strengths}</ToolContentResponse></div>}
+					{recallGrade.missing && <div className="mt-2"><strong>What was missing: </strong><ToolContentResponse>{recallGrade.missing}</ToolContentResponse></div>}
+					{recallGrade.correction && <div className="mt-2"><strong>Correction: </strong><ToolContentResponse>{recallGrade.correction}</ToolContentResponse></div>}
+				</details>
 			)}
 
 			{isExplain && !mistake && !(answer as { byVoice?: boolean }).byVoice && onSaveMistake && (

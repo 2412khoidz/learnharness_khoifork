@@ -11,6 +11,7 @@ export * from "./graph.ts";
 export * from "./graph-fsrs.ts";
 export * from "./exam-prep.ts";
 export * from "./mistakes.ts";
+export * from "./recall-scan.ts";
 export * from "./planner.ts";
 export { readMistakes, writeMistakes, updateMistakes } from "../store/mistakes.ts";
 export { AnalysisUnavailable } from "./mistake-analysis.ts";
@@ -74,6 +75,7 @@ export { claudeCodeInstallationResponse } from "./claude-code.ts";
 // No import side effects; the boot sync lives in stores.ts.
 export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";
+export { prepareCoachAttachments, readCoachAttachment } from "./coach-attachments.ts";
 export {
 	AttachmentError,
 	MAX_ATTACHMENT_FILE_BYTES,

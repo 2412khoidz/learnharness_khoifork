@@ -1,10 +1,15 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 import { MAX_IMPORT_BODY_BYTES } from "./lib/notes-import-limits.ts";
 
 const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string; homepage: string };
 
 const nextConfig: NextConfig = {
+	// Keep standalone output rooted in this app even when a parent directory
+	// contains another lockfile (for example on a developer's Downloads folder).
+	turbopack: { root: fileURLToPath(new URL(".", import.meta.url)) },
+	outputFileTracingRoot: fileURLToPath(new URL(".", import.meta.url)),
 	// Public build metadata only; no new runtime Electron version API.
 	env: { LH_VERSION: pkg.version, LH_HOMEPAGE: pkg.homepage },
 	// Leave multipart headroom above the 25 MiB file allowance. This is a

@@ -44,6 +44,7 @@ import { TopBar } from "@/components/top-bar";
 import { HostMarkdown } from "@/components/host-markdown";
 import { BrailleSpinner } from "@/components/braille-spinner";
 import { PlannerCoachChat } from "@/components/planner-coach-chat";
+import { PlannerExamTimetable } from "@/components/planner-exam-timetable";
 import { PlannerCapacityModal } from "@/components/planner-capacity-modal";
 import { useServerEvent } from "@/components/server-events";
 import { cn } from "@/lib/utils";
@@ -95,7 +96,7 @@ interface PlannerSnapshot {
 	};
 }
 
-type PlannerTab = "today" | "milestones" | "tkb" | "lifestyle" | "journal";
+type PlannerTab = "today" | "milestones" | "exams" | "tkb" | "lifestyle" | "journal";
 
 const KIND_BADGE: Record<MilestoneKind, string> = {
 	competition: "border-warning/40 bg-warning/10 text-warning",
@@ -198,6 +199,27 @@ export function PlannerPage() {
 		}
 	}, []);
 
+	const saveExamTimetable = useCallback(async (examTimetable: PlannerConfig["examTimetable"]): Promise<boolean> => {
+		setBusy(true);
+		setErrorMsg(null);
+		try {
+			const res = await fetch("/api/planner", {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ examTimetable }),
+			});
+			const body = (await res.json()) as PlannerSnapshot & { error?: string };
+			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+			setSnap(body);
+			return true;
+		} catch (e) {
+			setErrorMsg(e instanceof Error ? e.message : "Failed to save exam timetable.");
+			return false;
+		} finally {
+			setBusy(false);
+		}
+	}, []);
+
 	const generatePlan = useCallback(
 		async (overrideMode?: PlannerEngineMode) => {
 			setBusy(true);
@@ -242,29 +264,33 @@ export function PlannerPage() {
 	}, []);
 
 	const sendToCoach = useCallback(
-		async (message: string, area?: "schedule" | "lifestyle" | "general") => {
+		async (message: string, area?: "schedule" | "lifestyle" | "general", files: File[] = []): Promise<boolean> => {
 			const targetArea = area ?? coachFocusArea;
 			setCoachOpen(true);
 			setCoachFocusArea(targetArea);
 			setCoachSending(true);
 			setErrorMsg(null);
 			try {
-				const res = await fetch("/api/planner/coach", {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
+				const payload = {
 						action: "send",
 						message,
 						focusArea: targetArea,
 						date: snap?.plan.date,
 						...(coachRole ? { preferredRole: coachRole } : {}),
-					}),
-				});
+					};
+				const form = new FormData();
+				form.set("payload", JSON.stringify(payload));
+				for (const file of files) form.append("files", file);
+				const res = await fetch("/api/planner/coach", files.length
+					? { method: "POST", body: form }
+					: { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 				const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string };
 				if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
 				if (body.snapshot) setSnap(body.snapshot);
+				return true;
 			} catch (e) {
 				setErrorMsg(e instanceof Error ? e.message : "Coach Chat failed.");
+				return false;
 			} finally {
 				setCoachSending(false);
 			}
@@ -282,9 +308,10 @@ export function PlannerPage() {
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ action: "undo", messageId, date: snap?.plan.date }),
 				});
-				const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string };
+				const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string; undone?: boolean; reason?: string };
 				if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
 				if (body.snapshot) setSnap(body.snapshot);
+				if (body.undone === false) setErrorMsg(body.reason || "Không thể hoàn tác thay đổi này.");
 			} catch (e) {
 				setErrorMsg(e instanceof Error ? e.message : "Could not undo coach changes.");
 			} finally {
@@ -725,7 +752,8 @@ export function PlannerPage() {
 									[
 										{ id: "today", label: "Today & Quotas" },
 										{ id: "milestones", label: `Milestones & Exams (${snap.config.milestones.length})` },
-										{ id: "tkb", label: `Weekly TKB (${snap.config.fixedEvents.length})` },
+										{ id: "exams", label: `Exam Timetable (${(snap.config.examTimetable ?? []).length})` },
+												{ id: "tkb", label: `Weekly Timetable (${snap.config.fixedEvents.length})` },
 										{ id: "lifestyle", label: "Habits, Hobbies & Sleep" },
 										{ id: "journal", label: "24h Journal & Audit" },
 									] as const
@@ -770,10 +798,13 @@ export function PlannerPage() {
 								<WeeklyTkbTab
 									snap={snap}
 									busy={busy}
+									coachBusy={coachSending}
+									onAskCoach={async (message) => { await sendToCoach(message, "schedule"); }}
 									onSaveFixedEvents={(fixedEvents) => patchPlanner({ fixedEvents })}
 									onError={setErrorMsg}
 								/>
 							)}
+							{tab === "exams" && <PlannerExamTimetable entries={snap.config.examTimetable ?? []} busy={busy} onSave={saveExamTimetable} />}
 							{tab === "lifestyle" && (
 								<LifestyleTab
 									snap={snap}
@@ -2181,7 +2212,7 @@ function MilestonesTab({
 												</span>
 												<span className="flex items-center gap-0.5">
 													{ov && <span className="size-1.5 rounded-full bg-primary" title="Custom day override" />}
-													{hasClass && <span className="size-1 rounded-full bg-muted-foreground/50" title="Weekly TKB" />}
+													{hasClass && <span className="size-1 rounded-full bg-muted-foreground/50" title="Weekly Timetable" />}
 												</span>
 											</div>
 											<div className="mt-0.5 flex flex-col gap-0.5">
@@ -2299,7 +2330,7 @@ function MilestonesTab({
 								checked={Boolean(activeOverride?.skipFixedEvents)}
 								onChange={(e) => void saveDayOverride(selectedDate, { skipFixedEvents: e.target.checked })}
 							/>
-							Skip recurring weekly TKB on this date
+							Skip recurring weekly timetable on this date
 						</label>
 						<div className="flex items-center gap-2">
 							<label className="text-[11px] text-muted-foreground">Study target (h):</label>
@@ -2803,14 +2834,18 @@ function MilestonesTab({
 	);
 }
 
-function WeeklyTkbTab({
+export function WeeklyTkbTab({
 	snap,
 	busy,
+	coachBusy,
+	onAskCoach,
 	onSaveFixedEvents,
 	onError,
 }: {
 	snap: PlannerSnapshot;
 	busy: boolean;
+	coachBusy: boolean;
+	onAskCoach: (message: string) => Promise<void>;
 	onSaveFixedEvents: (events: FixedWeeklyEvent[]) => Promise<void>;
 	onError: (msg: string) => void;
 }) {
@@ -2868,6 +2903,12 @@ function WeeklyTkbTab({
 		const textToUse = overrideText ?? rawText;
 		setParsing(true);
 		try {
+			// Text can be either a new timetable or an instruction to change the
+			// existing one. Coach has the current timetable and can handle both.
+			if (!preferLocal && !imageDataUrl && !/BEGIN:V(?:CALENDAR|EVENT)/i.test(textToUse)) {
+				await onAskCoach(`Yêu cầu về thời khóa biểu tuần:\n${textToUse}`);
+				return;
+			}
 			const res = await fetch("/api/planner/parse-schedule", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
@@ -2880,7 +2921,7 @@ function WeeklyTkbTab({
 			const body = (await res.json()) as { error?: string; events?: FixedWeeklyEvent[] };
 			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
 			const imported = body.events ?? [];
-			if (imported.length === 0) throw new Error("No valid weekly blocks were extracted.");
+			if (imported.length === 0) throw new Error("No timetable entries found. For an instruction to change your existing timetable, use Import or edit with AI.");
 			await onSaveFixedEvents([...snap.config.fixedEvents, ...imported]);
 			setRawText("");
 			setImageDataUrl(null);
@@ -2983,18 +3024,19 @@ function WeeklyTkbTab({
 				</div>
 
 				<div className="rounded-xl border bg-card p-4">
-					<h3 className="text-sm font-medium">Method 2: Paste Text / .ics Calendar or Upload TKB Photo</h3>
+					<h3 className="text-sm font-medium">Method 2: Import or edit your timetable</h3>
+					<p className="mt-1 text-[11px] text-muted-foreground">Paste a timetable or describe changes to your existing weekly schedule. AI replies in Coach.</p>
 					<textarea
 						rows={2}
 						value={rawText}
 						onChange={(e) => setRawText(e.target.value)}
-						placeholder="e.g. T2 07:30-09:30 Giải tích 2, T4 14h-16h30 CLB Thuật toán (or paste .ics)"
+						placeholder="e.g. T2 07:30-09:30 Giải tích 2, or: sửa ca 1 sáng thành 07:00-09:40"
 						className="mt-2.5 w-full rounded-md border bg-background px-2.5 py-1.5 text-xs"
 					/>
 					<div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
 						<label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 hover:bg-accent">
 							<ImagePlusIcon className="size-3.5 text-muted-foreground" />
-							<span>{imageDataUrl ? "Photo attached" : "Upload .ics or TKB photo"}</span>
+							<span>{imageDataUrl ? "Photo attached" : "Upload .ics or timetable photo"}</span>
 							<input type="file" accept=".ics,text/calendar,image/*" onChange={onPickScheduleFile} className="hidden" />
 						</label>
 						{rawText.trim() && !imageDataUrl && (
@@ -3009,12 +3051,12 @@ function WeeklyTkbTab({
 						)}
 						<button
 							type="button"
-							disabled={parsing || (!rawText.trim() && !imageDataUrl)}
+							disabled={parsing || coachBusy || (!rawText.trim() && !imageDataUrl)}
 							onClick={() => void parseAndImport(false)}
 							className="ml-auto inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-40"
 						>
 							{parsing ? <BrailleSpinner /> : <SparklesIcon className="size-3.5" />}
-							Import with AI
+							Import or edit with AI
 						</button>
 					</div>
 				</div>
@@ -3824,7 +3866,7 @@ function LifestyleTab({
 	);
 }
 
-function JournalAuditTab({
+export function JournalAuditTab({
 	snap,
 	busy,
 	onCheckIn,
@@ -3963,7 +4005,10 @@ function JournalAuditTab({
 	};
 
 	const compliance = activeLog?.compliance;
-	const displayEntries = activeLog?.actualEntries && activeLog.actualEntries.length > 0 ? activeLog.actualEntries : manualEntries;
+	const displayEntries = [
+		...(activeLog?.actualEntries ?? []).filter((entry) => entry.source !== "manual"),
+		...manualEntries,
+	].sort((a, b) => a.startTime.localeCompare(b.startTime));
 	const dayPlan = snap.config.plans[selectedDate] ?? (selectedDate === snap.plan.date ? snap.plan : undefined);
 
 	return (
@@ -3983,13 +4028,17 @@ function JournalAuditTab({
 				</div>
 				<div className="relative">
 					<SearchIcon className="pointer-events-none absolute top-2 left-2.5 size-3.5 text-muted-foreground" />
-					<input
-						type="text"
-						value={historySearch}
-						onChange={(e) => setHistorySearch(e.target.value)}
-						placeholder="Search past logs, subjects, notes..."
-						className="w-full rounded-md border bg-background py-1.5 pr-2 pl-8 text-xs"
-					/>
+					{hideEditorText ? (
+						<div className="w-full rounded-md border bg-background py-1.5 pr-2 pl-8 text-muted-foreground">Search hidden</div>
+					) : (
+						<input
+							type="text"
+							value={historySearch}
+							onChange={(e) => setHistorySearch(e.target.value)}
+							placeholder="Search past logs, subjects, notes..."
+							className="w-full rounded-md border bg-background py-1.5 pr-2 pl-8 text-xs"
+						/>
+					)}
 				</div>
 				<div className="flex max-h-[380px] flex-col gap-1.5 overflow-y-auto">
 					{historyDates.map((d) => {
@@ -4011,7 +4060,7 @@ function JournalAuditTab({
 										{d} {d === snap.plan.date ? "(Today)" : ""}
 									</div>
 									<div className="truncate text-[10px] text-muted-foreground">
-										{discreetMode
+										{discreetMode || hideEditorText
 											? l?.compliance
 												? `${Math.round((l.compliance.actualStudyMin / 60) * 10) / 10}h studied · Private log hidden`
 												: l?.journalText?.trim()
@@ -4102,20 +4151,21 @@ function JournalAuditTab({
 				)}
 
 				<div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 px-2.5 py-1.5 text-[11px]">
-					<label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-foreground" title="Hides diary preview in sidebar and masks intimate/private phrases into [Personal reset] before sending to cloud AI">
+					<label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-foreground" title="Hide journal previews in the history list and mask sensitive phrases in audit output">
 						<input
 							type="checkbox"
 							checked={discreetMode}
 							onChange={toggleDiscreetMode}
 						/>
 						<ShieldCheckIcon className="size-3.5 text-primary" />
-						Discreet Mode (Mask private words before AI &amp; hide history)
+						Discreet Mode (hide history &amp; mask audit output)
 					</label>
 					<div className="flex items-center gap-1.5">
 						<button
 							type="button"
+							disabled={hideEditorText}
 							onClick={() => setJournalText((prev) => redactSensitiveJournalText(prev))}
-							className="rounded border bg-background px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+							className="rounded border bg-background px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
 							title="Replace sensitive words in the editor with [Personal reset]"
 						>
 							Mask text now
@@ -4124,6 +4174,7 @@ function JournalAuditTab({
 							type="button"
 							onClick={() => setHideEditorText((v) => !v)}
 							data-testid="journal-blur-toggle"
+							aria-pressed={hideEditorText}
 							className="inline-flex items-center gap-1 rounded border bg-background px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
 							title="Blur/hide editor & timeline when studying in public (library / class)"
 						>
@@ -4133,15 +4184,18 @@ function JournalAuditTab({
 					</div>
 				</div>
 
+				{hideEditorText ? (
+					<div className="rounded-lg border border-dashed bg-muted/20 px-4 py-8 text-center text-muted-foreground" role="status">
+						Journal, entries, and audit details are hidden. Select Show text when you are ready.
+					</div>
+				) : (
+				<>
 				<textarea
 					rows={5}
 					value={journalText}
 					onChange={(e) => setJournalText(e.target.value)}
 					placeholder={"Write freely what actually happened across 24h (timestamps or notes), e.g.:\n08:30-11:00 Giải 3 bài dãy số Giải tích Olympic\n12:00-13:00 Ăn trưa + nghỉ\n14:00-15:00 Mệt / personal reset\n20:00-21:45 Ôn FSRS Đại số + sửa mistake rule"}
-					className={cn(
-						"w-full rounded-lg border bg-background p-2.5 text-xs leading-relaxed transition-[filter]",
-						hideEditorText ? "blur-sm focus:blur-none" : "",
-					)}
+					className="w-full rounded-lg border bg-background p-2.5 text-xs leading-relaxed"
 				/>
 
 				{/* Quick structured log row */}
@@ -4268,22 +4322,28 @@ function JournalAuditTab({
 				{displayEntries.length > 0 && (
 					<div className="rounded-xl border bg-muted/20 p-2.5">
 						<div className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-							Extracted 24h Reality Timeline ({displayEntries.length} entries)
+							24h Reality Timeline ({displayEntries.length} entries)
 						</div>
 						<div className="grid gap-1 sm:grid-cols-2">
 							{displayEntries.map((ent) => (
-								<div key={ent.id} className="flex items-center justify-between gap-2 rounded border bg-card px-2 py-1 text-[11px]">
-									<span className="min-w-0 truncate">
-										<span className="font-medium tabular-nums text-muted-foreground">{ent.startTime}–{ent.endTime}</span>{" "}
-										<span className="rounded border px-1 py-0 text-[9px] uppercase">{ent.category}</span>{" "}
-										{ent.subject ? `[${ent.subject}] ` : ""}
-										{discreetMode ? redactSensitiveJournalText(ent.title) : ent.title}
-									</span>
-									<span className="shrink-0 tabular-nums text-muted-foreground">{ent.minutes}m</span>
-								</div>
+								<details key={ent.id} className="group min-w-0 rounded-lg border bg-card text-[11px] open:border-primary/40">
+									<summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
+										<span className="shrink-0 font-medium tabular-nums text-muted-foreground">{ent.startTime}–{ent.endTime}</span>
+										<span className="shrink-0 rounded border px-1 text-[9px] uppercase">{ent.category}</span>
+										<span className="min-w-0 flex-1 truncate">{ent.subject ? `[${ent.subject}] ` : ""}{ent.title}</span>
+										<span className="shrink-0 tabular-nums text-muted-foreground">{ent.minutes}m</span>
+										<span aria-hidden="true" className="shrink-0 text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+									</summary>
+									<div className="space-y-1 border-t px-2.5 py-2 leading-relaxed">
+										{ent.subject && <p className="break-words text-muted-foreground">{ent.subject}</p>}
+										<p className="whitespace-pre-wrap break-words text-foreground">{ent.title}</p>
+									</div>
+								</details>
 							))}
 						</div>
 					</div>
+				)}
+				</>
 				)}
 			</div>
 		</div>

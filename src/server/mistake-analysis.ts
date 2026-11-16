@@ -46,7 +46,7 @@ const submitSchema = Type.Object({
 
 function promptFor(r: MistakeRecord): string {
 	const lines = [
-		`Item type: ${r.kind === "unanswered" ? "the learner answered \"I don't know\"" : r.kind === "problem" ? "a practice problem not solved cleanly" : "a wrong answer"}`,
+		`Item type: ${r.kind === "unanswered" ? "the learner answered \"I don't know\"" : r.kind === "problem" ? "a practice problem not solved cleanly" : r.verdict === "partial" ? "a partly correct free-recall answer" : "a wrong answer"}`,
 		`Session: ${r.sessionTitle}`,
 		"",
 		"Question:",
@@ -56,6 +56,9 @@ function promptFor(r: MistakeRecord): string {
 		`Correct answer: ${r.correctAnswer}`,
 	];
 	if (r.explanation) lines.push("", "The original explanation of the correct answer:", r.explanation);
+	if (r.strengths) lines.push("", "What the tutor judged correct:", r.strengths);
+	if (r.missing) lines.push("", "What the tutor judged missing:", r.missing);
+	if (r.correction) lines.push("", "Tutor's correction:", r.correction);
 	if (r.thinking) lines.push("", "The learner's own thinking while answering:", r.thinking);
 	if (typeof r.confidence === "number") lines.push("", `The learner's stated confidence that their pick was right: ${r.confidence}%`);
 	if (r.kind === "problem") {

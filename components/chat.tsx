@@ -98,7 +98,7 @@ import { practiceProblemForCall } from "@/src/core";
 import { PluginProblemSubmitted } from "./plugin-problem-submitted";
 import { readPluginProblemSubmission, pluginProblemById } from "@/src/core";
 import { ThinkingCard, ProblemCard, type PracticeThinkingData } from "@/components/practice-cards";
-import { MistakesContext, notifyMistakeUpserted, useChatMistakes } from "@/components/mistakes-context";
+import { MistakesContext, RecallGradesContext, notifyMistakeUpserted, useChatMistakes, useChatRecallGrades } from "@/components/mistakes-context";
 import { GraphContextCard, type GraphContextData } from "@/components/graph-context-card";
 import { TopBar } from "@/components/top-bar";
 import { PluginSessionTopBarActions } from "@/components/plugin-chrome";
@@ -1674,9 +1674,11 @@ export function Chat({
 	usePluginShortcutPage(`/chat/${encodeURIComponent(chatId)}`, captureActionContext);
 	// The recorded analyses for this session's answer cards (mistakes fork).
 	const sessionMistakes = useChatMistakes(chatId);
+	const sessionRecallGrades = useChatRecallGrades(chatId);
 
 	return (
 		<MistakesContext.Provider value={sessionMistakes}>
+		<RecallGradesContext.Provider value={sessionRecallGrades}>
 		<ChatActionsContext.Provider
 			value={{
 				chatId,
@@ -2418,6 +2420,7 @@ export function Chat({
 			}}
 		/>
 		</ChatActionsContext.Provider>
+		</RecallGradesContext.Provider>
 		</MistakesContext.Provider>
 	);
 }

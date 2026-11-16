@@ -28,6 +28,7 @@ import { BrailleSpinner } from "@/components/braille-spinner";
 import { TopBar } from "@/components/top-bar";
 import { useServerEvent } from "@/components/server-events";
 import { cn } from "@/lib/utils";
+import { RecallScanPanel } from "@/components/recall-scan-panel";
 
 /**
  * The Mistakes tab (mistakes fork, 2026-11-08 — ported from
@@ -213,11 +214,13 @@ export function MistakesPage() {
 						<StatTile label="Problems" value={summary.problems} />
 					</div>
 
+					<RecallScanPanel records={records ?? []} onSaved={() => void load()} />
+
 					{scanNote && (
 						<div data-testid="mistakes-scan-note" className="flex flex-wrap items-center gap-3 rounded-xl border bg-card px-4 py-3 text-sm">
 							{scanNote.found === 0 && scanNote.retry === 0 ? (
 								<>
-									<span className="text-foreground">Nothing new — every miss in your sessions is already here.</span>
+									<span className="text-foreground">No new recorded quiz or practice misses. Use the free-recall review to assess older written answers.</span>
 									<button type="button" onClick={() => setScanNote(null)} className="ml-auto text-xs text-muted-foreground hover:text-foreground">
 										Close
 									</button>
@@ -487,7 +490,7 @@ export function MistakeCard({
 						{!open && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-card to-transparent" />}
 					</div>
 					<div className="mt-2 flex flex-wrap items-center gap-1.5 font-ui text-[11px]">
-						<span className="rounded-full border border-border/70 px-2 py-0.5 text-muted-foreground">{KIND_LABEL[r.kind]}</span>
+						<span className="rounded-full border border-border/70 px-2 py-0.5 text-muted-foreground">{r.verdict === "partial" ? "Partly correct" : KIND_LABEL[r.kind]}</span>
 						{a ? (
 							<span className="rounded-full bg-accent px-2 py-0.5 text-foreground">{ERROR_TYPE_LABELS[a.errorType]}</span>
 						) : r.status === "pending" ? (
@@ -506,6 +509,10 @@ export function MistakeCard({
 						<AnswerPanel label="Your answer" text={r.yourAnswer} />
 						<AnswerPanel label="Correct answer" text={r.correctAnswer} />
 					</div>
+					{r.strengths && <AnalysisBlock label="What you got right" text={r.strengths} />}
+					{r.missing && <AnalysisBlock label="What was missing" text={r.missing} />}
+					{r.correction && <AnalysisBlock label="Correction" text={r.correction} />}
+					{r.evidence && <AnalysisBlock label="Evidence from your answer" text={r.evidence} />}
 					{a ? (
 						<>
 							<div className="grid gap-3 sm:grid-cols-2">

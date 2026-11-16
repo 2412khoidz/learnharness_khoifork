@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CoachChatMessage } from "@/src/core";
 import { HostMarkdown } from "@/components/host-markdown";
 import { BrailleSpinner } from "@/components/braille-spinner";
@@ -9,6 +9,7 @@ import {
 	CheckCircle2Icon,
 	CornerDownLeftIcon,
 	MessageSquareTextIcon,
+	PaperclipIcon,
 	RotateCcwIcon,
 	SparklesIcon,
 	Trash2Icon,
@@ -66,13 +67,15 @@ export function PlannerCoachChat({
 	sending: boolean;
 	draftText: string;
 	onDraftChange: (text: string) => void;
-	onSend: (text: string, focusArea?: FocusArea) => Promise<void>;
+	onSend: (text: string, focusArea?: FocusArea, files?: File[]) => Promise<boolean>;
 	onUndo: (messageId: string) => Promise<void>;
 	onClear: () => Promise<void>;
 	onClose: () => void;
 }) {
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
+	const fileRef = useRef<HTMLInputElement>(null);
+	const [files, setFiles] = useState<File[]>([]);
 
 	useEffect(() => {
 		const el = scrollRef.current;
@@ -81,9 +84,12 @@ export function PlannerCoachChat({
 
 	const handleSubmit = async () => {
 		const trimmed = draftText.trim();
-		if (!trimmed || sending || !coachAvailable) return;
-		onDraftChange("");
-		await onSend(trimmed, focusArea);
+		if ((!trimmed && files.length === 0) || sending || !coachAvailable) return;
+		if (await onSend(trimmed, focusArea, files)) {
+			onDraftChange("");
+			setFiles([]);
+			if (fileRef.current) fileRef.current.value = "";
+		}
 	};
 
 	return (
@@ -222,6 +228,9 @@ export function PlannerCoachChat({
 									</div>
 								)}
 							</div>
+							{msg.attachments?.map((attachment) => (
+								<a key={attachment.id} href={`/api/planner/coach/attachments/${encodeURIComponent(attachment.id)}`} download={attachment.name} className="max-w-full truncate rounded border bg-background px-2 py-1 text-[11px] text-primary underline">📎 {attachment.name}</a>
+							))}
 
 							{msg.appliedChange && (
 								<div
@@ -285,6 +294,8 @@ export function PlannerCoachChat({
 					</div>
 				) : (
 					<div className="flex flex-col gap-1.5">
+						<input ref={fileRef} type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.txt,.md,text/plain,text/markdown,application/pdf" className="sr-only" aria-label="Attach images or files" onChange={(event) => { setFiles(Array.from(event.target.files ?? [])); }} />
+						{files.length > 0 && <div className="flex flex-wrap gap-1">{files.map((file, index) => <span key={`${file.name}-${index}`} className="inline-flex max-w-full items-center gap-1 rounded border px-2 py-1 text-[10px]"><span className="truncate">{file.name}</span><button type="button" aria-label={`Remove ${file.name}`} onClick={() => setFiles((current) => current.filter((_, i) => i !== index))}><XIcon className="size-3" /></button></span>)}</div>}
 						<textarea
 							ref={inputRef}
 							rows={2}
@@ -304,10 +315,10 @@ export function PlannerCoachChat({
 							className="w-full resize-none rounded-lg border bg-card px-2.5 py-2 text-xs focus:border-primary focus:outline-none"
 						/>
 						<div className="flex items-center justify-between text-[10px] text-muted-foreground">
-							<span>Enter gửi · Shift+Enter xuống dòng</span>
+							<button type="button" className="inline-flex items-center gap-1 rounded border px-2 py-1 hover:bg-accent" onClick={() => fileRef.current?.click()} disabled={sending}><PaperclipIcon className="size-3" /> Ảnh / tệp</button>
 							<button
 								type="button"
-								disabled={sending || !draftText.trim()}
+								disabled={sending || (!draftText.trim() && files.length === 0)}
 								onClick={() => void handleSubmit()}
 								data-testid="planner-coach-send-btn"
 								className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"

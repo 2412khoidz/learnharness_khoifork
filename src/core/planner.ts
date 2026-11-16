@@ -43,6 +43,24 @@ export interface FixedWeeklyEvent {
 	category: FixedEventCategory;
 }
 
+/** Exam calendar entry independent of study milestones and Exam Prep profiles. */
+export interface ExamTimetableEntry {
+ id: string;
+ title: string;
+ date?: string;
+ startTime?: string;
+ endTime?: string;
+ location?: string;
+ courseCode?: string;
+ examType?: string;
+ format?: string;
+ session?: string;
+ seat?: string;
+ notes?: string;
+}
+
+export interface CoachAttachment { id: string; name: string; mimeType: string; size: number }
+
 export interface SyllabusTopic {
 	id: string;
 	title: string;
@@ -293,6 +311,7 @@ export interface CoachChatMessage {
 	role: "user" | "assistant";
 	text: string;
 	timestamp: string;
+	attachments?: CoachAttachment[];
 	focusArea?: "schedule" | "lifestyle" | "general";
 	modelLabel?: string;
 	appliedChange?: CoachChatAppliedChange;
@@ -310,6 +329,11 @@ export interface CoachUndoSnapshot {
 	hadLog: boolean;
 	prevMutedSubjects?: string[];
 	prevPinnedSubjects?: string[];
+	/** Full reversible state for the expanded Coach operations, excluding chat and nested undo. */
+	beforePlanner?: PlannerConfig;
+	afterPlanner?: PlannerConfig;
+	beforeExam?: import("./exam-prep.ts").ExamPrepConfig;
+	afterExam?: import("./exam-prep.ts").ExamPrepConfig;
 }
 
 export interface PlannerConfig {
@@ -317,6 +341,7 @@ export interface PlannerConfig {
 	engineMode: PlannerEngineMode;
 	intensity: PlannerIntensity;
 	fixedEvents: FixedWeeklyEvent[];
+	examTimetable: ExamTimetableEntry[];
 	milestones: StudyMilestone[];
 	lifestyle: LifestyleConfig;
 	logs: Record<string, DailyHabitLog>;
@@ -460,6 +485,7 @@ export const DEFAULT_PLANNER_CONFIG: PlannerConfig = {
 	engineMode: "local",
 	intensity: "balanced",
 	fixedEvents: [],
+	examTimetable: [],
 	milestones: [],
 	lifestyle: DEFAULT_LIFESTYLE_CONFIG,
 	logs: {},
@@ -820,7 +846,7 @@ function sanitizePlannedBlocks(raw: unknown, dateFallback: string): PlannedBlock
 			if (e !== null && e + 1440 > s) endMin = e + 1440;
 			else continue;
 		}
-		const durationMin = clamp(endMin - startMin, 5, 600);
+		const durationMin = clamp(endMin - startMin, 1, 600);
 		endMin = startMin + durationMin;
 		const typeRaw = b.type;
 		const type: PlannedBlock["type"] =
@@ -1129,7 +1155,7 @@ function sanitizeDayOverrides(raw: unknown): Record<string, DayOverride> {
 			!bedTime &&
 			(!meals || meals.length === 0) &&
 			focusSubjects.length === 0 &&
-			customBlocks.length === 0
+			!Array.isArray(obj.customBlocks)
 		) {
 			continue;
 		}
@@ -1143,21 +1169,49 @@ function sanitizeDayOverrides(raw: unknown): Record<string, DayOverride> {
 			...(bedTime ? { bedTime } : {}),
 			...(meals && meals.length > 0 ? { meals } : {}),
 			...(focusSubjects.length > 0 ? { focusSubjects } : {}),
-			...(customBlocks.length > 0 ? { customBlocks } : {}),
+			...(Array.isArray(obj.customBlocks) ? { customBlocks } : {}),
 		};
 	}
 	return out;
 }
 
+function sanitizeExamTimetable(raw: unknown): ExamTimetableEntry[] {
+ if (!Array.isArray(raw)) return [];
+ const out: ExamTimetableEntry[] = [];
+ const ids = new Set<string>();
+ for (const item of raw.slice(0, 500)) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+  const obj = item as Record<string, unknown>;
+  const id = typeof obj.id === "string" ? obj.id.trim().slice(0, 80) : "";
+  const title = typeof obj.title === "string" ? obj.title.trim().slice(0, 160) : "";
+  if (!id || !title || ids.has(id)) continue;
+  const entry: ExamTimetableEntry = { id, title };
+  if (typeof obj.date === "string" && isValidDateString(obj.date)) entry.date = obj.date;
+  if (parseClockMin(obj.startTime) !== null) entry.startTime = formatClockMin(parseClockMin(obj.startTime)!);
+  if (parseClockMin(obj.endTime) !== null && entry.startTime && parseClockMin(obj.endTime)! > parseClockMin(entry.startTime)!) entry.endTime = formatClockMin(parseClockMin(obj.endTime)!);
+  for (const key of ["location", "courseCode", "examType", "format", "session", "seat", "notes"] as const) {
+   if (typeof obj[key] === "string" && obj[key].trim()) entry[key] = obj[key].trim().slice(0, key === "notes" ? 500 : 120);
+  }
+  out.push(entry); ids.add(id);
+ }
+ return out;
+}
+
 function sanitizeCoachChat(raw: unknown): CoachChatMessage[] {
 	if (!Array.isArray(raw)) return [];
 	const out: CoachChatMessage[] = [];
-	for (let i = 0; i < raw.length && out.length < 30; i++) {
+	for (let i = 0; i < raw.length; i++) {
 		const item = raw[i] as Record<string, unknown> | undefined;
 		if (!item || typeof item !== "object") continue;
 		const role = item.role === "user" || item.role === "assistant" ? item.role : null;
 		const text = typeof item.text === "string" ? item.text.trim().slice(0, 4000) : "";
 		if (!role || !text) continue;
+		const attachments = Array.isArray(item.attachments) ? item.attachments.flatMap((raw) => {
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+			const a = raw as Record<string, unknown>;
+			if (typeof a.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(a.id) || typeof a.name !== "string" || typeof a.mimeType !== "string" || typeof a.size !== "number" || !Number.isFinite(a.size) || a.size < 0) return [];
+			return [{ id: a.id, name: a.name.slice(0, 255), mimeType: a.mimeType.slice(0, 100), size: a.size }];
+		}).slice(0, 8) : [];
 		const focusArea =
 			item.focusArea === "schedule" || item.focusArea === "lifestyle" || item.focusArea === "general"
 				? item.focusArea
@@ -1180,13 +1234,14 @@ function sanitizeCoachChat(raw: unknown): CoachChatMessage[] {
 			role,
 			text,
 			timestamp: typeof item.timestamp === "string" ? item.timestamp : "",
+			...(attachments.length ? { attachments } : {}),
 			...(focusArea ? { focusArea } : {}),
 			...(typeof item.modelLabel === "string" && item.modelLabel.trim() ? { modelLabel: item.modelLabel.trim().slice(0, 80) } : {}),
 			...(appliedChange ? { appliedChange } : {}),
 			...(typeof item.error === "string" && item.error.trim() ? { error: item.error.trim().slice(0, 240) } : {}),
 		});
 	}
-	return out.slice(-30);
+	return out;
 }
 
 function sanitizeCoachUndo(raw: unknown): CoachUndoSnapshot | undefined {
@@ -1201,6 +1256,12 @@ function sanitizeCoachUndo(raw: unknown): CoachUndoSnapshot | undefined {
 			: "balanced";
 	const dayMap = obj.prevDayOverride ? sanitizeDayOverrides({ [date]: obj.prevDayOverride }) : {};
 	const logMap = obj.prevLog ? sanitizeLogs({ [date]: obj.prevLog }) : {};
+	const plannerSnapshot = (value: unknown): PlannerConfig | undefined => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+		return sanitizePlannerConfig({ ...(value as Record<string, unknown>), lastCoachUndo: undefined, coachChat: undefined, updatedAt: "" });
+	};
+	const beforePlanner = plannerSnapshot(obj.beforePlanner);
+	const afterPlanner = plannerSnapshot(obj.afterPlanner);
 	return {
 		messageId,
 		date,
@@ -1212,6 +1273,8 @@ function sanitizeCoachUndo(raw: unknown): CoachUndoSnapshot | undefined {
 		hadLog: Boolean(obj.hadLog),
 		...(Array.isArray(obj.prevMutedSubjects) ? { prevMutedSubjects: sanitizeStringArray(obj.prevMutedSubjects, 40, 80) } : {}),
 		...(Array.isArray(obj.prevPinnedSubjects) ? { prevPinnedSubjects: sanitizeStringArray(obj.prevPinnedSubjects, 40, 80) } : {}),
+		...(beforePlanner && afterPlanner ? { beforePlanner, afterPlanner } : {}),
+		...(obj.beforeExam && obj.afterExam ? { beforeExam: obj.beforeExam as CoachUndoSnapshot["beforeExam"], afterExam: obj.afterExam as CoachUndoSnapshot["afterExam"] } : {}),
 	};
 }
 
@@ -1220,6 +1283,7 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		return {
 			...fallback,
 			fixedEvents: [...fallback.fixedEvents],
+			examTimetable: [...(fallback.examTimetable ?? [])],
 			milestones: [...fallback.milestones],
 			lifestyle: sanitizeLifestyle(fallback.lifestyle),
 			logs: {},
@@ -1252,6 +1316,7 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		engineMode,
 		intensity,
 		fixedEvents: sanitizeFixedEvents(obj.fixedEvents, fallback.fixedEvents),
+		examTimetable: sanitizeExamTimetable(obj.examTimetable),
 		milestones: sanitizeMilestones(obj.milestones, fallback.milestones),
 		lifestyle: sanitizeLifestyle(obj.lifestyle, fallback.lifestyle),
 		logs: sanitizeLogs(obj.logs),
@@ -2093,6 +2158,10 @@ function resolveBusyEventsForDate(
 			});
 		}
 	}
+	for (const exam of config.examTimetable ?? []) {
+		if (exam.date !== date || !exam.startTime || !exam.endTime) continue;
+		out.push({ id: `blk_exam_${exam.id}`, startTime: exam.startTime, endTime: exam.endTime, title: exam.title, reason: "Exam" });
+	}
 	for (const ev of override?.extraBusyEvents ?? []) {
 		out.push({
 			id: `blk_dayov_${ev.id}`,
@@ -2158,16 +2227,19 @@ function carveAwakeScheduleBaseline(
 		const e = parseClockMin(ev.endTime);
 		if (s === null || e === null || e <= s) continue;
 		const iv = { startMin: Math.max(s, sleepCalc.todayWakeMin), endMin: Math.min(e, sleepCalc.tonightBedMin - 25) };
-		if (iv.endMin > iv.startMin) {
-			awakeIntervals = subtractInterval(awakeIntervals, iv);
+		if (iv.endMin > iv.startMin) awakeIntervals = subtractInterval(awakeIntervals, iv);
+		// Exams remain visible and busy for their entire stated duration, even if
+		// the event falls outside the configured awake window.
+		const shown = ev.reason === "Exam" ? { startMin: s, endMin: e } : iv;
+		if (shown.endMin > shown.startMin) {
 			fixedBlocks.push({
 				id: ev.id,
 				date,
-				startTime: formatClockMin(iv.startMin),
-				endTime: formatClockMin(iv.endMin),
-				startMin: iv.startMin,
-				endMin: iv.endMin,
-				durationMin: iv.endMin - iv.startMin,
+				startTime: formatClockMin(shown.startMin),
+				endTime: formatClockMin(shown.endMin),
+				startMin: shown.startMin,
+				endMin: shown.endMin,
+				durationMin: shown.endMin - shown.startMin,
 				type: "fixed",
 				title: ev.title,
 				reason: ev.reason,
@@ -2310,9 +2382,10 @@ function computeWeeklyForecast(
 		});
 
 		const customBlocks = dayOverride?.customBlocks ?? [];
+		const hasCustomBlocks = Array.isArray(dayOverride?.customBlocks);
 		let plannedMin: number;
 		let subjects: WeeklyForecastSubjectQuota[];
-		if (customBlocks.length > 0) {
+		if (hasCustomBlocks) {
 			const customStudy = customBlocks.filter((b) => b.type === "study");
 			plannedMin = customStudy.reduce((a, b) => a + b.durationMin, 0);
 			const bySub = new Map<string, { minutes: number; hint?: string; isExam?: boolean }>();
@@ -2368,7 +2441,7 @@ function computeWeeklyForecast(
 			milestoneTitles,
 			subjects,
 			...(dayCarryover > 0 ? { carryoverInMinutes: dayCarryover } : {}),
-			...(customBlocks.length > 0 ? { isCustomEdited: true } : {}),
+			...(hasCustomBlocks ? { isCustomEdited: true } : {}),
 		});
 	}
 	return out;
@@ -2409,6 +2482,37 @@ function resolveEveningDipWindow(
 	return { walkIv, dipWindow };
 }
 
+function synchronizeTodayForecast(forecast: WeeklyForecastDay[], quotas: DailyQuotaItem[], plannedMin: number, freeHours: number): WeeklyForecastDay[] {
+	return forecast.map((day, index) => {
+		if (index !== 0) return day;
+		const plannedHours = Math.round((plannedMin / 60) * 10) / 10;
+		return {
+			...day,
+			freeHours,
+			plannedHours,
+			loadLevel: day.milestoneTitles.length > 0 || plannedHours >= 5 ? "heavy" : plannedHours >= 2.5 ? "moderate" : "light",
+			subjects: quotas.map((quota) => ({
+				subject: quota.subject,
+				plannedMinutes: quota.targetMin,
+				...(quota.checklist[0]?.text ? { focusHint: quota.checklist[0].text } : {}),
+				...(quota.milestoneId ? { isExamPriority: true } : {}),
+			})),
+		};
+	});
+}
+
+/** Clip a newly generated plan to the current local minute, without changing saved history. */
+export function clipPlannerBlocksFromNow(blocks: readonly PlannedBlock[], date: string, now: number): PlannedBlock[] {
+	if (date !== localDateString(now)) return [...blocks];
+	const clock = new Date(now);
+	const cutoff = clock.getHours() * 60 + clock.getMinutes() + (clock.getSeconds() || clock.getMilliseconds() ? 1 : 0);
+	return blocks.flatMap((block) => {
+		if (block.endMin <= cutoff) return [];
+		if (block.startMin >= cutoff) return [block];
+		return [{ ...block, startMin: cutoff, startTime: formatClockMin(cutoff), durationMin: block.endMin - cutoff }];
+	});
+}
+
 /**
  * Compute daily study schedule locally in ~1-5ms (0 tokens).
  */
@@ -2416,8 +2520,12 @@ export function computeLocalPlannerPlan(
 	config: PlannerConfig,
 	signals: PlannerPersonalSignals,
 	now = Date.now(),
+	options: { fromNow?: boolean } = {},
 ): DailyStudyPlan {
 	const date = signals.date;
+	const limitToNow = options.fromNow === true && date === localDateString(now);
+	const clock = new Date(now);
+	const cutoff = limitToNow ? clock.getHours() * 60 + clock.getMinutes() + (clock.getSeconds() || clock.getMilliseconds() ? 1 : 0) : 0;
 	const dayOverride = config.dayOverrides?.[date];
 	const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, date, config.intensity, dayOverride);
 	const carryover = computeCarryoverDeficit(config, date);
@@ -2428,8 +2536,10 @@ export function computeLocalPlannerPlan(
 
 	const baseCarve = carveAwakeScheduleBaseline(config, date, dayOverride, sleepCalc);
 	let awakeIntervals = baseCarve.awakeIntervals;
-	const fixedBlocks = baseCarve.fixedBlocks;
-	const freeHoursTotal = Math.round((baseCarve.freeBeforeHobby / 60) * 10) / 10;
+	if (limitToNow) awakeIntervals = subtractInterval(awakeIntervals, { startMin: 0, endMin: cutoff });
+	const fixedBlocks = limitToNow ? clipPlannerBlocksFromNow(baseCarve.fixedBlocks, date, now) : baseCarve.fixedBlocks;
+	const freeMinutes = limitToNow ? awakeIntervals.reduce((total, iv) => total + Math.max(0, iv.endMin - iv.startMin), 0) : baseCarve.freeBeforeHobby;
+	const freeHoursTotal = Math.round((freeMinutes / 60) * 10) / 10;
 	const band = INTENSITY_STUDY_BOUNDS[config.intensity];
 
 	const guardrail = config.lifestyle.wellnessGuardrail;
@@ -2610,13 +2720,26 @@ export function computeLocalPlannerPlan(
 		candidates,
 		carryover.amortizedTodayMin,
 	);
-	const minDailyStudyHours = Math.round((minDailyMin / 60) * 10) / 10;
+	const minDailyStudyHours = Math.round((Math.min(minDailyMin, limitToNow ? focusBudgetAvailable : minDailyMin) / 60) * 10) / 10;
 
 	// If user manually edited today's timeline directly, honor customBlocks verbatim while keeping habit metrics + 7-day forecast intact
 	const topMistakeRuleRaw = signals.mistakeHints?.recentRules[0];
 	const topMistakeRule = topMistakeRuleRaw ? clipPreservingLatex(topMistakeRuleRaw, 180) : undefined;
-	if (dayOverride?.customBlocks && dayOverride.customBlocks.length > 0) {
-		const customBlocks = dayOverride.customBlocks;
+	if (dayOverride?.customBlocks) {
+		const customBeforeExams = limitToNow
+			? clipPlannerBlocksFromNow(dayOverride.customBlocks, date, now).flatMap((block) => {
+				if (block.startMin >= sleepCalc.tonightBedMin) return [];
+				if (block.endMin <= sleepCalc.tonightBedMin) return [block];
+				return [{ ...block, endMin: sleepCalc.tonightBedMin, endTime: formatClockMin(sleepCalc.tonightBedMin), durationMin: sleepCalc.tonightBedMin - block.startMin }];
+			})
+			: dayOverride.customBlocks;
+		// Timetabled exams are commitments even when the user has a custom day.
+		const examBlocks = fixedBlocks.filter((block) => block.id.startsWith("blk_exam_"));
+		const customBlocks = [...customBeforeExams.filter((block) => !block.id.startsWith("blk_exam_")).flatMap((block) => {
+			let intervals = [{ startMin: block.startMin, endMin: block.endMin }];
+			for (const exam of examBlocks) intervals = subtractInterval(intervals, exam);
+			return intervals.map((interval, index) => ({ ...block, id: index ? `${block.id}_after_exam_${index}` : block.id, startMin: interval.startMin, endMin: interval.endMin, startTime: formatClockMin(interval.startMin), endTime: formatClockMin(interval.endMin), durationMin: interval.endMin - interval.startMin }));
+		}), ...examBlocks].sort((a, b) => a.startMin - b.startMin);
 		const studyCustom = customBlocks.filter((b) => b.type === "study");
 		const customMinutesBySubj = new Map<string, number>();
 		for (const b of studyCustom) {
@@ -2646,7 +2769,7 @@ export function computeLocalPlannerPlan(
 			generatedAt: new Date(now).toISOString(),
 			engineUsed: "local",
 			intensity: config.intensity,
-			minDailyStudyHours,
+			minDailyStudyHours: limitToNow ? Math.min(minDailyStudyHours, Math.round((plannedMin / 60) * 10) / 10) : minDailyStudyHours,
 			plannedStudyHours: Math.round((plannedMin / 60) * 10) / 10,
 			freeHoursTotal,
 			recommendedBedtime: formatClockMin(sleepCalc.tonightBedMin),
@@ -2657,7 +2780,9 @@ export function computeLocalPlannerPlan(
 			quotas: customQuotas,
 			blocks: customBlocks,
 			habitStrength: computeHabitStrengthSummary(config, date, sleepCalc.tonightBedMin),
-			weeklyForecast: computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin),
+			weeklyForecast: limitToNow
+				? synchronizeTodayForecast(computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin), customQuotas, plannedMin, freeHoursTotal)
+				: computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin),
 			...(carryoverNote ? { carryoverNote } : {}),
 			realismApplied: realism,
 			...(dayOverride.focusSubjects && dayOverride.focusSubjects.length > 0 ? { activeFocusSubjects: dayOverride.focusSubjects } : {}),
@@ -2808,7 +2933,8 @@ export function computeLocalPlannerPlan(
 		reason: sleepCalc.advice,
 	};
 
-	const allBlocks = [...fixedBlocks, ...hobbyBlocks, ...studyAndBreakBlocks, windDownBlock].sort(
+	const rawBlocks = [...fixedBlocks, ...hobbyBlocks, ...studyAndBreakBlocks, windDownBlock];
+	const allBlocks = (limitToNow ? clipPlannerBlocksFromNow(rawBlocks, date, now) : rawBlocks).sort(
 		(a, b) => a.startMin - b.startMin,
 	);
 	const plannedMin = [...actualAssignedBySubject.values()].reduce((a, b) => a + b, 0);
@@ -2834,7 +2960,7 @@ export function computeLocalPlannerPlan(
 		generatedAt: new Date(now).toISOString(),
 		engineUsed: "local",
 		intensity: config.intensity,
-		minDailyStudyHours,
+		minDailyStudyHours: limitToNow ? Math.min(minDailyStudyHours, Math.round((plannedMin / 60) * 10) / 10) : minDailyStudyHours,
 		plannedStudyHours: Math.round((plannedMin / 60) * 10) / 10,
 		freeHoursTotal,
 		recommendedBedtime: formatClockMin(sleepCalc.tonightBedMin),
@@ -2845,7 +2971,9 @@ export function computeLocalPlannerPlan(
 		quotas,
 		blocks: allBlocks,
 		habitStrength: computeHabitStrengthSummary(config, date, sleepCalc.tonightBedMin),
-		weeklyForecast: computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin),
+		weeklyForecast: limitToNow
+			? synchronizeTodayForecast(computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin), quotas, plannedMin, freeHoursTotal)
+			: computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin),
 		...(carryoverNote ? { carryoverNote } : {}),
 		...(examDeficitWarning ? { examDeficitWarning } : {}),
 		realismApplied: realism,
@@ -3010,11 +3138,18 @@ export function applyLlmPlanOutput(
 	payload: LlmCoachPlanPayload,
 	config: PlannerConfig,
 	modelUsed: string,
+	options: { now?: number } = {},
 ): DailyStudyPlan {
+	const now = options.now;
+	const limitToNow = now !== undefined && baselinePlan.date === localDateString(now);
+	const clock = now === undefined ? null : new Date(now);
+	const cutoff = limitToNow && clock ? clock.getHours() * 60 + clock.getMinutes() + (clock.getSeconds() || clock.getMilliseconds() ? 1 : 0) : 0;
 	const staticBlocks = baselinePlan.blocks.filter((b) => b.type === "fixed" || b.type === "meal" || b.type === "sleep");
 	const busy = staticBlocks.map((b) => ({ startMin: b.startMin, endMin: b.endMin }));
 	const date = baselinePlan.date;
 	const wakeMin = parseClockMin(baselinePlan.todayWakeTime) ?? 420;
+	let bedtimeMin = parseClockMin(baselinePlan.recommendedBedtime) ?? 1440;
+	if (bedtimeMin <= wakeMin) bedtimeMin += 1440;
 
 	const toMonotonicMin = (hhmm: string): number | null => {
 		const m = parseClockMin(hhmm);
@@ -3023,18 +3158,27 @@ export function applyLlmPlanOutput(
 	};
 
 	const acceptedDynamic: PlannedBlock[] = [];
+	let adjustedAiBlocks = false;
 	const usedIntervals: TimeInterval[] = [...busy];
 	const overlapsAny = (s: number, e: number) => usedIntervals.some((iv) => s < iv.endMin && e > iv.startMin);
 
 	if (Array.isArray(payload.blocks)) {
 		payload.blocks.slice(0, 24).forEach((raw, idx) => {
-			const s = toMonotonicMin(raw.startTime);
+			const rawStart = parseClockMin(raw.startTime);
+			const rawEnd = parseClockMin(raw.endTime);
+			// A clock before wake can also be interpreted as tomorrow. Do not let
+			// that normalization hide a collision with a same-day exam.
+			if (rawStart !== null && rawEnd !== null && rawEnd > rawStart && staticBlocks.some((block) => block.id.startsWith("blk_exam_") && rawStart < block.endMin && rawEnd > block.startMin)) { adjustedAiBlocks = true; return; }
+			const proposedStart = toMonotonicMin(raw.startTime);
 			const e = toMonotonicMin(raw.endTime);
-			if (s === null || e === null || e - s < 10 || e - s > 240) return;
-			if (overlapsAny(s, e)) return;
+			if (proposedStart === null || e === null || e - proposedStart < 10 || e - proposedStart > 240) { adjustedAiBlocks = true; return; }
+			if (limitToNow && (e <= cutoff || e > bedtimeMin)) { adjustedAiBlocks = true; return; }
+			const s = limitToNow ? Math.max(proposedStart, cutoff) : proposedStart;
+			if (s !== proposedStart) adjustedAiBlocks = true;
+			if (s >= e || overlapsAny(s, e)) { adjustedAiBlocks = true; return; }
 			const kind = raw.type === "hobby" || raw.type === "break" ? raw.type : "study";
 			const title = String(raw.title || "").trim().slice(0, 100);
-			if (!title) return;
+			if (!title) { adjustedAiBlocks = true; return; }
 			const subj = typeof raw.subject === "string" ? raw.subject.trim().slice(0, 80) : undefined;
 			const ms = subj ? config.milestones.find((m) => m.subject.toLowerCase() === subj.toLowerCase()) : undefined;
 			usedIntervals.push({ startMin: s, endMin: e });
@@ -3070,7 +3214,15 @@ export function applyLlmPlanOutput(
 	let runningStudyMin = 0;
 	for (const blk of acceptedDynamic) {
 		if (blk.type === "study") {
+			if (limitToNow && runningStudyMin + blk.durationMin > maxAllowedStudyMin) {
+				adjustedAiBlocks = true;
+				const remaining = Math.max(0, maxAllowedStudyMin - runningStudyMin);
+				if (remaining > 0) boundedDynamic.push({ ...blk, endMin: blk.startMin + remaining, endTime: formatClockMin(blk.startMin + remaining), durationMin: remaining });
+				runningStudyMin += remaining;
+				continue;
+			}
 			if (runningStudyMin + blk.durationMin > maxAllowedStudyMin + 10 && runningStudyMin >= band.minFloorMin) {
+				adjustedAiBlocks = true;
 				continue;
 			}
 			runningStudyMin += blk.durationMin;
@@ -3079,7 +3231,7 @@ export function applyLlmPlanOutput(
 	}
 
 	const studyBlocks = boundedDynamic.filter((b) => b.type === "study");
-	const finalBlocks = studyBlocks.length >= 1
+	const finalBlocks = (limitToNow && Array.isArray(payload.blocks)) || studyBlocks.length >= 1
 		? [...staticBlocks, ...boundedDynamic].sort((a, b) => a.startMin - b.startMin)
 		: baselinePlan.blocks;
 
@@ -3119,6 +3271,22 @@ export function applyLlmPlanOutput(
 			...q,
 			targetMin: Math.max(20, Math.round((q.targetMin * ratio) / 5) * 5),
 		}));
+	}
+
+	if (limitToNow) {
+		// Quotas describe accepted study blocks, not the model's unattainable proposal.
+		const minutesBySubject = new Map<string, number>();
+		for (const block of finalBlocks.filter((b) => b.type === "study")) {
+			const subject = block.subject || block.title;
+			minutesBySubject.set(subject, (minutesBySubject.get(subject) ?? 0) + block.durationMin);
+		}
+		finalQuotas = [...minutesBySubject].map(([subject, targetMin], idx) => {
+			const existing = finalQuotas.find((q) => normalizeSubjectKey(q.subject) === normalizeSubjectKey(subject));
+			return existing ? { ...existing, targetMin } : {
+				id: `q_ai_scheduled_${idx}`, subject, targetMin, urgencyScore: 60,
+				checklist: [{ id: `chk_ai_scheduled_${idx}`, text: `Study ${subject}` }],
+			};
+		});
 	}
 
 	const maxHoursCap = Math.round((maxAllowedStudyMin / 60) * 10) / 10;
@@ -3167,12 +3335,14 @@ export function applyLlmPlanOutput(
 	return {
 		...baselinePlan,
 		engineUsed: "llm",
-		minDailyStudyHours: finalMinDailyStudyHours,
+		minDailyStudyHours: limitToNow ? Math.min(finalMinDailyStudyHours, plannedStudyHours) : finalMinDailyStudyHours,
 		plannedStudyHours,
 		quotas: finalQuotas,
 		blocks: finalBlocks,
 		...(syncedWeeklyForecast ? { weeklyForecast: syncedWeeklyForecast } : {}),
-		coachSummary: String(payload.coachSummary || "").trim().slice(0, 800),
+		coachSummary: limitToNow && adjustedAiBlocks
+			? `Adjusted to available time. Scheduled: ${finalBlocks.map((b) => `${b.startTime}–${b.endTime} ${b.title}`).join("; ") || "no remaining blocks"}`.slice(0, 800)
+			: String(payload.coachSummary || "").trim().slice(0, 800),
 		modelUsed,
 	};
 }

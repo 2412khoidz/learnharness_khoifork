@@ -90,6 +90,12 @@ export interface MistakeDraft {
 	/** Practice problems: how it ended, the agent's verdict, its miss class. */
 	outcome?: string;
 	verdict?: string;
+	/** Structured free-recall feedback: what the learner got right, what was
+	 * missing, and a correction. These are separate from a binary score. */
+	strengths?: string;
+	missing?: string;
+	correction?: string;
+	evidence?: string;
 	missClass?: string;
 	answeredAt: string;
 }
@@ -110,14 +116,40 @@ export interface MistakeRecord extends MistakeDraft {
 	error?: string;
 }
 
+export interface RecallScanResult {
+	id: string;
+	draft: MistakeDraft;
+	sessionTitle: string;
+	verdict: "correct" | "partial" | "wrong" | "dont_know" | "uncertain";
+	strengths: string;
+	missing: string;
+	correction: string;
+	evidence: string;
+	errorType: ErrorType;
+	topic: string;
+	rule: string;
+}
+
+export interface RecallScanState {
+	version: 1;
+	status: "idle" | "running" | "paused" | "complete" | "error";
+	total: number;
+	results: RecallScanResult[];
+	error?: string;
+	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; modelCalls: number };
+}
+
 export const FLAG_MISTAKE_TOOL = "flag_mistake";
-export const FLAG_MISTAKE_VERDICTS = ["wrong", "partial", "dont_know"] as const;
+export const FLAG_MISTAKE_VERDICTS = ["wrong", "partial", "dont_know", "correct", "uncertain"] as const;
 export type FlagMistakeVerdict = (typeof FLAG_MISTAKE_VERDICTS)[number];
 
 export interface FlagMistakeDetails {
 	targetToolCallId?: string;
 	verdict?: FlagMistakeVerdict;
 	summary?: string;
+	strengths?: string;
+	missing?: string;
+	correction?: string;
 }
 
 const QUIZ_TOOLS = new Set(["quiz", "probe", "explain", "recall", "mcq", "mcq_batch"]);
@@ -183,6 +215,7 @@ export function resolveExplainTargetCallId(
 	if (clean) {
 		const exact = explainResults.get(clean);
 		if (exact && exact.index < beforeIndex) return clean;
+		return null;
 	}
 	for (let i = Math.min(beforeIndex, messages.length) - 1; i >= 0; i--) {
 		const m = messages[i];
@@ -198,7 +231,7 @@ function buildExplainDraft(
 	toolCallId: string,
 	result: ToolResultMessage,
 	callArgs: Record<string, unknown> | undefined,
-	override?: { verdict?: FlagMistakeVerdict; summary?: string },
+	override?: { verdict?: FlagMistakeVerdict; summary?: string; strengths?: string; missing?: string; correction?: string },
 ): MistakeDraft | null {
 	if (result.isError || !EXPLAIN_TOOLS.has(result.toolName) || !isEligibleExplainAnswer(result.details)) return null;
 	const a = result.details;
@@ -222,8 +255,34 @@ function buildExplainDraft(
 		...(explanation ? { explanation } : {}),
 		...((a.thinking ?? a.note) ? { thinking: a.thinking ?? a.note } : {}),
 		...(override?.verdict ? { verdict: override.verdict } : {}),
+		...(override?.strengths ? { strengths: override.strengths } : {}),
+		...(override?.missing ? { missing: override.missing } : {}),
+		...(override?.correction ? { correction: override.correction } : {}),
 		answeredAt: a.answeredAt || new Date((result.timestamp as number | undefined) ?? 0).toISOString(),
 	};
+}
+
+/** Answered free-recall checks with nearby tutor feedback, for review. */
+export function collectRecallCandidates(chatId: string, messages: readonly LhMessage[]): Array<{ draft: MistakeDraft; feedback: string }> {
+	const calls = collectToolCalls(messages);
+	const answers = collectExplainResults(messages);
+	const candidates: Array<{ draft: MistakeDraft; feedback: string }> = [];
+	for (const [toolCallId, { index, result }] of answers) {
+		const draft = buildExplainDraft(chatId, toolCallId, result, calls.get(toolCallId)?.args);
+		if (!draft || !draft.yourAnswer.trim() || draft.yourAnswer === "(no answer)") continue;
+		let feedback = "";
+		for (const next of messages.slice(index + 1)) {
+			if ((next as { role?: string }).role === "user") break;
+			if ((next as { role?: string }).role === "toolResult" && EXPLAIN_TOOLS.has((next as ToolResultMessage).toolName)) break;
+			if ((next as { role?: string }).role !== "assistant") continue;
+			const content = (next as { content?: unknown }).content;
+			if (typeof content === "string") feedback = content.trim();
+			else if (Array.isArray(content)) feedback = content.filter((part) => part && part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
+			if (feedback) break;
+		}
+		candidates.push({ draft, feedback });
+	}
+	return candidates;
 }
 
 /** Build a MistakeDraft for one answered free-recall (`explain`/`recall`) call
@@ -313,13 +372,19 @@ export function findMistakes(chatId: string, messages: readonly LhMessage[]): Mi
 			const target = explainResults.get(targetId);
 			if (!target) continue;
 			const verdict = parseFlagVerdict(details?.verdict) ?? parseFlagVerdict(args?.verdict);
+			if (!verdict || verdict === "correct" || verdict === "uncertain") continue;
 			const summary =
 				typeof details?.summary === "string"
 					? details.summary
 					: typeof args?.summary === "string"
 						? args.summary
 						: undefined;
-			pushDraft(buildExplainDraft(chatId, targetId, target.result, calls.get(targetId)?.args, { verdict, summary }));
+			pushDraft(buildExplainDraft(chatId, targetId, target.result, calls.get(targetId)?.args, {
+				verdict, summary,
+				strengths: typeof details?.strengths === "string" ? details.strengths : undefined,
+				missing: typeof details?.missing === "string" ? details.missing : undefined,
+				correction: typeof details?.correction === "string" ? details.correction : undefined,
+			}));
 		} else if (result.toolName === PRACTICE_CONCLUDE_TOOL) {
 			const args = calls.get(result.toolCallId)?.args;
 			const outcome = typeof args?.outcome === "string" ? args.outcome : "";

@@ -3,6 +3,7 @@ import type { PiEngine } from "../agent/models.ts";
 import { readMistakes, updateMistakes } from "../store/mistakes.ts";
 import { effectiveSettings, stores } from "./stores.ts";
 import { analyzeMistake } from "./mistake-analysis.ts";
+import { gradeLatestRecallAfterTurn } from "./recall-scan.ts";
 
 /**
  * Finding and analyzing the learner's mistakes (mistakes fork, 2026-11-08 —
@@ -198,6 +199,7 @@ export function mistakesAfterTurn(chatId: string): void {
 	try {
 		if (!autoAnalysisEnabled()) return;
 		enqueueAnalyses(recordChatMistakes(chatId));
+		gradeLatestRecallAfterTurn(chatId);
 	} catch (err) {
 		console.error(`[chat ${chatId}] mistakes scan failed:`, err);
 	}
