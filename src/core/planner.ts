@@ -84,14 +84,19 @@ export interface SleepRecoveryProfile {
 	preferredWakeTime?: string; // HH:MM e.g. "07:00"
 	windDownBufferMin?: number; // screen-free cutoff before sleep (20-60m, default 30m)
 	allowMiddayRecoveryNap?: boolean; // 20-25m restorative nap after lunch when sleep < goal
+	postDinnerComaProtection?: boolean; // post-dinner 15m walk + light-load 20:00-21:15 dip window
+	eveningDrowsyStart?: string; // optional HH:MM (e.g. "20:00") when post-dinner coma hits
 }
 
 export interface WellnessGuardrailConfig {
 	enabled: boolean;
 	currentWeeklyFreq?: number; // confidential baseline weekly frequency
 	targetWeeklyFreq?: number; // target healthier weekly frequency
-	riskWindows?: string[]; // e.g. "late_night" | "post_stress" | "idle_afternoon" | "alone_in_room"
+	riskWindows?: string[]; // e.g. "post_nap_wake" | "early_morning_wake" | "post_dinner_slump" | "late_night" | "post_stress" | "idle_afternoon" | "alone_in_room"
 	replacementProtocol?: string; // healthy decompression swap, e.g. "10m walk + pushups/water"
+	wakeUpAnchorProtocol?: string; // <60s feet-on-floor morning/post-nap transition routine
+	cravingReframeNote?: string; // private 1-sentence grounding cue shown in reset timer / coach
+	deviceFrictionRules?: string[]; // e.g. "No phone in bed", "Charge phone outside bedroom"
 }
 
 export interface LifestyleConfig {
@@ -150,6 +155,9 @@ export interface DailyHabitLog {
 	sleepQuality?: 1 | 2 | 3 | 4 | 5;
 	wokeEarlyUnintended?: boolean;
 	energyScore?: 1 | 2 | 3 | 4 | 5;
+	foodComaHitToday?: boolean;
+	urgesSurfed?: number;
+	urgeTriggerWindows?: string[];
 	completedBlockIds: string[];
 	completedChecklistIds: string[];
 	loggedStudyMinBySubject: Record<string, number>;
@@ -937,6 +945,12 @@ function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIF
 		...(typeof rawSleep.allowMiddayRecoveryNap === "boolean"
 			? { allowMiddayRecoveryNap: rawSleep.allowMiddayRecoveryNap }
 			: {}),
+		...(typeof rawSleep.postDinnerComaProtection === "boolean"
+			? { postDinnerComaProtection: rawSleep.postDinnerComaProtection }
+			: {}),
+		...(parseClockMin(rawSleep.eveningDrowsyStart) !== null
+			? { eveningDrowsyStart: normalizeClockString(rawSleep.eveningDrowsyStart, "20:00") }
+			: {}),
 	};
 
 	const meals: MealSlot[] = sanitizeMealSlots(obj.meals, fallback.meals);
@@ -947,18 +961,27 @@ function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIF
 
 	const rawGuard = obj.wellnessGuardrail as Record<string, unknown> | undefined;
 	const wellnessGuardrail: WellnessGuardrailConfig | undefined =
-		rawGuard && typeof rawGuard === "object" && !Array.isArray(rawGuard) && Boolean(rawGuard.enabled)
+		rawGuard && typeof rawGuard === "object" && !Array.isArray(rawGuard)
 			? {
-				enabled: true,
+				enabled: Boolean(rawGuard.enabled),
 				...(typeof rawGuard.currentWeeklyFreq === "number" && Number.isFinite(rawGuard.currentWeeklyFreq)
 					? { currentWeeklyFreq: clamp(Math.round(rawGuard.currentWeeklyFreq), 0, 30) }
 					: {}),
 				...(typeof rawGuard.targetWeeklyFreq === "number" && Number.isFinite(rawGuard.targetWeeklyFreq)
 					? { targetWeeklyFreq: clamp(Math.round(rawGuard.targetWeeklyFreq), 0, 21) }
 					: {}),
-				riskWindows: sanitizeStringArray(rawGuard.riskWindows, 8, 40),
+				riskWindows: sanitizeStringArray(rawGuard.riskWindows, 12, 40),
 				...(typeof rawGuard.replacementProtocol === "string" && rawGuard.replacementProtocol.trim()
 					? { replacementProtocol: rawGuard.replacementProtocol.trim().slice(0, 220) }
+					: {}),
+				...(typeof rawGuard.wakeUpAnchorProtocol === "string" && rawGuard.wakeUpAnchorProtocol.trim()
+					? { wakeUpAnchorProtocol: rawGuard.wakeUpAnchorProtocol.trim().slice(0, 220) }
+					: {}),
+				...(typeof rawGuard.cravingReframeNote === "string" && rawGuard.cravingReframeNote.trim()
+					? { cravingReframeNote: rawGuard.cravingReframeNote.trim().slice(0, 280) }
+					: {}),
+				...(Array.isArray(rawGuard.deviceFrictionRules)
+					? { deviceFrictionRules: sanitizeStringArray(rawGuard.deviceFrictionRules, 8, 90) }
 					: {}),
 			}
 			: undefined;
@@ -1014,6 +1037,13 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			...(sleepQuality ? { sleepQuality } : {}),
 			...(typeof v.wokeEarlyUnintended === "boolean" ? { wokeEarlyUnintended: v.wokeEarlyUnintended } : {}),
 			...(energy ? { energyScore: energy } : {}),
+			...(typeof v.foodComaHitToday === "boolean" ? { foodComaHitToday: v.foodComaHitToday } : {}),
+			...(typeof v.urgesSurfed === "number" && Number.isFinite(v.urgesSurfed) && v.urgesSurfed >= 0
+				? { urgesSurfed: clamp(Math.round(v.urgesSurfed), 0, 100) }
+				: {}),
+			...(Array.isArray(v.urgeTriggerWindows)
+				? { urgeTriggerWindows: sanitizeStringArray(v.urgeTriggerWindows, 12, 40) }
+				: {}),
 			completedBlockIds: sanitizeStringArray(v.completedBlockIds, 60, 80),
 			completedChecklistIds: sanitizeStringArray(v.completedChecklistIds, 120, 80),
 			loggedStudyMinBySubject,
@@ -1958,10 +1988,16 @@ export interface AssignableSubject {
 	cognitiveLoad: CognitiveLoad;
 }
 
+export interface DipTimeWindow {
+	startMin: number;
+	endMin: number;
+}
+
 function scoreAssignmentOrder<T extends AssignableSubject>(
 	rawSlots: readonly SchedulableSlot[],
 	assignments: ReadonlyArray<T | null>,
 	tonightBedMin: number,
+	dipWindow?: DipTimeWindow | null,
 ): number {
 	let score = 0;
 	let prevIdx = -1;
@@ -1974,6 +2010,11 @@ function scoreAssignmentOrder<T extends AssignableSubject>(
 
 		if (cand.cognitiveLoad === "heavy" && slot.isPeak) score += 25;
 		if (cand.cognitiveLoad === "heavy" && slot.endMin >= tonightBedMin - 90) score -= 15;
+		if (dipWindow && slot.endMin > dipWindow.startMin && slot.startMin < dipWindow.endMin) {
+			if (cand.cognitiveLoad === "heavy") score -= 45;
+			else if (cand.cognitiveLoad === "medium") score -= 10;
+			else score += 22;
+		}
 
 		if (prevIdx >= 0) {
 			const prevCand = assignments[prevIdx]!;
@@ -1998,17 +2039,18 @@ function scoreAssignmentOrder<T extends AssignableSubject>(
 /**
  * Timefold / CP-SAT style 2-opt constraint refinement pass over focus slots:
  * avoids consecutive single-subject streaks & back-to-back heavy blocks while
- * rewarding peak-hour alignment and spaced intervals.
+ * rewarding peak-hour alignment, spaced intervals, and post-meal light load.
  */
 export function optimizeSlotAssignments<T extends AssignableSubject>(
 	rawSlots: readonly SchedulableSlot[],
 	initialAssignments: ReadonlyArray<T | null>,
 	tonightBedMin: number,
+	dipWindow?: DipTimeWindow | null,
 ): Array<T | null> {
 	const best = [...initialAssignments];
 	if (best.length < 2) return best;
 
-	let bestScore = scoreAssignmentOrder(rawSlots, best, tonightBedMin);
+	let bestScore = scoreAssignmentOrder(rawSlots, best, tonightBedMin, dipWindow);
 	for (let pass = 0; pass < 3; pass++) {
 		let improved = false;
 		for (let i = 0; i < best.length; i++) {
@@ -2017,7 +2059,7 @@ export function optimizeSlotAssignments<T extends AssignableSubject>(
 				const tmp = best[i]!;
 				best[i] = best[j]!;
 				best[j] = tmp;
-				const nextScore = scoreAssignmentOrder(rawSlots, best, tonightBedMin);
+				const nextScore = scoreAssignmentOrder(rawSlots, best, tonightBedMin, dipWindow);
 				if (nextScore > bestScore) {
 					bestScore = nextScore;
 					improved = true;
@@ -2332,6 +2374,41 @@ function computeWeeklyForecast(
 	return out;
 }
 
+function resolveEveningDipWindow(
+	config: PlannerConfig,
+	dayOverride: DayOverride | undefined,
+	sleepCalc: SleepScheduleCalc,
+): { walkIv: TimeInterval | null; dipWindow: DipTimeWindow | null } {
+	const riskSet = new Set(config.lifestyle.wellnessGuardrail?.enabled ? (config.lifestyle.wellnessGuardrail.riskWindows ?? []) : []);
+	const enabled = Boolean(config.lifestyle.sleep.postDinnerComaProtection || riskSet.has("post_dinner_slump"));
+	if (!enabled) return { walkIv: null, dipWindow: null };
+
+	const activeMeals = dayOverride?.meals && dayOverride.meals.length > 0 ? dayOverride.meals : config.lifestyle.meals;
+	let dinnerEnd: number | null = null;
+	for (const meal of activeMeals) {
+		const s = parseClockMin(meal.startTime);
+		if (s === null) continue;
+		if (s >= 16 * 60 + 30 && s < 22 * 60) {
+			dinnerEnd = s + meal.durationMin;
+		}
+	}
+
+	const stopCutoff = sleepCalc.tonightBedMin - sleepCalc.windDownMin;
+	const walkIv: TimeInterval | null =
+		dinnerEnd !== null && dinnerEnd + 15 <= stopCutoff && dinnerEnd >= sleepCalc.todayWakeMin
+			? { startMin: dinnerEnd, endMin: dinnerEnd + 15 }
+			: null;
+
+	let dipStart = walkIv ? walkIv.endMin : 20 * 60;
+	const explicitDip = parseClockMin(config.lifestyle.sleep.eveningDrowsyStart);
+	if (explicitDip !== null) {
+		dipStart = explicitDip < sleepCalc.todayWakeMin ? explicitDip + 1440 : explicitDip;
+	}
+	const dipEnd = Math.min(dipStart + 75, stopCutoff);
+	const dipWindow: DipTimeWindow | null = dipEnd - dipStart >= 25 ? { startMin: dipStart, endMin: dipEnd } : null;
+	return { walkIv, dipWindow };
+}
+
 /**
  * Compute daily study schedule locally in ~1-5ms (0 tokens).
  */
@@ -2355,8 +2432,13 @@ export function computeLocalPlannerPlan(
 	const freeHoursTotal = Math.round((baseCarve.freeBeforeHobby / 60) * 10) / 10;
 	const band = INTENSITY_STUDY_BOUNDS[config.intensity];
 
+	const guardrail = config.lifestyle.wellnessGuardrail;
+	const guardrailRiskSet = new Set(guardrail?.enabled ? (guardrail.riskWindows ?? []) : []);
+	const dipInfo = resolveEveningDipWindow(config, dayOverride, sleepCalc);
+
 	// Optional restorative 25m midday power nap if early waking / short sleep happened (never past 14:30)
 	const hobbyBlocks: PlannedBlock[] = [];
+	let napEndMin: number | null = null;
 	if (sleepCalc.earlyWakingDetected && (config.lifestyle.sleep.allowMiddayRecoveryNap ?? true)) {
 		const napIdx = awakeIntervals.findIndex((iv) => iv.endMin >= 12 * 60 + 45 && iv.startMin <= 14 * 60 + 5 && Math.min(iv.endMin, 14 * 60 + 30) - Math.max(iv.startMin, 12 * 60 + 45) >= 25);
 		if (napIdx >= 0) {
@@ -2364,6 +2446,7 @@ export function computeLocalPlannerPlan(
 			const napStart = clamp(13 * 60 + 5, iv.startMin, Math.min(iv.endMin, 14 * 60 + 30) - 25);
 			const napIv = { startMin: napStart, endMin: napStart + 25 };
 			awakeIntervals = subtractInterval(awakeIntervals, napIv);
+			napEndMin = napIv.endMin;
 			hobbyBlocks.push({
 				id: `blk_nap_${date}`,
 				date,
@@ -2375,6 +2458,68 @@ export function computeLocalPlannerPlan(
 				type: "hobby",
 				title: "Short Midday Recovery Nap (25m)",
 				reason: "Counter early waking without delaying tonight's sleep",
+			});
+		}
+	}
+
+	// Discreet transition anchors for high-risk wake windows (feet on floor + water before phone/bed drift)
+	if (guardrail?.enabled && (guardrailRiskSet.has("early_morning_wake") || sleepCalc.earlyWakingDetected)) {
+		const firstIv = awakeIntervals[0];
+		if (firstIv && firstIv.startMin === sleepCalc.todayWakeMin && firstIv.endMin - firstIv.startMin >= 35) {
+			const wakeAnchorIv = { startMin: sleepCalc.todayWakeMin, endMin: sleepCalc.todayWakeMin + 10 };
+			awakeIntervals = subtractInterval(awakeIntervals, wakeAnchorIv);
+			hobbyBlocks.push({
+				id: `blk_wake_anchor_${date}`,
+				date,
+				startTime: formatClockMin(wakeAnchorIv.startMin),
+				endTime: formatClockMin(wakeAnchorIv.endMin),
+				startMin: wakeAnchorIv.startMin,
+				endMin: wakeAnchorIv.endMin,
+				durationMin: 10,
+				type: "break",
+				title: "Start-of-Day Movement & Water (10m)",
+				reason: "Feet on floor + cold water before starting desktop work",
+			});
+		}
+	}
+
+	if (guardrail?.enabled && guardrailRiskSet.has("post_nap_wake") && napEndMin !== null) {
+		const postNapIv = { startMin: napEndMin, endMin: napEndMin + 10 };
+		const fitsPostNap = awakeIntervals.some((iv) => iv.startMin <= postNapIv.startMin && iv.endMin >= postNapIv.endMin);
+		if (fitsPostNap) {
+			awakeIntervals = subtractInterval(awakeIntervals, postNapIv);
+			hobbyBlocks.push({
+				id: `blk_postnap_reset_${date}`,
+				date,
+				startTime: formatClockMin(postNapIv.startMin),
+				endTime: formatClockMin(postNapIv.endMin),
+				startMin: postNapIv.startMin,
+				endMin: postNapIv.endMin,
+				durationMin: 10,
+				type: "break",
+				title: "Post-Nap Active Reset: Water & Walk (10m)",
+				reason: "Stand up and move immediately on waking from midday rest",
+			});
+		}
+	}
+
+	// Post-dinner 15m walk to blunt postprandial drowsiness before evening blocks
+	if (dipInfo.walkIv) {
+		const walkIv = dipInfo.walkIv;
+		const overlapsWalk = awakeIntervals.some((iv) => Math.min(iv.endMin, walkIv.endMin) - Math.max(iv.startMin, walkIv.startMin) >= 12);
+		if (overlapsWalk) {
+			awakeIntervals = subtractInterval(awakeIntervals, walkIv);
+			hobbyBlocks.push({
+				id: `blk_postmeal_${date}`,
+				date,
+				startTime: formatClockMin(walkIv.startMin),
+				endTime: formatClockMin(walkIv.endMin),
+				startMin: walkIv.startMin,
+				endMin: walkIv.endMin,
+				durationMin: walkIv.endMin - walkIv.startMin,
+				type: "break",
+				title: "Post-Meal Walk & Hydration (15m)",
+				reason: "Light movement after dinner to prevent post-meal food coma",
 			});
 		}
 	}
@@ -2413,10 +2558,10 @@ export function computeLocalPlannerPlan(
 		}
 	}
 
-	// Place wellness / hobby recharge block in late afternoon/evening where longest gap >= pureHobbyMin
+	// Place wellness / hobby recharge block in post-dinner dip window (when enabled) or evening where longest gap >= pureHobbyMin
 	const pureHobbyMin = Math.max(0, Math.min(baseCarve.hobbyMin - gameMin, config.intensity === "healthy" ? Math.max(config.lifestyle.dailyHobbyMin, band.minHobbyMin) : baseCarve.hobbyMin));
 	if (pureHobbyMin >= 20 && awakeIntervals.length > 0) {
-		const preferredEveningStart = 19 * 60 + 30;
+		const preferredEveningStart = dipInfo.dipWindow ? dipInfo.dipWindow.startMin : 19 * 60 + 30;
 		let chosenIdx = -1;
 		let chosenStart = 0;
 		for (let i = awakeIntervals.length - 1; i >= 0; i--) {
@@ -2441,7 +2586,11 @@ export function computeLocalPlannerPlan(
 				durationMin: pureHobbyMin,
 				type: "hobby",
 				title: `Hobby / Rest: ${hobbyList}`,
-				reason: config.intensity === "healthy" ? "Protected wellness recovery" : "Scheduled mental reset",
+				reason: dipInfo.dipWindow
+					? "Buffer post-dinner energy dip with active/offline recovery"
+					: config.intensity === "healthy"
+						? "Protected wellness recovery"
+						: "Scheduled mental reset",
 			});
 		}
 	}
@@ -2530,6 +2679,9 @@ export function computeLocalPlannerPlan(
 				: "morning"
 			: config.lifestyle.sleep.peakFocusWindow;
 	const isPeakMin = (m: number) => {
+		if (dipInfo.dipWindow && m >= dipInfo.dipWindow.startMin && m <= dipInfo.dipWindow.endMin) {
+			return false;
+		}
 		const clock = m % 1440;
 		if (resolvedPeak === "morning") return clock >= Math.max(sleepCalc.todayWakeMin + 30, 8 * 60) && clock <= 12 * 60;
 		if (resolvedPeak === "afternoon") return clock >= 13 * 60 + 30 && clock <= 17 * 60 + 30;
@@ -2570,8 +2722,15 @@ export function computeLocalPlannerPlan(
 
 		const nonRepeating = available.filter((c) => c.subject !== lastAssignedSubject);
 		const pool = nonRepeating.length > 0 ? nonRepeating : available;
+		const inDip = Boolean(
+			dipInfo.dipWindow && slot.endMin > dipInfo.dipWindow.startMin && slot.startMin < dipInfo.dipWindow.endMin,
+		);
 		pool.sort((a, b) => {
-			if (slot.isPeak) {
+			if (inDip) {
+				const da = a.cognitiveLoad === "light" ? 2 : a.cognitiveLoad === "medium" ? 1 : 0;
+				const db = b.cognitiveLoad === "light" ? 2 : b.cognitiveLoad === "medium" ? 1 : 0;
+				if (da !== db) return db - da;
+			} else if (slot.isPeak) {
 				const la = a.cognitiveLoad === "heavy" ? 2 : a.cognitiveLoad === "medium" ? 1 : 0;
 				const lb = b.cognitiveLoad === "heavy" ? 2 : b.cognitiveLoad === "medium" ? 1 : 0;
 				if (la !== lb) return lb - la;
@@ -2586,7 +2745,7 @@ export function computeLocalPlannerPlan(
 		remainingQuota.set(picked.subject, Math.max(0, (remainingQuota.get(picked.subject) ?? 0) - slotDur));
 	}
 
-	const optimizedAssignments = optimizeSlotAssignments(rawSlots, slotAssignments, sleepCalc.tonightBedMin);
+	const optimizedAssignments = optimizeSlotAssignments(rawSlots, slotAssignments, sleepCalc.tonightBedMin, dipInfo.dipWindow);
 	const studyAndBreakBlocks: PlannedBlock[] = [];
 	const actualAssignedBySubject = new Map<string, number>();
 
@@ -2709,6 +2868,7 @@ export function buildCompactPlannerDigest(
 	const band = INTENSITY_STUDY_BOUNDS[config.intensity];
 	const dayOverride = config.dayOverrides?.[signals.date];
 	const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, signals.date, config.intensity, dayOverride);
+	const dipInfo = resolveEveningDipWindow(config, dayOverride, sleepCalc);
 	const maxAllowedHours =
 		dayOverride?.studyTargetHoursOverride !== undefined
 			? dayOverride.studyTargetHoursOverride
@@ -2749,12 +2909,18 @@ export function buildCompactPlannerDigest(
 			dailyHobbyMin: config.lifestyle.dailyHobbyMin,
 			gameBudgetMin: config.lifestyle.gameBudgetMin ?? 0,
 			gameCutoffBeforeBedMin: config.lifestyle.gameCutoffBeforeBedMin ?? 90,
+			postDinnerComaProtection: Boolean(config.lifestyle.sleep.postDinnerComaProtection),
+			eveningDipWindow: dipInfo.dipWindow
+				? `${formatClockMin(dipInfo.dipWindow.startMin)}-${formatClockMin(dipInfo.dipWindow.endMin)}`
+				: null,
 			wellnessGuardrail: config.lifestyle.wellnessGuardrail?.enabled
 				? {
 					enabled: true,
 					weeklyTarget: config.lifestyle.wellnessGuardrail.targetWeeklyFreq ?? null,
 					riskWindows: config.lifestyle.wellnessGuardrail.riskWindows ?? ["late_night"],
 					replacementProtocol: config.lifestyle.wellnessGuardrail.replacementProtocol ?? "10m walk, cold water, offline book, phone outside bed",
+					wakeUpAnchorProtocol: config.lifestyle.wellnessGuardrail.wakeUpAnchorProtocol ?? "Feet on floor <60s, cold water, leave bed before checking phone",
+					deviceFrictionRules: config.lifestyle.wellnessGuardrail.deviceFrictionRules ?? [],
 				}
 				: null,
 		},
@@ -3023,6 +3189,11 @@ export interface HabitCheckInPatch {
 	sleepQuality?: 1 | 2 | 3 | 4 | 5;
 	wokeEarlyUnintended?: boolean;
 	energyScore?: 1 | 2 | 3 | 4 | 5;
+	foodComaHitToday?: boolean;
+	urgesSurfed?: number;
+	incrementUrgesSurfed?: boolean;
+	urgeTriggerWindows?: string[];
+	addUrgeTrigger?: string;
 	hobbyDone?: boolean;
 	mealsOk?: boolean;
 	sleepOnTarget?: boolean;
@@ -3109,6 +3280,22 @@ export function applyHabitCheckIn(
 		);
 	}
 
+	const mergedTriggerWindows = (() => {
+		if (patch.urgeTriggerWindows !== undefined) return sanitizeStringArray(patch.urgeTriggerWindows, 12, 40);
+		const cur = existing.urgeTriggerWindows ? [...existing.urgeTriggerWindows] : [];
+		if (typeof patch.addUrgeTrigger === "string" && patch.addUrgeTrigger.trim()) {
+			const clean = patch.addUrgeTrigger.trim().slice(0, 40);
+			if (!cur.includes(clean)) cur.push(clean);
+		}
+		return cur.slice(0, 12);
+	})();
+	const nextUrgesSurfed =
+		patch.urgesSurfed !== undefined
+			? clamp(Math.round(patch.urgesSurfed), 0, 100)
+			: patch.incrementUrgesSurfed
+				? clamp((existing.urgesSurfed ?? 0) + 1, 0, 100)
+				: existing.urgesSurfed;
+
 	const nextLog: DailyHabitLog = {
 		...existing,
 		...(patch.actualBedtime !== undefined && parseClockMin(patch.actualBedtime) !== null
@@ -3120,6 +3307,11 @@ export function applyHabitCheckIn(
 		...(patch.sleepQuality !== undefined ? { sleepQuality: patch.sleepQuality } : {}),
 		...(patch.wokeEarlyUnintended !== undefined ? { wokeEarlyUnintended: patch.wokeEarlyUnintended } : {}),
 		...(patch.energyScore !== undefined ? { energyScore: patch.energyScore } : {}),
+		...(patch.foodComaHitToday !== undefined ? { foodComaHitToday: patch.foodComaHitToday } : {}),
+		...(nextUrgesSurfed !== undefined ? { urgesSurfed: nextUrgesSurfed } : {}),
+		...(mergedTriggerWindows.length > 0 || patch.urgeTriggerWindows !== undefined
+			? { urgeTriggerWindows: mergedTriggerWindows }
+			: {}),
 		...(patch.hobbyDone !== undefined ? { hobbyDone: patch.hobbyDone } : { hobbyDone }),
 		...(patch.mealsOk !== undefined ? { mealsOk: patch.mealsOk } : {}),
 		...(patch.sleepOnTarget !== undefined ? { sleepOnTarget: patch.sleepOnTarget } : {}),

@@ -356,6 +356,25 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         </div>
       </div>
 
+      <div class="subcard" id="mob-reset-card">
+        <div class="row-between" style="margin-bottom:6px">
+          <span class="serif" style="font-size:15px;font-weight:700">10m Active Reset &amp; Energy Dips</span>
+          <span class="status-pill" id="mob-surfed-pill" style="font-size:10px;padding:2px 7px">Surfed 0</span>
+        </div>
+        <div id="mob-reset-guide" class="muted" style="font-size:12px;line-height:1.45;margin-bottom:8px"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <button type="button" class="btn btn-primary btn-sm" id="mob-reset-timer-btn">Start 10m Reset</button>
+          <button type="button" class="btn btn-sm" id="mob-wave-surfed-btn">Wave Surfed ✓</button>
+          <button type="button" class="pill-btn" id="mob-food-coma-btn" style="border:1px solid var(--border)">Post-Meal Dip</button>
+        </div>
+        <div class="scope-strip" id="mob-trigger-strip" style="margin-top:0">
+          <button type="button" class="scope-chip" data-trigger="post_nap_wake">Post-Nap</button>
+          <button type="button" class="scope-chip" data-trigger="early_morning_wake">Early AM</button>
+          <button type="button" class="scope-chip" data-trigger="post_dinner_slump">Evening Dip</button>
+          <button type="button" class="scope-chip" data-trigger="late_night">Late Night</button>
+        </div>
+      </div>
+
       <div class="subcard">
         <div class="serif" style="font-size:15px;font-weight:700;margin-bottom:4px">Meals, Hobbies &amp; Daily Note</div>
         <div id="mob-meals-summary" class="muted mono" style="font-size:11px;margin-bottom:8px"></div>
@@ -1162,6 +1181,31 @@ export function buildMobileHtml(uploadEndpoint: string): string {
           (comp.nextDayAdvice ? "<div class='muted' style='font-size:11px'><strong>Next:</strong> " + escapeHtml(comp.nextDayAdvice) + "</div>" : "");
       }
     }
+
+    var surfedPill = byId("mob-surfed-pill");
+    if (surfedPill) {
+      var surfedNum = Number(log.urgesSurfed || 0);
+      surfedPill.textContent = "Surfed " + surfedNum;
+    }
+    var foodBtn = byId("mob-food-coma-btn");
+    if (foodBtn) {
+      foodBtn.classList.toggle("active", Boolean(log.foodComaHitToday));
+      foodBtn.textContent = log.foodComaHitToday ? "Evening Dip ✓" : "Post-Meal Dip";
+    }
+    var resetGuide = byId("mob-reset-guide");
+    if (resetGuide) {
+      var rp = pl.resetProtocol || {};
+      var parts = [];
+      if (rp.wakeAnchor) parts.push("<strong>Anchor:</strong> " + escapeHtml(rp.wakeAnchor));
+      if (rp.replacement) parts.push("<strong>Swap:</strong> " + escapeHtml(rp.replacement));
+      if (rp.reframeNote) parts.push("<em>" + escapeHtml(rp.reframeNote) + "</em>");
+      resetGuide.innerHTML = parts.join("<br />");
+    }
+    var loggedTriggers = log.urgeTriggerWindows || [];
+    Array.prototype.slice.call(document.querySelectorAll("#mob-trigger-strip [data-trigger]")).forEach(function (btn) {
+      var tr = btn.getAttribute("data-trigger");
+      btn.classList.toggle("active", loggedTriggers.indexOf(tr) >= 0);
+    });
   }
 
   function renderMobilePlanner() {
@@ -1639,6 +1683,77 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       if (titleEl) titleEl.value = "";
     });
   });
+  var mobResetSeconds = 0;
+  var mobResetHandle = null;
+  function updateMobResetButton() {
+    var btn = byId("mob-reset-timer-btn");
+    if (!btn) return;
+    if (mobResetSeconds <= 0) {
+      btn.textContent = "Start 10m Reset";
+      return;
+    }
+    var mm = Math.floor(mobResetSeconds / 60);
+    var ss = mobResetSeconds % 60;
+    btn.textContent = "Reset " + mm + ":" + (ss < 10 ? "0" + ss : ss) + " · Stop";
+  }
+  function stopMobResetTimer() {
+    if (mobResetHandle) {
+      clearInterval(mobResetHandle);
+      mobResetHandle = null;
+    }
+    mobResetSeconds = 0;
+    updateMobResetButton();
+  }
+  var mobResetBtn = byId("mob-reset-timer-btn");
+  if (mobResetBtn) {
+    mobResetBtn.addEventListener("click", function () {
+      if (mobResetSeconds > 0) {
+        stopMobResetTimer();
+        return;
+      }
+      mobResetSeconds = 600;
+      updateMobResetButton();
+      mobResetHandle = setInterval(function () {
+        mobResetSeconds = mobResetSeconds <= 1 ? 0 : mobResetSeconds - 1;
+        if (mobResetSeconds <= 0) {
+          stopMobResetTimer();
+        } else {
+          updateMobResetButton();
+        }
+      }, 1000);
+    });
+  }
+  var mobWaveBtn = byId("mob-wave-surfed-btn");
+  if (mobWaveBtn) {
+    mobWaveBtn.addEventListener("click", function () {
+      var pl = state.planner;
+      if (!pl) return;
+      stopMobResetTimer();
+      checkInMobilePlanner({ date: pl.date, incrementUrgesSurfed: true }, "Wave surfed ✓");
+    });
+  }
+  var mobFoodBtn = byId("mob-food-coma-btn");
+  if (mobFoodBtn) {
+    mobFoodBtn.addEventListener("click", function () {
+      var pl = state.planner;
+      if (!pl) return;
+      var nextVal = !(pl.todayLog && pl.todayLog.foodComaHitToday);
+      checkInMobilePlanner({ date: pl.date, foodComaHitToday: nextVal }, nextVal ? "Evening dip logged" : "Cleared");
+    });
+  }
+  Array.prototype.slice.call(document.querySelectorAll("#mob-trigger-strip [data-trigger]")).forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var pl = state.planner;
+      var tr = btn.getAttribute("data-trigger");
+      if (!pl || !tr) return;
+      var cur = (pl.todayLog && pl.todayLog.urgeTriggerWindows) ? pl.todayLog.urgeTriggerWindows.slice() : [];
+      var idx = cur.indexOf(tr);
+      if (idx >= 0) cur.splice(idx, 1);
+      else cur.push(tr);
+      checkInMobilePlanner({ date: pl.date, urgeTriggerWindows: cur }, "Trigger updated");
+    });
+  });
+
   byId("mob-journal-audit-btn").addEventListener("click", function () {
     var pl = state.planner;
     var journalEl = byId("mob-journal-text");

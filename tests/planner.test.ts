@@ -1607,4 +1607,168 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		const cleared = clearPlannerCoachChatServer({ plannerFile, chatsDir, flashcardsFile, mistakesFile, date: "2026-11-16" });
 		assert.equal(cleared.config.coachChat?.length ?? 0, 0);
 	});
+
+	it("schedules post-dinner food coma buffers, post-nap/early-wake anchors, urge-surf logging, and Coach tailoring", async () => {
+		const dir = fs.mkdtempSync(path.join(TMP_DATA, "coma-guard-"));
+		const plannerFile = path.join(dir, "planner.json");
+		const flashcardsFile = path.join(dir, "flashcards.json");
+		const chatsDir = path.join(dir, "chats");
+		fs.mkdirSync(chatsDir, { recursive: true });
+		fs.writeFileSync(flashcardsFile, JSON.stringify({ cards: [], meta: { scheduler: "fsrs6" } }));
+
+		const cfg: PlannerConfig = sanitizePlannerConfig({
+			...DEFAULT_PLANNER_CONFIG,
+			intensity: "balanced",
+			milestones: [
+				{
+					id: "ms_heavy",
+					kind: "competition",
+					title: "Olympic Proofs",
+					subject: "Giải tích",
+					dueDate: "2026-11-28",
+					priority: 3,
+					cognitiveLoad: "heavy",
+					clusterIds: [],
+					estimatedHours: 24,
+					completedHours: 2,
+					syllabusTopics: [],
+					notes: "",
+				},
+				{
+					id: "ms_light",
+					kind: "course",
+					title: "Soft Flashcards Review",
+					subject: "Anh văn",
+					dueDate: "2026-12-05",
+					priority: 2,
+					cognitiveLoad: "light",
+					clusterIds: [],
+					estimatedHours: 12,
+					completedHours: 1,
+					syllabusTopics: [],
+					notes: "",
+				},
+			],
+			lifestyle: {
+				...DEFAULT_PLANNER_CONFIG.lifestyle,
+				dailyHobbyMin: 45,
+				sleep: {
+					...DEFAULT_PLANNER_CONFIG.lifestyle.sleep,
+					currentBedtime: "23:15",
+					targetBedtime: "23:15",
+					preferredWakeTime: "06:30",
+					earlyWakingIssue: true,
+					allowMiddayRecoveryNap: true,
+					postDinnerComaProtection: true,
+					eveningDrowsyStart: "20:00",
+				},
+				wellnessGuardrail: {
+					enabled: true,
+					currentWeeklyFreq: 5,
+					targetWeeklyFreq: 1,
+					riskWindows: ["post_nap_wake", "early_morning_wake", "post_dinner_slump", "late_night"],
+					wakeUpAnchorProtocol: "Feet on floor <60s, cold water on face, leave room immediately",
+					replacementProtocol: "10m walk, pushups, phone outside bed",
+					cravingReframeNote: "Sleep-inertia urge peaks for 10-15m and drops rapidly.",
+					deviceFrictionRules: ["No phone/laptop in bed", "Charge phone across room"],
+				},
+			},
+			logs: {
+				"2026-11-16": {
+					date: "2026-11-16",
+					actualWakeTime: "04:45",
+					wokeEarlyUnintended: true,
+					completedBlockIds: [],
+					completedChecklistIds: [],
+					loggedStudyMinBySubject: {},
+					hobbyDone: false,
+					mealsOk: true,
+				},
+			},
+		});
+
+		const examPrepFile = path.join(dir, "exam-prep.json");
+		fs.writeFileSync(plannerFile, JSON.stringify(cfg, null, 2));
+		const snap = readPlannerSnapshot({
+			plannerFile,
+			examPrepFile,
+			flashcardsFile,
+			chatsDir,
+			date: "2026-11-16",
+			now: new Date("2026-11-16T08:00:00").getTime(),
+		});
+		const plan = snap.plan;
+
+		const wakeAnchor = plan.blocks.find((b) => b.id === "blk_wake_anchor_2026-11-16");
+		const napBlock = plan.blocks.find((b) => b.id === "blk_nap_2026-11-16");
+		const postNap = plan.blocks.find((b) => b.id === "blk_postnap_reset_2026-11-16");
+		const postMeal = plan.blocks.find((b) => b.id === "blk_postmeal_2026-11-16");
+		assert.ok(wakeAnchor, "Should place start-of-day movement anchor");
+		assert.ok(napBlock, "Should place midday recovery nap on early wake");
+		assert.ok(postNap, "Should place upright active reset right after midday nap");
+		assert.equal(postNap!.startMin, napBlock!.endMin);
+		assert.ok(postMeal, "Should place 15m post-meal walk after dinner");
+		// Verify no heavy study block overlaps the core post-dinner dip (20:00–21:15)
+		const heavyDuringDip = plan.blocks.filter(
+			(b) => b.type === "study" && b.cognitiveLoad === "heavy" && b.endMin > 20 * 60 && b.startMin < 21 * 60 + 15,
+		);
+		assert.equal(heavyDuringDip.length, 0, "Heavy study should avoid post-dinner food coma window");
+
+		// Check habit check-in for urgesSurfed, foodComaHitToday & urgeTriggerWindows
+		let nextCfg = applyHabitCheckIn(cfg, {
+			date: "2026-11-16",
+			foodComaHitToday: true,
+			incrementUrgesSurfed: true,
+			addUrgeTrigger: "post_nap_wake",
+		});
+		nextCfg = applyHabitCheckIn(nextCfg, { date: "2026-11-16", incrementUrgesSurfed: true });
+		assert.equal(nextCfg.logs["2026-11-16"]?.foodComaHitToday, true);
+		assert.equal(nextCfg.logs["2026-11-16"]?.urgesSurfed, 2);
+		assert.deepEqual(nextCfg.logs["2026-11-16"]?.urgeTriggerWindows, ["post_nap_wake"]);
+
+		fs.writeFileSync(plannerFile, JSON.stringify(nextCfg, null, 2));
+		const suggestion = await suggestLifestyleBalanceServer({ plannerFile, examPrepFile, flashcardsFile, useAi: false });
+		assert.equal(suggestion.postDinnerComaProtection, true);
+		assert.ok(suggestion.tips.some((t) => t.toLowerCase().includes("food coma")));
+		assert.ok(suggestion.tips.some((t) => t.toLowerCase().includes("sleep inertia")));
+
+		const mobState = getMobileCompanionState({ plannerFile, examPrepFile, flashcardsFile, chatsDir });
+		assert.equal(mobState.planner.resetProtocol?.postDinnerShield, true);
+		assert.ok(mobState.planner.resetProtocol?.wakeAnchor.includes("Feet on floor"));
+
+		const html = buildMobileHtml("http://127.0.0.1:4321/p/tok/upload");
+		assert.equal(html.includes("https://"), false);
+		for (const id of ["mob-reset-timer-btn", "mob-wave-surfed-btn", "mob-food-coma-btn", "mob-trigger-strip"]) {
+			assert.ok(html.includes(`id="${id}"`), `Missing reset control #${id}`);
+		}
+		const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(html);
+		assert.ok(scriptMatch?.[1]);
+		assert.doesNotThrow(() => new vm.Script(scriptMatch![1]!));
+
+		const coachTailor = await chatWithPlannerCoachServer({
+			plannerFile,
+			examPrepFile,
+			chatsDir,
+			flashcardsFile,
+			date: "2026-11-16",
+			focusArea: "lifestyle",
+			message: "Hay bị food coma 8-9h tối và bứt rứt sau ngủ trưa, điều chỉnh giúp tôi",
+			engineOverride: fakeSubmitEngine("submit_coach_response", {
+				reply: "Đã bật post-dinner coma buffer, đẩy bài nặng sang sáng/chiều và thiết lập post-nap reset 10 phút.",
+				shouldApplyChanges: true,
+				changesSummary: "Post-dinner shield + Wake anchor updated",
+				regenerateTodaySchedule: true,
+				lifestylePatch: {
+					sleep: { postDinnerComaProtection: true, eveningDrowsyStart: "19:45" },
+					wellnessGuardrail: {
+						enabled: true,
+						riskWindows: ["post_nap_wake", "early_morning_wake", "post_dinner_slump"],
+						wakeUpAnchorProtocol: "Stand up <30s, splash cold water, walk outside balcony 5m",
+					},
+				},
+			}),
+		});
+		assert.equal(coachTailor.snapshot.config.lifestyle.sleep.eveningDrowsyStart, "19:45");
+		assert.ok(coachTailor.snapshot.config.lifestyle.wellnessGuardrail?.wakeUpAnchorProtocol?.includes("balcony"));
+	});
 });

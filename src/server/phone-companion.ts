@@ -114,6 +114,13 @@ export interface MobileCompanionPlannerView {
 	quotas: DailyStudyPlan["quotas"];
 	blocks: DailyStudyPlan["blocks"];
 	upcomingMilestones: Array<{ id: string; kind: string; title: string; dueDate: string; daysLeft: number }>;
+	resetProtocol?: {
+		wakeAnchor: string;
+		replacement: string;
+		reframeNote: string;
+		postDinnerShield: boolean;
+		deviceRules: string[];
+	};
 }
 
 export interface MobilePlannerCheckInRequest extends HabitCheckInPatch {
@@ -332,6 +339,19 @@ export function buildMobileCompanionPlannerView(opts: MobileCompanionOptions = {
 		quotas: snap.plan.quotas,
 		blocks: snap.plan.blocks,
 		upcomingMilestones,
+		resetProtocol: {
+			wakeAnchor:
+				snap.config.lifestyle.wellnessGuardrail?.wakeUpAnchorProtocol ||
+				"Feet on floor <60s, cold water on face, step out of bed before screens",
+			replacement:
+				snap.config.lifestyle.wellnessGuardrail?.replacementProtocol ||
+				"10m brisk walk, cold water, offline book, phone outside bedroom",
+			reframeNote:
+				snap.config.lifestyle.wellnessGuardrail?.cravingReframeNote ||
+				"Peak arousal/impulse fades within 10-15m once prefrontal focus wakes up.",
+			postDinnerShield: Boolean(snap.config.lifestyle.sleep.postDinnerComaProtection),
+			deviceRules: snap.config.lifestyle.wellnessGuardrail?.deviceFrictionRules ?? [],
+		},
 	};
 }
 
@@ -345,6 +365,11 @@ function hasDirectHabitPatchFields(patch: HabitCheckInPatch): boolean {
 		patch.sleepQuality !== undefined ||
 		patch.wokeEarlyUnintended !== undefined ||
 		patch.energyScore !== undefined ||
+		patch.foodComaHitToday !== undefined ||
+		patch.urgesSurfed !== undefined ||
+		patch.incrementUrgesSurfed !== undefined ||
+		patch.urgeTriggerWindows !== undefined ||
+		patch.addUrgeTrigger !== undefined ||
 		patch.hobbyDone !== undefined ||
 		patch.mealsOk !== undefined ||
 		patch.sleepOnTarget !== undefined ||

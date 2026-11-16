@@ -25,6 +25,7 @@ const QUICK_PROMPTS: Record<FocusArea, string[]> = {
 	],
 	lifestyle: [
 		"Dạo này hay tỉnh sớm 4-5h sáng dù ngủ sớm, chỉnh lại sleep & wind-down giúp tôi",
+		"Hay buồn ngủ (food coma) 8–9h tối & thỉnh thoảng lên cơn bứt rứt sau ngủ trưa/sáng sớm — tailor lịch giúp tôi",
 		"Thêm tập thể thao vào hobby, đặt game tối đa 30p và tắt trước giờ ngủ 90p",
 		"Dựa vào lực học & lịch sử log gần đây, tôi nên giữ Healthy hay Balanced?",
 	],

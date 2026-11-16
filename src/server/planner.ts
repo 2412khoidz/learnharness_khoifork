@@ -1194,10 +1194,12 @@ STRICT RULES:
    - Instead, EVERY study block title, actionTopic, and quota checklist item MUST reference the EXACT theorems, files, open PlanTree chapters, unfinished problems, or mistake rules from \`knowledgeSignals\` (\`attachedFiles\`, \`activePlanTopics\`, \`pendingProblems\`, \`dueSample\`, \`weakSample\`, \`untrackedSample\`) and \`milestones\` (\`openTopics\`, \`notesHint\`).
    - Do NOT invent problem numbers that aren't in the digest; cite what is present cleanly.
 3. No Overlaps & Subject Focus: Never overlap \`fixedEventsToday\`, meals, or sleep. Obey \`mutedSubjects\` (omit them) and prioritize \`focusSubjectsToday\` if set. Interleave at most \`maxSubjectsToday\` subjects.
-4. Sleep Continuity & Early-Waking Care: Check \`awakeWindow.earlyWakingDetected\` & \`actualLastSleepHours\`. If waking at 4-5 AM occurs or sleep was short, soften the first morning hour, place a 20-25m restorative midday power nap around 13:00 (NEVER after 14:30), and enforce the exact screen-off \`windDownBufferMin\` before \`recommendedBedtime\`.
+4. Sleep Continuity, Food Coma Shield & Early-Waking Care:
+   - Check \`awakeWindow.earlyWakingDetected\` & \`actualLastSleepHours\`. If waking at 4-5 AM occurs or sleep was short, soften the first morning hour, place a 20-25m restorative midday power nap around 13:00 (NEVER after 14:30), and enforce the exact screen-off \`windDownBufferMin\` before \`recommendedBedtime\`.
+   - Check \`lifestyleBalance.postDinnerComaProtection\` and \`eveningDipWindow\`: immediately after Dinner, place a 15m \`Post-Meal Walk & Hydration\` break; NEVER schedule \`heavy\` cognitive blocks inside \`eveningDipWindow\` (~20:00-21:15) — reserve that window for active/offline hobbies or \`light\` flashcards/review.
 5. Hobbies, Gaming & Discreet Wellness Guardrails: Check \`lifestyleBalance\`.
    - If \`gameBudgetMin > 0\`, schedule a clean bounded gaming slot STRICTLY BEFORE \`recommendedBedtime - gameCutoffBeforeBedMin\`.
-   - If \`wellnessGuardrail.enabled\` is true, subtly protect the listed \`riskWindows\` (e.g. late night / idle afternoon / post-stress) by placing structured wind-down, physical walk, or offline reading blocks with **100% discreet, neutral labels** on the timeline (never mention sensitive biological details on visible block titles).
+   - If \`wellnessGuardrail.enabled\` is true, subtly protect the listed \`riskWindows\` (\`post_nap_wake\`, \`early_morning_wake\`, \`post_dinner_slump\`, \`late_night\`, \`idle_afternoon\`, \`alone_in_room\`) by placing a 10m upright transition reset right after waking / midday nap and structured wind-down or offline hobby blocks with **100% discreet, neutral labels** on the timeline (never mention sensitive biological details on visible block titles).
 6. Match the user's language (Vietnamese if subjects/milestones are Vietnamese). Max 11 dynamic blocks.`;
 
 	const promptText = [
@@ -2072,6 +2074,7 @@ const lifestyleSuggestionSchema = Type.Object({
 	gameCutoffBeforeBedMin: Type.Number(),
 	windDownBufferMin: Type.Number(),
 	allowMiddayRecoveryNap: Type.Boolean(),
+	postDinnerComaProtection: Type.Optional(Type.Boolean()),
 	rationale: Type.String(),
 	tips: Type.Array(Type.String()),
 });
@@ -2090,6 +2093,7 @@ export async function suggestLifestyleBalanceServer(
 	gameCutoffBeforeBedMin: number;
 	windDownBufferMin: number;
 	allowMiddayRecoveryNap: boolean;
+	postDinnerComaProtection: boolean;
 	rationale: string;
 	tips: string[];
 	modelLabel: string;
@@ -2101,6 +2105,8 @@ export async function suggestLifestyleBalanceServer(
 	const sleep = config.lifestyle.sleep;
 	const earlyWake = Boolean(sleep.earlyWakingIssue);
 	const guard = config.lifestyle.wellnessGuardrail;
+	const recentFoodComa = Object.values(config.logs).some((l) => Boolean(l.foodComaHitToday));
+	const postDinnerShield = Boolean(sleep.postDinnerComaProtection || recentFoodComa || guard?.riskWindows?.includes("post_dinner_slump"));
 
 	const localDailyHobby = Math.max(config.lifestyle.dailyHobbyMin, band.minHobbyMin);
 	const localGame = Math.min(config.lifestyle.gameBudgetMin ?? 30, config.intensity === "healthy" ? 45 : config.intensity === "balanced" ? 30 : 20);
@@ -2109,13 +2115,25 @@ export async function suggestLifestyleBalanceServer(
 	const localTips: string[] = [
 		`Keep ${localGame > 0 ? `gaming <= ${localGame}m and stop at least ${localCutoff}m` : "screens off"} before bed (${sleep.targetBedtime}).`,
 		earlyWake
-			? "Waking early at 4-5 AM: keep morning light exposure early, allow a 25m nap around 13:00, and avoid napping past 14:30."
+			? "Waking early at 4-5 AM: keep morning light exposure early, allow a 20-25m nap around 13:00 (seated or alarm across room), and avoid napping past 14:15."
 			: "Protect your midday break right after lunch instead of forcing extra afternoon screen time.",
 	];
-	if (guard?.enabled) {
+	if (postDinnerShield) {
 		localTips.push(
-			`Pre-commit high-risk windows (${(guard.riskWindows ?? ["late_night"]).join(", ")}): replace immediately with ${guard.replacementProtocol || "10m walk, water & phone outside bedroom"}.`,
+			"Post-dinner food coma (~20:00-21:00): keep dinner lighter in refined carbs, take a 15m brisk walk + cold water immediately after eating, and assign offline hobbies or light flashcards during the 20:00-21:15 dip.",
 		);
+	}
+	if (guard?.enabled) {
+		const wins = guard.riskWindows ?? ["late_night"];
+		if (wins.includes("post_nap_wake") || wins.includes("early_morning_wake")) {
+			localTips.push(
+				`Post-nap / early-wake surge shield: prefrontal brakes lag 10-15m after waking (sleep inertia). Feet on floor <60s, phone outside bed, wash face cold water, and follow: ${guard.wakeUpAnchorProtocol || guard.replacementProtocol || "10m walk & start first desk micro-task standing"}.`,
+			);
+		} else {
+			localTips.push(
+				`Pre-commit high-risk windows (${wins.join(", ")}): replace immediately with ${guard.replacementProtocol || "10m walk, water & phone outside bedroom"}.`,
+			);
+		}
 	}
 
 	if (!opts.useAi) {
@@ -2126,7 +2144,8 @@ export async function suggestLifestyleBalanceServer(
 			gameCutoffBeforeBedMin: localCutoff,
 			windDownBufferMin: localWindDown,
 			allowMiddayRecoveryNap: true,
-			rationale: `Calibrated for ${config.intensity} intensity${earlyWake ? " + early-waking continuity care" : ""}${guard?.enabled ? " + discreet impulse/screen guardrails" : ""}.`,
+			postDinnerComaProtection: postDinnerShield,
+			rationale: `Calibrated for ${config.intensity} intensity${earlyWake ? " + early-waking continuity care" : ""}${postDinnerShield ? " + post-dinner coma buffer" : ""}${guard?.enabled ? " + wake/impulse transition anchors" : ""}.`,
 			tips: localTips,
 			modelLabel: "local:lifestyle-optimizer",
 		};
@@ -2141,8 +2160,17 @@ export async function suggestLifestyleBalanceServer(
 
 	const recentNotes = Object.values(config.logs)
 		.sort((a, b) => b.date.localeCompare(a.date))
-		.slice(0, 5)
-		.map((l) => ({ date: l.date, slept: l.actualBedtime, woke: l.actualWakeTime, energy: l.energyScore, early: l.wokeEarlyUnintended }));
+		.slice(0, 7)
+		.map((l) => ({
+			date: l.date,
+			slept: l.actualBedtime,
+			woke: l.actualWakeTime,
+			energy: l.energyScore,
+			early: l.wokeEarlyUnintended,
+			foodComa: l.foodComaHitToday,
+			urgesSurfed: l.urgesSurfed,
+			urgeTriggerWindows: l.urgeTriggerWindows,
+		}));
 
 	interface LifestyleSuggestionOut {
 		hobbies: string[];
@@ -2151,6 +2179,7 @@ export async function suggestLifestyleBalanceServer(
 		gameCutoffBeforeBedMin: number;
 		windDownBufferMin: number;
 		allowMiddayRecoveryNap: boolean;
+		postDinnerComaProtection?: boolean;
 		rationale: string;
 		tips: string[];
 	}
@@ -2158,14 +2187,15 @@ export async function suggestLifestyleBalanceServer(
 	const res = await runPlannerSubmit<LifestyleSuggestionOut>({
 		role: resolved.role,
 		engine: resolved.engine,
-		systemPrompt: "You are a supportive behavioral & sleep hygiene coach for a university competition student. Design a practical, sustainable Hobby + Gaming + Sleep Consolidation + Discreet Habit Moderation balance. Call submit_lifestyle_balance once. Keep all outward advice tasteful and constructive.",
+		systemPrompt:
+			"You are an evidence-based behavioral, circadian & metabolic study coach. Design a sustainable balance covering hobbies, bounded gaming cutoff, post-dinner food coma prevention (post-meal 15m walk, lighter 20:00-21:15 cognitive load), sleep-inertia wake/post-nap impulse stabilization (<60s feet-on-floor anchor, phone outside bed, 10-15m urge surfing delay), and early-waking consolidation. Call submit_lifestyle_balance once. Keep outward timeline advice practical, non-judgmental, and discreet.",
 		promptText: JSON.stringify({
 			intensity: config.intensity,
 			currentLifestyle: config.lifestyle,
 			recentSleepLogs: recentNotes,
 		}),
 		toolName: "submit_lifestyle_balance",
-		toolDescription: "Submit calibrated lifestyle, gaming cutoff, and sleep continuity settings.",
+		toolDescription: "Submit calibrated lifestyle, food coma buffer, gaming cutoff, and sleep/impulse transition settings.",
 		parameters: lifestyleSuggestionSchema,
 		signal: opts.signal,
 		fill: (raw) => raw as LifestyleSuggestionOut,
@@ -2179,8 +2209,9 @@ export async function suggestLifestyleBalanceServer(
 		gameCutoffBeforeBedMin: Math.max(45, Math.min(180, Math.round(res.gameCutoffBeforeBedMin || 90))),
 		windDownBufferMin: Math.max(20, Math.min(60, Math.round(res.windDownBufferMin || 35))),
 		allowMiddayRecoveryNap: Boolean(res.allowMiddayRecoveryNap),
+		postDinnerComaProtection: Boolean(res.postDinnerComaProtection ?? postDinnerShield),
 		rationale: res.rationale.trim().slice(0, 450),
-		tips: res.tips.slice(0, 5).map((t) => String(t).trim()).filter(Boolean),
+		tips: res.tips.slice(0, 6).map((t) => String(t).trim()).filter(Boolean),
 		modelLabel: resolved.modelLabel,
 	};
 }
@@ -2516,6 +2547,9 @@ const coachTurnSchema = Type.Object({
 			actualBedtime: Type.Optional(Type.String()),
 			actualWakeTime: Type.Optional(Type.String()),
 			wokeEarlyUnintended: Type.Optional(Type.Boolean()),
+			foodComaHitToday: Type.Optional(Type.Boolean()),
+			urgesSurfed: Type.Optional(Type.Number()),
+			urgeTriggerWindows: Type.Optional(Type.Array(Type.String())),
 		}),
 	),
 	lifestylePatch: Type.Optional(
@@ -2534,6 +2568,8 @@ const coachTurnSchema = Type.Object({
 					preferredWakeTime: Type.Optional(Type.String()),
 					windDownBufferMin: Type.Optional(Type.Number()),
 					allowMiddayRecoveryNap: Type.Optional(Type.Boolean()),
+					postDinnerComaProtection: Type.Optional(Type.Boolean()),
+					eveningDrowsyStart: Type.Optional(Type.String()),
 				}),
 			),
 			meals: Type.Optional(
@@ -2554,6 +2590,9 @@ const coachTurnSchema = Type.Object({
 					enabled: Type.Optional(Type.Boolean()),
 					riskWindows: Type.Optional(Type.Array(Type.String())),
 					replacementProtocol: Type.Optional(Type.String()),
+					wakeUpAnchorProtocol: Type.Optional(Type.String()),
+					cravingReframeNote: Type.Optional(Type.String()),
+					deviceFrictionRules: Type.Optional(Type.Array(Type.String())),
 					targetWeeklyFreq: Type.Optional(Type.Number()),
 				}),
 			),
@@ -2591,6 +2630,9 @@ interface CoachTurnOut {
 		actualBedtime?: string;
 		actualWakeTime?: string;
 		wokeEarlyUnintended?: boolean;
+		foodComaHitToday?: boolean;
+		urgesSurfed?: number;
+		urgeTriggerWindows?: string[];
 	};
 	lifestylePatch?: {
 		intensity?: PlannerIntensity;
@@ -2604,6 +2646,9 @@ interface CoachTurnOut {
 			enabled?: boolean;
 			riskWindows?: string[];
 			replacementProtocol?: string;
+			wakeUpAnchorProtocol?: string;
+			cravingReframeNote?: string;
+			deviceFrictionRules?: string[];
 			targetWeeklyFreq?: number;
 		};
 		mutedSubjects?: string[];
@@ -2760,22 +2805,28 @@ export async function chatWithPlannerCoachServer(
 				woke: l.actualWakeTime,
 				earlyWake: l.wokeEarlyUnintended,
 				energy: l.energyScore,
+				foodComa: l.foodComaHitToday,
+				urgesSurfed: l.urgesSurfed,
+				urgeTriggerWindows: l.urgeTriggerWindows,
 				adherencePct: l.compliance?.adherencePct,
 			})),
 		recentCoachConversation: history,
 	};
 
-	const systemPrompt = `You are a deeply informed, supportive personal Study, Sleep & Habit Coach inside ChronoHarness.
+	const systemPrompt = `You are a deeply informed, supportive personal Study, Sleep & Behavioral Habit Coach inside ChronoHarness.
 You have the student's real Schedule, Lifestyle, FSRS-6/Knowledge Graph signals, Past Chat Sessions, Mistake rules, and Scientific Learning Capacity telemetry.
-Respond naturally and collaboratively in the student's language (Vietnamese if they write Vietnamese), and call \`submit_coach_response\` ONCE.
+Respond naturally, calmly, non-judgmentally, and collaboratively in the student's language (Vietnamese if they write Vietnamese), and call \`submit_coach_response\` ONCE.
 
 OPERATING RULES:
-1. Direct Action When Requested: If the student describes their state today ("mệt", "dậy 4h sáng", "bỏ bớt môn X hôm nay", "chỉnh giờ ăn", "đặt giờ ngủ 22:30", "thêm gym", "giảm game") OR asks you to modify their routine/schedule/sleep/habits, set \`shouldApplyChanges: true\` and emit exact patches in \`todayOverridePatch\`, \`todayLogPatch\`, and/or \`lifestylePatch\`.
+1. Direct Action When Requested: If the student describes their state today ("mệt", "dậy 4h sáng", "food coma", "buồn ngủ sau ăn tối", "lên cơn sau ngủ trưa", "bỏ bớt môn X hôm nay", "chỉnh giờ ăn", "đặt giờ ngủ 22:30", "thêm gym", "giảm game") OR asks you to tailor their routine/schedule/sleep/habits, set \`shouldApplyChanges: true\` and emit exact patches in \`todayOverridePatch\`, \`todayLogPatch\`, and/or \`lifestylePatch\`.
    - For today's wake/sleep/meals/focus/blocks: put them in \`todayOverridePatch\` and set \`regenerateTodaySchedule: true\`. Only emit \`todayOverridePatch.blocks\` when they specifically want exact block placements; otherwise omit \`blocks\` so the constraint optimizer lays out a non-overlapping schedule around TKB & meals.
-   - If the student reports today's actual energy, bedtime, wake time, or unintended 4-5 AM awakening: also update \`todayLogPatch\`.
-   - If they want persistent habit changes (target bedtime, early waking care, midday nap preference, default meal times, hobbies, game budget/cutoff, discreet guardrails, muted/pinned subjects, intensity): update \`lifestylePatch\`.
-2. Strictly Grounded & Discreet: Cite the student's real subjects, attached files, open chapters, FSRS/Graph metrics, or mistake rules. Never invent nonexistent metrics. If adjusting \`wellnessGuardrail\`, keep visible block titles 100% neutral and discreet.
-3. Pure Questions: If they only ask a question or ask for feedback without wanting edits, set \`shouldApplyChanges: false\`.`;
+   - If the student reports today's actual energy, bedtime, wake time, unintended 4-5 AM awakening, food coma hit, or surfed urge windows: also update \`todayLogPatch\`.
+   - If they want persistent habit changes (target bedtime, early waking care, midday nap preference, post-dinner food coma buffer \`sleep.postDinnerComaProtection\` + \`sleep.eveningDrowsyStart\`, default meal times, hobbies, game budget/cutoff, discreet guardrails, muted/pinned subjects, intensity): update \`lifestylePatch\`.
+2. Special Guidance for Food Coma & Wake/Post-Nap Urges / Unwanted Cravings:
+   - **Post-dinner food coma (~20:00-21:00):** Explain briefly the postprandial glycemic/parasympathetic dip and tailor \`lifestylePatch.sleep.postDinnerComaProtection: true\`, optionally suggest shifting dinner ~30m earlier or lighter evening carbs, automatically scheduling a 15m post-meal walk & placing active/offline hobby or \`light\` tasks (flashcards/review) instead of heavy work around 20:00-21:15.
+   - **Sudden post-nap / early-morning libido surges & harmful fetish cravings (urgency to act immediately):** Respond with zero shame or moralizing; distinguish sleep-inertia prefrontal lag (first 10-15m after waking when subcortical reward/arousal outpaces executive braking — different from normal physiological morning tumescence) and tolerance/novelty conditioning behind escalating fetishes. Propose and patch concrete stimulus-control + "urge surfing" defenses: enable \`wellnessGuardrail\` with \`"post_nap_wake"\`, \`"early_morning_wake"\` (and \`"post_dinner_slump"\` if coupled with evening fatigue), cap nap <= 20-25m (or seated/cross-room alarm), fill \`wakeUpAnchorProtocol\` (feet on floor <60s, cold water on face, leave bed before touching phone/laptop), \`replacementProtocol\`, \`deviceFrictionRules\`, and a supportive private \`cravingReframeNote\`. If the pattern causes severe distress, gently encourage speaking with a licensed behavioral therapist without lecturing.
+3. Strictly Grounded & Discreet: Cite the student's real subjects, attached files, open chapters, FSRS/Graph metrics, or mistake rules. Never invent nonexistent metrics. If adjusting \`wellnessGuardrail\`, keep visible block titles 100% neutral and discreet.
+4. Pure Questions: If they only ask a question or ask for feedback without wanting edits, set \`shouldApplyChanges: false\`.`;
 
 	const payload = await runPlannerSubmit<CoachTurnOut>({
 		role: resolved.role,
@@ -2824,6 +2875,9 @@ OPERATING RULES:
 				...(lp.actualBedtime && parseClockMin(lp.actualBedtime) !== null ? { actualBedtime: lp.actualBedtime } : {}),
 				...(lp.actualWakeTime && parseClockMin(lp.actualWakeTime) !== null ? { actualWakeTime: lp.actualWakeTime } : {}),
 				...(typeof lp.wokeEarlyUnintended === "boolean" ? { wokeEarlyUnintended: lp.wokeEarlyUnintended } : {}),
+				...(typeof lp.foodComaHitToday === "boolean" ? { foodComaHitToday: lp.foodComaHitToday } : {}),
+				...(typeof lp.urgesSurfed === "number" && Number.isFinite(lp.urgesSurfed) ? { urgesSurfed: lp.urgesSurfed } : {}),
+				...(Array.isArray(lp.urgeTriggerWindows) ? { urgeTriggerWindows: lp.urgeTriggerWindows } : {}),
 			};
 			if (Object.keys(checkPatch).length > 1) {
 				nextConfig = applyHabitCheckIn(nextConfig, checkPatch, now);
@@ -2851,6 +2905,9 @@ OPERATING RULES:
 							enabled: lp.wellnessGuardrail.enabled ?? nextConfig.lifestyle.wellnessGuardrail?.enabled ?? false,
 							riskWindows: lp.wellnessGuardrail.riskWindows ?? nextConfig.lifestyle.wellnessGuardrail?.riskWindows,
 							replacementProtocol: lp.wellnessGuardrail.replacementProtocol ?? nextConfig.lifestyle.wellnessGuardrail?.replacementProtocol,
+							wakeUpAnchorProtocol: lp.wellnessGuardrail.wakeUpAnchorProtocol ?? nextConfig.lifestyle.wellnessGuardrail?.wakeUpAnchorProtocol,
+							cravingReframeNote: lp.wellnessGuardrail.cravingReframeNote ?? nextConfig.lifestyle.wellnessGuardrail?.cravingReframeNote,
+							deviceFrictionRules: lp.wellnessGuardrail.deviceFrictionRules ?? nextConfig.lifestyle.wellnessGuardrail?.deviceFrictionRules,
 							targetWeeklyFreq: lp.wellnessGuardrail.targetWeeklyFreq ?? nextConfig.lifestyle.wellnessGuardrail?.targetWeeklyFreq,
 						},
 					}

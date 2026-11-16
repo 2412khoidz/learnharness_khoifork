@@ -146,7 +146,17 @@ export function PlannerPage() {
 	const [coachDraft, setCoachDraft] = useState("");
 	const [coachSending, setCoachSending] = useState(false);
 	const [capacityOpen, setCapacityOpen] = useState(false);
+	const [resetSecondsLeft, setResetSecondsLeft] = useState(0);
+	const resetTimerActive = resetSecondsLeft > 0;
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (!resetTimerActive) return;
+		const id = window.setInterval(() => {
+			setResetSecondsLeft((cur) => (cur <= 1 ? 0 : cur - 1));
+		}, 1000);
+		return () => window.clearInterval(id);
+	}, [resetTimerActive]);
 
 	const load = useCallback(async () => {
 		try {
@@ -509,6 +519,65 @@ export function PlannerPage() {
 											))}
 										</span>
 									</div>
+									<div className="mt-2 flex flex-wrap items-center gap-1.5 border-t pt-2 text-[11px]">
+										<button
+											type="button"
+											onClick={() => void checkIn({ date: snap.plan.date, foodComaHitToday: !todayLog?.foodComaHitToday })}
+											className={cn(
+												"rounded-md border px-2 py-0.5 transition-colors",
+												todayLog?.foodComaHitToday ? "border-warning/40 bg-warning/10 text-warning" : "text-muted-foreground hover:bg-accent",
+											)}
+											title="Log post-dinner drowsiness so AI Coach softens 20:00–21:15 load"
+										>
+											{todayLog?.foodComaHitToday ? "✓ Evening Dip Logged" : "Post-Meal Dip"}
+										</button>
+										<button
+											type="button"
+											onClick={() => setResetSecondsLeft((cur) => (cur > 0 ? 0 : 600))}
+											data-testid="planner-reset-timer-btn"
+											className={cn(
+												"rounded-md border px-2 py-0.5 font-medium tabular-nums transition-colors",
+												resetSecondsLeft > 0 ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent",
+											)}
+											title="Start a quiet 10-minute active reset / urge-surfing timer"
+										>
+											{resetSecondsLeft > 0
+												? `Reset ${Math.floor(resetSecondsLeft / 60)}:${String(resetSecondsLeft % 60).padStart(2, "0")} · Stop`
+												: "10m Active Reset"}
+										</button>
+										<button
+											type="button"
+											onClick={() => {
+												setResetSecondsLeft(0);
+												void checkIn({ date: snap.plan.date, incrementUrgesSurfed: true });
+											}}
+											data-testid="planner-wave-surfed-btn"
+											className={cn(
+												"rounded-md border px-2 py-0.5 transition-colors",
+												(todayLog?.urgesSurfed ?? 0) > 0
+													? "border-success/40 bg-success/10 text-success"
+													: "text-muted-foreground hover:bg-accent",
+											)}
+											title="Record riding out an impulse or drowsiness wave without giving in"
+										>
+											Wave Surfed ✓{(todayLog?.urgesSurfed ?? 0) > 0 ? ` (${todayLog?.urgesSurfed})` : ""}
+										</button>
+									</div>
+									{resetSecondsLeft > 0 && (
+										<div className="mt-2 rounded-lg border border-primary/30 bg-primary/5 p-2 text-[11px] leading-relaxed text-foreground">
+											<div className="font-medium text-primary">10m Transition &amp; Impulse Reset Active</div>
+											<div className="mt-0.5 text-muted-foreground">
+												{snap.config.lifestyle.wellnessGuardrail?.wakeUpAnchorProtocol ||
+													snap.config.lifestyle.wellnessGuardrail?.replacementProtocol ||
+													"Feet on floor, drink cold water, leave bed/screen for 5–10m until prefrontal control resets."}
+											</div>
+											{snap.config.lifestyle.wellnessGuardrail?.cravingReframeNote && (
+												<div className="mt-1 italic text-foreground">
+													&ldquo;{snap.config.lifestyle.wellnessGuardrail.cravingReframeNote}&rdquo;
+												</div>
+											)}
+										</div>
+									)}
 								</div>
 
 								<div className="rounded-xl border bg-card p-3.5">
@@ -3061,6 +3130,7 @@ function LifestyleTab({
 				gameCutoffBeforeBedMin?: number;
 				windDownBufferMin?: number;
 				allowMiddayRecoveryNap?: boolean;
+				postDinnerComaProtection?: boolean;
 				rationale?: string;
 				tips?: string[];
 				modelLabel?: string;
@@ -3077,6 +3147,9 @@ function LifestyleTab({
 					...prev.sleep,
 					...(typeof data.windDownBufferMin === "number" ? { windDownBufferMin: data.windDownBufferMin } : {}),
 					...(typeof data.allowMiddayRecoveryNap === "boolean" ? { allowMiddayRecoveryNap: data.allowMiddayRecoveryNap } : {}),
+					...(typeof data.postDinnerComaProtection === "boolean"
+						? { postDinnerComaProtection: data.postDinnerComaProtection }
+						: {}),
 				},
 			}));
 			if (data.rationale) {
@@ -3097,8 +3170,11 @@ function LifestyleTab({
 		enabled: false,
 		currentWeeklyFreq: 4,
 		targetWeeklyFreq: 1,
-		riskWindows: ["late_night", "post_stress"],
+		riskWindows: ["post_nap_wake", "early_morning_wake", "late_night", "post_stress"],
 		replacementProtocol: "10m walk, pushups/water, offline book, phone outside bed",
+		wakeUpAnchorProtocol: "Feet on floor <60s, cold water on face, step out of bedroom",
+		cravingReframeNote: "Sleep-inertia wave peaks for 10–15m; prefrontal braking recovers as soon as I stand & walk.",
+		deviceFrictionRules: ["No phone/laptop in bed", "Charge phone across room"],
 	};
 
 	const toggleRiskWindow = (win: string) => {
@@ -3107,6 +3183,15 @@ function LifestyleTab({
 		setDraft({
 			...draft,
 			wellnessGuardrail: { ...guardrail, enabled: true, riskWindows: nextList },
+		});
+	};
+
+	const toggleFrictionRule = (rule: string) => {
+		const prevList = guardrail.deviceFrictionRules ?? [];
+		const nextList = prevList.includes(rule) ? prevList.filter((r) => r !== rule) : [...prevList, rule];
+		setDraft({
+			...draft,
+			wellnessGuardrail: { ...guardrail, enabled: true, deviceFrictionRules: nextList },
 		});
 	};
 
@@ -3220,6 +3305,29 @@ function LifestyleTab({
 								/>
 								25m midday recovery nap
 							</label>
+							<label className="flex items-center gap-1.5 text-[11px] text-foreground">
+								<input
+									type="checkbox"
+									checked={Boolean(draft.sleep.postDinnerComaProtection)}
+									onChange={(e) =>
+										setDraft({ ...draft, sleep: { ...draft.sleep, postDinnerComaProtection: e.target.checked } })
+									}
+								/>
+								Post-dinner dip shield (20–21h)
+							</label>
+							{draft.sleep.postDinnerComaProtection && (
+								<div className="mt-1 flex items-center gap-1.5">
+									<span className="text-[10px] text-muted-foreground">Dip starts:</span>
+									<input
+										type="time"
+										value={draft.sleep.eveningDrowsyStart ?? "20:00"}
+										onChange={(e) =>
+											setDraft({ ...draft, sleep: { ...draft.sleep, eveningDrowsyStart: e.target.value } })
+										}
+										className="rounded border bg-background px-1.5 py-0.5 text-[11px]"
+									/>
+								</div>
+							)}
 						</div>
 					</div>
 				</div>
@@ -3471,6 +3579,9 @@ function LifestyleTab({
 										<div className="mb-1 text-[11px] text-muted-foreground">High-risk Trigger Windows:</div>
 										<div className="flex flex-wrap gap-1.5">
 											{[
+												{ id: "post_nap_wake", label: "Right after midday nap" },
+												{ id: "early_morning_wake", label: "Early morning wake" },
+												{ id: "post_dinner_slump", label: "Evening food coma" },
 												{ id: "late_night", label: "Late night" },
 												{ id: "post_stress", label: "After tough study" },
 												{ id: "idle_afternoon", label: "Idle afternoon" },
@@ -3494,6 +3605,21 @@ function LifestyleTab({
 										</div>
 									</div>
 									<div>
+										<label className="mb-0.5 block text-[11px] text-muted-foreground">Wake / Post-Nap &lt;60s Anchor</label>
+										<input
+											type="text"
+											value={guardrail.wakeUpAnchorProtocol ?? ""}
+											onChange={(e) =>
+												setDraft({
+													...draft,
+													wellnessGuardrail: { ...guardrail, wakeUpAnchorProtocol: e.target.value },
+												})
+											}
+											placeholder="e.g. Feet on floor <60s, cold water on face, leave bed before phone..."
+											className="w-full rounded border bg-background px-2 py-1"
+										/>
+									</div>
+									<div>
 										<label className="mb-0.5 block text-[11px] text-muted-foreground">Replacement Reset Protocol</label>
 										<input
 											type="text"
@@ -3507,6 +3633,60 @@ function LifestyleTab({
 											placeholder="e.g. 10m walk, pushups + cold water, offline book..."
 											className="w-full rounded border bg-background px-2 py-1"
 										/>
+									</div>
+									<div>
+										<label className="mb-0.5 block text-[11px] text-muted-foreground">Private Grounding Cue (for 10m Reset Timer)</label>
+										<input
+											type="text"
+											value={guardrail.cravingReframeNote ?? ""}
+											onChange={(e) =>
+												setDraft({
+													...draft,
+													wellnessGuardrail: { ...guardrail, cravingReframeNote: e.target.value },
+												})
+											}
+											placeholder="e.g. Sleep-inertia wave fades in 10–15m once I stand & walk..."
+											className="w-full rounded border bg-background px-2 py-1"
+										/>
+									</div>
+									<div>
+										<div className="mb-1 text-[11px] text-muted-foreground">Environment Friction Rules:</div>
+										<div className="flex flex-wrap gap-1.5">
+											{[
+												"No phone/laptop in bed",
+												"Charge phone across room",
+												"10-min room-exit after nap",
+												"Seated / desk power-nap only",
+											].map((rule) => {
+												const active = (guardrail.deviceFrictionRules ?? []).includes(rule);
+												return (
+													<button
+														key={rule}
+														type="button"
+														onClick={() => toggleFrictionRule(rule)}
+														className={cn(
+															"rounded border px-2 py-0.5 text-[11px]",
+															active ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent",
+														)}
+													>
+														{rule}
+													</button>
+												);
+											})}
+										</div>
+									</div>
+									<div className="pt-1">
+										<button
+											type="button"
+											onClick={() =>
+												onOpenCoach(
+													"Tôi hay bị food coma buồn ngủ 8–9h tối sau ăn và đôi lúc có cơn libido bứt rứt / craving muốn xả ngay sau khi ngủ trưa dậy hoặc sáng sớm — hãy điều chỉnh lịch ăn/ngủ/học, thêm transition anchor và chiến lược vượt qua giúp tôi",
+												)
+											}
+											className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20"
+										>
+											Tailor Anti-Dip &amp; Impulse Plan with AI Coach →
+										</button>
 									</div>
 								</>
 							)}
