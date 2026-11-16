@@ -21,8 +21,8 @@
 
 **ChronoHarness** (`2412khoidz/learnharness_khoifork`) là nhánh mở rộng từ [**LearnHarness v0.6.1**](https://github.com/amosblomqvist/learnharness), giữ nguyên trọn vẹn phương pháp sư phạm *Measure → Plan → Teach → Practice* nhưng **cài đặt & chạy song song hoàn toàn độc lập** trên Windows và bổ sung loạt tính năng phục vụ ôn thi cường độ cao, theo dõi trí nhớ dài hạn bằng FSRS-6 và học liên thiết bị trên điện thoại.
 
-> **Bản phát hành Windows x64 mới nhất:** [`ChronoHarness-0.6.1-x64-setup.exe` (`chronoharness-0.6.1-r15`)](https://github.com/2412khoidz/learnharness_khoifork/releases/tag/chronoharness-0.6.1-r15)
-> - SHA256: `8a642340a85f9aaf61e086d75fff078be7398e1ba724a262b37cf08e5d620c2c`
+> **Bản phát hành Windows x64 mới nhất:** [`ChronoHarness-0.6.1-x64-setup.exe` (`chronoharness-0.6.1-r16`)](https://github.com/2412khoidz/learnharness_khoifork/releases/tag/chronoharness-0.6.1-r16)
+> - SHA256: `aad58c0897661a7e148c0a72eaa11937212b909b3ade48040cf77ed5db3ec30c`
 
 ![LearnHarness teaching session](docs/assets/teaching-session.png)
 
@@ -157,7 +157,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
     4. **Conceptual Graph & Foundations (`Schema Theory`):** Weighted Readiness `%`, số nền tảng yếu (`weakFoundations`) và rủi ro tiền đề (`prereqRisk`).
     5. **Error Signature & Attention Load (`Reason's Error Taxonomy`):** Phân tách **Schema Gap %** (hổng kiến thức) vs **Working-Memory Slip %** (nhầm dấu/đọc sót) từ `/mistakes`.
     6. **Circadian Stability & SRL Endurance (`Borbély Two-Process & EWMA`):** Sản lượng bền vững (`Sustainable Output`), Adherence `%`, thời lượng ngủ TB, `Circadian Drift`, tỷ lệ tỉnh sớm ngoài ý muốn.
-    - Nút **`Calibrate (Lực học · 0t)`** trong form Milestone tự tính lại **Est. Workload** theo đúng tốc độ cá nhân; trong modal **`Lực học`** có thêm **`Apply Calibration to Workload`**, **`AI Deep Diagnosis`** và **`Discuss in Coach Chat`**.
+    - Nút **`Calibrate (Lực học · 0t)`** trong form Milestone tự tính lại **Est. Workload** theo đúng tốc độ cá nhân; trong modal **`Lực học`** có thêm **`Apply Calibration to Workload`**, **`AI Deep Diagnosis`**, **`Discuss in Coach Chat`**, và bộ phân tích tự động đọc cả kết quả Practice (`conclude`), Quiz/Probe có độ tự tin lẫn lượt `Explain`/`Recall` đồng bộ về đúng cụm môn học (kể cả khi tên phiên viết tắt hoặc khác tên cụm trên Graph).
   - **Sửa trực tiếp lịch hôm nay (`Customize Schedule & Routine`):** Có thanh **`Adjust with AI Coach (Conversational)`** ngay trên đầu kèm form sửa tay `Wake today`, `Sleep tonight`, 3 bữa ăn riêng hôm nay, thêm/sửa/xóa từng block và **`Reset Auto`**.
 - **Tab `24h Journal & Audit` (Nhật ký 24h theo giờ & Đối chiếu Plan vs Actual):**
   - Ghi lại thực tế 24h theo khung giờ + việc vừa làm (VD: `08:30-11:00 Giải 3 bài Giải tích`; lưu lịch sử tới **365 ngày** có tìm kiếm), chấm **`Adherence %`** bằng **`Local · 0 tokens`** hoặc **`AI Auditor`**, phân tích điểm mạnh / thời gian xao nhãng và tự học ngưỡng sức bền (**EWMA Realism Factor**) cho các ngày sau.
