@@ -59,6 +59,10 @@ const assessmentSchema = Type.Object({
 
 type Assessment = Omit<RecallScanResult, "draft" | "sessionTitle">;
 const NO_ASSESSMENT = "The model did not submit recall assessments.";
+// The Google SDK reports a truncated streamed JSON response with this exact
+// error. Treat it like a malformed batch, not like an authentication or
+// network failure; a smaller batch may fit while preserving saved progress.
+const INCOMPLETE_JSON = "Incomplete JSON segment at the end";
 
 async function assess(batch: ReturnType<typeof candidates>, engine: PiEngine, signal: AbortSignal, onUsage?: (usage: { input: number; output: number; cacheRead: number; cacheWrite: number }) => void): Promise<Assessment[]> {
 	const ids = new Set(batch.map((c) => c.draft.id));
@@ -108,7 +112,7 @@ export function startRecallScan(): RecallScanState {
 					// A model may fail to submit a valid result for a large batch.
 					// Split only that failure, not provider/auth/network errors, and
 					// stop at one answer so a bad response cannot retry forever.
-					if (controller.signal.aborted || !(error instanceof Error) || error.message !== NO_ASSESSMENT || batch.length <= 1) throw error;
+					if (controller.signal.aborted || !(error instanceof Error) || ![NO_ASSESSMENT, INCOMPLETE_JSON].includes(error.message) || batch.length <= 1) throw error;
 					const midpoint = Math.floor(batch.length / 2);
 					await assessAndSave(batch.slice(0, midpoint));
 					await assessAndSave(batch.slice(midpoint));

@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, it } from "node:test";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
 import type { PiEngine } from "../src/agent/models.ts";
-import { chatWithPlannerCoachServer, patchPlannerConfig, readPlannerSnapshot, undoPlannerCoachChangeServer } from "../src/server/planner.ts";
+import { chatWithPlannerCoachServer, patchPlannerConfig, readPlannerConfig, readPlannerSnapshot, savePlannerConfig, undoPlannerCoachChangeServer } from "../src/server/planner.ts";
 import { writeExamPrepConfig, readExamPrepConfig } from "../src/server/exam-prep.ts";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-exam-calendar-"));
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -29,6 +29,42 @@ it("stores undated or incomplete exams separately; only complete times block the
  assert.ok(snap.plan.blocks.some((block) => block.title === "Exam" && block.startTime === "15:00" && block.endTime === "17:00"));
  assert.ok(!snap.plan.blocks.some((block) => block.title === "Start only"));
  assert.ok(snap.plan.blocks.filter((block) => block.type === "study").every((block) => block.endMin <= 900 || block.startMin >= 1020));
+});
+it("preserves unrelated saved plans and only cuts study that conflicts with a changed exam", () => {
+ const f = fixture("preserve-plan"), future = "2026-11-20";
+ const oldExam = { id: "old", title: "Existing exam", date: future, startTime: "17:00", endTime: "18:00" };
+ patchPlannerConfig({ examTimetable: [oldExam] }, f);
+ const base = readPlannerSnapshot({ ...f, date: future }).plan;
+ const saved = readPlannerConfig(f.plannerFile);
+ saved.plans[future] = { ...base, engineUsed: "llm", coachSummary: "A saved tailored plan", blocks: [{ id: "study", date: future, startTime: "14:00", endTime: "16:00", startMin: 840, endMin: 960, durationMin: 120, type: "study", title: "Practice", subject: "Math" }, ...base.blocks.filter((block) => block.id === "blk_exam_old")], quotas: [{ id: "math", subject: "Math", targetMin: 120, urgencyScore: 50, checklist: [{ id: "keep", text: "Keep this checklist" }] }], plannedStudyHours: 2 };
+ savePlannerConfig(saved, f.plannerFile);
+ const before = readPlannerConfig(f.plannerFile).plans[future];
+ patchPlannerConfig({ examTimetable: [oldExam, { id: "undated", title: "Other exam" }] }, f);
+ assert.deepEqual(readPlannerConfig(f.plannerFile).plans[future], before);
+ const changed = patchPlannerConfig({ examTimetable: [oldExam, { id: "new", title: "New exam", date: future, startTime: "14:30", endTime: "15:00" }] }, f);
+ const plan = readPlannerConfig(f.plannerFile).plans[future]!;
+ assert.deepEqual(plan.blocks.filter((block) => block.type === "study").map((block) => [block.startTime, block.endTime]), [["14:00", "14:30"], ["15:00", "16:00"]]);
+ assert.equal(plan.engineUsed, "llm");
+ assert.equal(plan.quotas[0]?.targetMin, 90);
+ assert.equal(plan.quotas[0]?.checklist[0]?.text, "Keep this checklist");
+ assert.match(changed.examAdjustmentNotice ?? "", /2026-11-20/);
+});
+it("Coach adjusts only the affected saved day for an exam and Undo restores it", async () => {
+ const f = fixture("coach-preserve-plan"), future = "2026-11-21";
+ const base = readPlannerSnapshot({ ...f, date: future }).plan;
+ const saved = readPlannerConfig(f.plannerFile);
+ saved.plans[future] = { ...base, engineUsed: "llm", coachSummary: "Tailored", blocks: [{ id: "study", date: future, startTime: "14:00", endTime: "16:00", startMin: 840, endMin: 960, durationMin: 120, type: "study", title: "Practice", subject: "Math" }], quotas: [{ id: "math", subject: "Math", targetMin: 120, urgencyScore: 50, checklist: [] }], plannedStudyHours: 2 };
+ savePlannerConfig(saved, f.plannerFile);
+ const before = readPlannerConfig(f.plannerFile).plans[future];
+ const todayBefore = readPlannerSnapshot(f).plan;
+ const result = await chatWithPlannerCoachServer({ ...f, message: "Thêm lịch thi Math 2026-11-21 14:30–15:00", engineOverride: engine({ reply: "Đã thêm", shouldApplyChanges: true, regenerateTodaySchedule: true, examTimetableOperations: [{ action: "add", title: "Math exam", date: future, startTime: "14:30", endTime: "15:00" }] }) });
+ const changed = result.snapshot.config.plans[future]!;
+ assert.deepEqual(result.snapshot.plan, todayBefore, "an unsolicited regeneration flag must not replace today's plan");
+ assert.deepEqual(changed.blocks.filter((block) => block.type === "study").map((block) => [block.startTime, block.endTime]), [["14:00", "14:30"], ["15:00", "16:00"]]);
+ assert.match(result.assistantMessage.text, /cắt phần phiên học/i);
+ const undone = undoPlannerCoachChangeServer({ ...f, messageId: result.assistantMessage.id });
+ assert.equal(undone.undone, true);
+ assert.deepEqual(undone.snapshot.config.plans[future], before);
 });
 it("Coach can add/update a separate exam and undo; raw dates without end remain incomplete", async () => {
  const f = fixture("coach"); let prompt = "";
@@ -92,8 +128,11 @@ it("passes a supported image to the Coach model", async () => {
 });
 it("keeps older attachment messages after more than 30 messages while only sending recent chat context", async () => {
  const f = fixture("long-history");
- const attachment = { id: "history-file", name: "exam.txt", mimeType: "text/plain", size: 42 };
- await chatWithPlannerCoachServer({ ...f, message: "Old context unique marker", attachments: [attachment], attachmentText: "Exam information", engineOverride: engine({ reply: "Viewed.", shouldApplyChanges: false }) });
+ const { prepareCoachAttachments } = await import("../src/server/coach-attachments.ts");
+ const prepared = await prepareCoachAttachments([new File(["Exam information"], "exam.txt")], dir);
+ prepared.save();
+ const attachment = prepared.attachments[0]!;
+ await chatWithPlannerCoachServer({ ...f, message: "Old context unique marker", attachments: [attachment], attachmentText: prepared.attachmentText, engineOverride: engine({ reply: "Viewed.", shouldApplyChanges: false }) });
  for (let i = 0; i < 16; i++) {
   await chatWithPlannerCoachServer({ ...f, message: `Message ${i}`, engineOverride: engine({ reply: `Reply ${i}`, shouldApplyChanges: false }) });
  }
@@ -105,6 +144,29 @@ it("keeps older attachment messages after more than 30 messages while only sendi
  assert.equal(messages[0]?.text, "Old context unique marker");
  assert.doesNotMatch(prompt, /Old context unique marker/);
  assert.match(prompt, /Message 15/);
+});
+it("reuses the latest saved document for a follow-up and reports a missing file", async () => {
+ const f = fixture("followup-file"), { prepareCoachAttachments } = await import("../src/server/coach-attachments.ts");
+ const first = await prepareCoachAttachments([new File(["OLD_DOCUMENT_CONTENT"], "old.txt")], dir); first.save();
+ await chatWithPlannerCoachServer({ ...f, message: "Xem tệp đầu", attachments: first.attachments, attachmentText: first.attachmentText, engineOverride: engine({ reply: "Đã xem.", shouldApplyChanges: false }) });
+ const latest = await prepareCoachAttachments([new File(["LATEST_EXAM_DOCUMENT"], "exam.txt")], dir); latest.save();
+ await chatWithPlannerCoachServer({ ...f, message: "Xem tệp mới", attachments: latest.attachments, attachmentText: latest.attachmentText, engineOverride: engine({ reply: "Đã xem.", shouldApplyChanges: false }) });
+ let context = "";
+ await chatWithPlannerCoachServer({ ...f, message: "Hãy lưu lịch trong tệp vừa rồi", engineOverride: engine({ reply: "Tôi đã xem.", shouldApplyChanges: false }, (value) => { context = value; }) });
+ assert.match(context, /LATEST_EXAM_DOCUMENT/); assert.doesNotMatch(context, /OLD_DOCUMENT_CONTENT/);
+ fs.unlinkSync(path.join(dir, "coach-attachments", latest.attachments[0]!.id));
+ await assert.rejects(chatWithPlannerCoachServer({ ...f, message: "Xem lại tệp", engineOverride: engine({ reply: "OK", shouldApplyChanges: false }) }), /đính kèm lại/i);
+});
+it("reuses the latest saved image with a vision-capable model", async () => {
+ const f = fixture("followup-image"), { prepareCoachAttachments } = await import("../src/server/coach-attachments.ts");
+ const png = createCanvas(8, 8).toBuffer("image/png");
+ const prepared = await prepareCoachAttachments([new File([new Uint8Array(png)], "exam.png", { type: "image/png" })], dir); prepared.save();
+ const first = engine({ reply: "Đã xem.", shouldApplyChanges: false }); first.model = { ...first.model, input: ["text", "image"] };
+ await chatWithPlannerCoachServer({ ...f, message: "Xem ảnh", attachments: prepared.attachments, images: prepared.images, engineOverride: first });
+ let context = "";
+ const next = engine({ reply: "Đã xem.", shouldApplyChanges: false }, (value) => { context = value; }); next.model = { ...next.model, input: ["text", "image"] };
+ await chatWithPlannerCoachServer({ ...f, message: "Lưu lịch trong ảnh vừa rồi", engineOverride: next });
+ assert.match(context, /\"type\":\"image\"/);
 });
 it("preserves the full exam interval outside wake and wind-down bounds", () => {
  const f = fixture("outside-awake");

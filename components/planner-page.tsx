@@ -87,6 +87,7 @@ import {
 interface PlannerSnapshot {
 	config: PlannerConfig;
 	plan: DailyStudyPlan;
+	examAdjustmentNotice?: string;
 	signals: PlannerPersonalSignals;
 	aiAvailability: {
 		coach: { available: boolean; modelLabel: string | null };
@@ -154,6 +155,7 @@ export function PlannerPage() {
 	const [resetSecondsLeft, setResetSecondsLeft] = useState(0);
 	const resetTimerActive = resetSecondsLeft > 0;
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
+	const [examAdjustmentNotice, setExamAdjustmentNotice] = useState<string | null>(null);
 
 	useEffect(() => {
 		if (!resetTimerActive) return;
@@ -202,6 +204,7 @@ export function PlannerPage() {
 	const saveExamTimetable = useCallback(async (examTimetable: PlannerConfig["examTimetable"]): Promise<boolean> => {
 		setBusy(true);
 		setErrorMsg(null);
+		setExamAdjustmentNotice(null);
 		try {
 			const res = await fetch("/api/planner", {
 				method: "PUT",
@@ -211,6 +214,7 @@ export function PlannerPage() {
 			const body = (await res.json()) as PlannerSnapshot & { error?: string };
 			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
 			setSnap(body);
+			setExamAdjustmentNotice(body.examAdjustmentNotice ?? null);
 			return true;
 		} catch (e) {
 			setErrorMsg(e instanceof Error ? e.message : "Failed to save exam timetable.");
@@ -458,6 +462,12 @@ export function PlannerPage() {
 			<div className="flex min-h-0 flex-1 overflow-hidden">
 				<div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
 					<div className={cn("mx-auto flex w-full flex-col gap-4 px-4 py-5 sm:px-6", coachOpen ? "max-w-4xl" : "max-w-5xl")}>
+					{examAdjustmentNotice && (
+						<div role="status" className="flex items-center justify-between rounded-xl border bg-muted/30 px-4 py-2.5 text-xs">
+							<span>{examAdjustmentNotice}</span>
+							<button type="button" onClick={() => setExamAdjustmentNotice(null)} className="underline">Dismiss</button>
+						</div>
+					)}
 					{errorMsg && (
 						<div role="alert" className="flex items-center justify-between rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-2.5 text-xs text-destructive">
 							<span>{errorMsg}</span>

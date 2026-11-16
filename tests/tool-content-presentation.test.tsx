@@ -21,7 +21,7 @@ const brokenB = b.replace(String.raw`\\r`, String.raw`\r`);
 const doubled = String.raw`$\\nabla f$`;
 const input = { question: a, options: [{ label: a, value: "a" }, { label: b, value: "b" }], correctAnswer: "a", explanation: a };
 const dom = (html: string) => parseHTML(`<html><body>${html}</body></html>`).document;
-const render = (text: string, recovered = true) => renderToStaticMarkup(
+const render = (text: React.ReactNode, recovered = true) => renderToStaticMarkup(
 	recovered ? <ToolContentResponse mode="static">{text}</ToolContentResponse> : <MessageResponse mode="static">{text}</MessageResponse>);
 const tex = (html: string) => [...dom(html).querySelectorAll('annotation[encoding="application/x-tex"]')].map(n => n.textContent);
 
@@ -74,6 +74,14 @@ test("mixed-escaped environment markers retain existing recovery rather than tre
 		assert.doesNotMatch(recovered, /\\\\end\{/);
 		assert.equal(dom(render(fixture.raw)).querySelectorAll(".katex-error").length, 0);
 	}
+});
+
+test("array child markdown math still renders as KaTeX instead of blank plain text", () => {
+	const html = renderToStaticMarkup(
+		<ToolContentResponse mode="static">{['If $f(x)=x^2$, then ', '$f(3)=9$.']}</ToolContentResponse>
+	);
+	assert.ok(html.includes("katex"), "array-rendered markdown should keep math parsing");
+	assert.match(html, /f\(x\)=x\^2|katex/);
 });
 
 test("presentation-equivalent labels cannot make a source-invalid correctAnswer gradeable", () => {

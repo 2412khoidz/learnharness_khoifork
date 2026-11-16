@@ -171,3 +171,28 @@ it("does not split or retry a provider error", async () => {
 	assert.equal(scan.recallScanStatus().error, "Synthetic provider failure");
 	assert.equal(scan.recallScanStatus().results.length, before);
 });
+
+it("splits an incomplete streamed JSON batch and resumes without duplicating progress", async () => {
+	const { chatStore } = await import("../src/store/chats.ts");
+	const scan = await import("../src/server/recall-scan.ts");
+	const before = scan.recallScanStatus();
+	const seen = new Set(before.results.map((result) => result.id));
+	const pending = chatStore.listChats().flatMap((chat) => {
+		const record = chatStore.getChat(chat.id);
+		return record ? collectRecallCandidates(record.id, record.messages).map((candidate) => candidate.draft.id) : [];
+	}).filter((id) => !seen.has(id));
+	assert.equal(pending.length, 2);
+	const faux = createFauxCore({ tokenSize: { min: 64, max: 64 } });
+	faux.setResponses([
+		fauxAssistantMessage("", { stopReason: "error", errorMessage: "Incomplete JSON segment at the end" }),
+		submit([assessment(pending[0]!, "partial")]),
+		submit([assessment(pending[1]!, "wrong")]),
+	]);
+	scan.recallScanEngineOverride.current = { model: faux.getModel(), streamFn: faux.streamSimple };
+	scan.startRecallScan();
+	await until(() => scan.recallScanStatus().status !== "running");
+	const result = scan.recallScanStatus();
+	assert.equal(result.status, "complete");
+	assert.equal(result.results.length, before.results.length + 2);
+	assert.equal(new Set(result.results.map((item) => item.id)).size, result.results.length);
+});

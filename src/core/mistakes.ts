@@ -7,7 +7,7 @@
 
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import type { LhMessage } from "./native-messages.ts";
-import { PRACTICE_CONCLUDE_TOOL, problemInputForConclude } from "./native-messages.ts";
+import { PRACTICE_CONCLUDE_TOOL, practiceProblemForCall, problemInputForConclude } from "./native-messages.ts";
 import type { QuestionAnswerData } from "./question-core.ts";
 
 // ─── taxonomy ────────────────────────────────────────────────────────────────
@@ -161,6 +161,47 @@ const OUTCOME_TEXT: Record<string, string> = {
 	movedOn: "Moved on without solving",
 	surrendered: "Gave up",
 };
+
+function practiceThinkingForProblemCall(messages: readonly LhMessage[], problemCallId: string): { text?: string; hasImages: boolean } {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i]!;
+		if ((m as { role?: string }).role !== "custom") continue;
+		const marker = m as { customType?: string; content?: string; details?: { problemCallId?: unknown; text?: unknown; images?: unknown } };
+		if (marker.customType !== "practice-thinking") continue;
+		const details = marker.details ?? {};
+		if (details.problemCallId !== problemCallId) continue;
+		const fromDetails = typeof details.text === "string" ? details.text.trim() : "";
+		const hasImages = Array.isArray(details.images) && details.images.length > 0;
+		if (fromDetails) return { text: fromDetails, hasImages };
+		const fromContent = typeof marker.content === "string" ? marker.content.replace(/^Your thinking:\s*\r?\n?/i, "").trim() : "";
+		if (fromContent) return { text: fromContent, hasImages };
+		if (hasImages) return { hasImages: true };
+	}
+	return { hasImages: false };
+}
+
+function problemCallIdForConclude(messages: readonly LhMessage[], concludeCallId: string): string | undefined {
+	const concludeIndex = messages.findIndex((m) => (m as { role?: string }).role === "assistant" && Array.isArray((m as { content?: unknown }).content) && (m as { content: Array<{ type?: string; id?: string; name?: string }> }).content.some((block) => block.type === "toolCall" && block.id === concludeCallId));
+	if (concludeIndex < 0) return undefined;
+	const clean = new Set<string>();
+	for (const m of messages) {
+		if ((m as { role?: string }).role !== "toolResult") continue;
+		const result = m as ToolResultMessage;
+		if (!result.isError) clean.add(result.toolCallId);
+	}
+	for (let i = concludeIndex; i >= 0; i--) {
+		const message = messages[i]!;
+		if ((message as { role?: string }).role !== "assistant") continue;
+		const assistant = message as { content?: Array<{ type?: string; id?: string; name?: string }> };
+		for (let bi = (assistant.content?.length ?? 0) - 1; bi >= 0; bi--) {
+			const block = assistant.content?.[bi];
+			if (!block || block.type !== "toolCall" || !clean.has(block.id ?? "") || block.name === PRACTICE_CONCLUDE_TOOL) continue;
+			const occurrence = { messageId: message.id, contentIndex: bi, toolCallId: block.id!, toolName: block.name! };
+			if (practiceProblemForCall(messages, occurrence)) return block.id;
+		}
+	}
+	return undefined;
+}
 
 function parseFlagVerdict(raw: unknown): FlagMistakeVerdict | undefined {
 	return typeof raw === "string" && (FLAG_MISTAKE_VERDICTS as readonly string[]).includes(raw)
@@ -392,13 +433,18 @@ export function findMistakes(chatId: string, messages: readonly LhMessage[]): Mi
 			const problem = problemInputForConclude(messages, result.toolCallId);
 			const statement = typeof problem?.statement === "string" ? problem.statement.trim() : "";
 			if (!statement) continue;
+			const problemCallId = problemCallIdForConclude(messages, result.toolCallId);
+			const thinking = problemCallId ? practiceThinkingForProblemCall(messages, problemCallId) : { hasImages: false };
+			const userAnswer = thinking.text || (thinking.hasImages
+				? "Bài làm bằng ảnh — xem phiên gốc."
+				: "Không có văn bản bài làm — xem phiên gốc.");
 			pushDraft({
 				id: `${chatId}:${result.toolCallId}`,
 				chatId,
 				kind: "problem",
 				origin: result.toolName,
 				question: statement,
-				yourAnswer: OUTCOME_TEXT[outcome] ?? outcome,
+				yourAnswer: userAnswer,
 				correctAnswer: typeof problem?.modelSolution === "string" ? problem.modelSolution : "(not recorded)",
 				outcome,
 				...(typeof args?.verdict === "string" ? { verdict: args.verdict } : {}),
@@ -424,8 +470,23 @@ export function mergeMistakes(
 		known.add(d.id);
 		added.push({ ...d, sessionTitle: meta.title, sessionKind: meta.kind, sources: meta.sources, createdAt: meta.now, status: "pending" });
 	}
-	const refreshed = existing.map((r) => (r.chatId === meta.chatId ? { ...r, sessionTitle: meta.title, sessionKind: meta.kind, sources: meta.sources } : r));
+	const draftsById = new Map(drafts.map((draft) => [draft.id, draft]));
+	const refreshed = existing.map((record) => {
+		if (record.chatId !== meta.chatId) return record;
+		const restored = restorePracticeAnswer(record, draftsById.get(record.id));
+		return { ...restored, sessionTitle: meta.title, sessionKind: meta.kind, sources: meta.sources };
+	});
 	return { records: [...refreshed, ...added], added };
+}
+
+/** Repair only the old status-as-answer bug. Never replace a learner's own
+ * answer or alter its analysis, status, timestamps, or other metadata. */
+export function restorePracticeAnswer(record: MistakeRecord, draft: MistakeDraft | undefined): MistakeRecord {
+	if (record.kind !== "problem" || draft?.kind !== "problem" || draft.id !== record.id) return record;
+	if (typeof record.yourAnswer !== "string" || typeof draft.yourAnswer !== "string") return record;
+	if (!Object.values(OUTCOME_TEXT).includes(record.yourAnswer.trim())) return record;
+	if (!draft.yourAnswer.trim() || record.yourAnswer === draft.yourAnswer) return record;
+	return { ...record, yourAnswer: draft.yourAnswer };
 }
 
 // ─── the review tab ──────────────────────────────────────────────────────────

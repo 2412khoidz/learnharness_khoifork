@@ -933,6 +933,8 @@ export interface PlannerSnapshotResponse {
 	plan: DailyStudyPlan;
 	activeStatus: ActiveBlockStatus;
 	signals: PlannerPersonalSignals;
+	/** Set when saving an exam actually shortened or split planned study. */
+	examAdjustmentNotice?: string;
 	aiAvailability: {
 		coach: { available: boolean; modelLabel: string | null };
 		vision: { available: boolean; modelLabel: string | null };
@@ -1117,6 +1119,64 @@ export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: str
 	};
 }
 
+/** Update only saved days whose actual exam commitments changed. Do not
+ * discard an AI-tailored plan or its checklist just to add an unrelated exam. */
+function reconcileExamPlans(
+	config: PlannerConfig,
+	previous: readonly ExamTimetableEntry[],
+	now: number,
+): { plans: PlannerConfig["plans"]; notice?: string; changedDates: Set<string> } {
+	const today = localDateString(now);
+	const dates = new Set([...previous, ...config.examTimetable].flatMap((exam) => exam.date && exam.date >= today ? [exam.date] : []));
+	const complete = (entries: readonly ExamTimetableEntry[], date: string) => entries
+		.filter((exam) => exam.date === date && exam.startTime && exam.endTime)
+		.map((exam) => ({ id: exam.id, title: exam.title, startTime: exam.startTime!, endTime: exam.endTime! }))
+		.sort((a, b) => a.id.localeCompare(b.id));
+	const changedDates = new Set([...dates].filter((date) => JSON.stringify(complete(previous, date)) !== JSON.stringify(complete(config.examTimetable, date))));
+	const plans = { ...config.plans };
+	const adjustedDates: string[] = [];
+	for (const date of changedDates) {
+		const plan = plans[date];
+		if (!plan) continue;
+		const exams = complete(config.examTimetable, date).map((exam) => ({ ...exam, startMin: parseClockMin(exam.startTime)!, endMin: parseClockMin(exam.endTime)! }));
+		const clock = new Date(now);
+		const cutoff = date === today ? clock.getHours() * 60 + clock.getMinutes() : 0;
+		const completed = new Set(config.logs[date]?.completedBlockIds ?? []);
+		const lostBySubject = new Map<string, number>();
+		let adjusted = false;
+		const blocks = plan.blocks.filter((block) => !block.id.startsWith("blk_exam_")).flatMap((block) => {
+			if (block.type !== "study" || completed.has(block.id) || block.endMin <= cutoff) return [block];
+			let pieces = [{ startMin: block.startMin, endMin: block.endMin }];
+			for (const exam of exams) pieces = pieces.flatMap((piece) => {
+				const examStart = Math.max(exam.startMin, cutoff);
+				if (exam.endMin <= examStart || exam.endMin <= piece.startMin || examStart >= piece.endMin) return [piece];
+				return [
+					...(piece.startMin < examStart ? [{ startMin: piece.startMin, endMin: examStart }] : []),
+					...(exam.endMin < piece.endMin ? [{ startMin: exam.endMin, endMin: piece.endMin }] : []),
+				];
+			});
+			const remaining = pieces.reduce((sum, piece) => sum + piece.endMin - piece.startMin, 0);
+			if (remaining < block.durationMin) {
+				adjusted = true;
+				if (block.subject) lostBySubject.set(normalizeSubjectKey(block.subject), (lostBySubject.get(normalizeSubjectKey(block.subject)) ?? 0) + block.durationMin - remaining);
+			}
+			return pieces.map((piece, index) => ({ ...block, id: index ? `${block.id}_after_exam_${index}` : block.id, ...piece, startTime: formatClockMin(piece.startMin), endTime: formatClockMin(piece.endMin), durationMin: piece.endMin - piece.startMin }));
+		});
+		for (const exam of exams) blocks.push({ id: `blk_exam_${exam.id}`, date, startTime: exam.startTime, endTime: exam.endTime, startMin: exam.startMin, endMin: exam.endMin, durationMin: exam.endMin - exam.startMin, type: "fixed", title: exam.title, reason: "Exam" });
+		blocks.sort((a, b) => a.startMin - b.startMin);
+		const quotas = plan.quotas.map((quota) => ({ ...quota, targetMin: Math.max(0, quota.targetMin - (lostBySubject.get(normalizeSubjectKey(quota.subject)) ?? 0)) }));
+		const plannedStudyHours = Math.round(blocks.filter((block) => block.type === "study").reduce((sum, block) => sum + block.durationMin, 0) / 6) / 10;
+		plans[date] = {
+			...plan, blocks, quotas, plannedStudyHours,
+			...(adjusted ? { minDailyStudyHours: Math.min(plan.minDailyStudyHours, plannedStudyHours) } : {}),
+			...(adjusted ? { coachSummary: "Một số phiên học được rút ngắn do trùng giờ thi; xem lịch thực tế bên dưới." } : {}),
+			...(plan.weeklyForecast ? { weeklyForecast: plan.weeklyForecast.map((day) => day.date !== date ? day : { ...day, plannedHours: plannedStudyHours, ...(day.subjects ? { subjects: day.subjects.map((subject) => ({ ...subject, plannedMinutes: Math.max(0, subject.plannedMinutes - (lostBySubject.get(normalizeSubjectKey(subject.subject)) ?? 0)) })) } : {}) }) } : {}),
+		};
+		if (adjusted) adjustedDates.push(date);
+	}
+	return { plans, changedDates, ...(adjustedDates.length ? { notice: `Đã cắt phần phiên học trùng giờ thi vào ${adjustedDates.join(", ")}; các phần còn lại được giữ nguyên.` } : {}) };
+}
+
 export function patchPlannerConfig(
 	patch: PlannerPatch,
 	opts?: PlannerReadOptions & { chatsDir?: string },
@@ -1162,15 +1222,12 @@ export function patchPlannerConfig(
 		? syncExamPrepProfilesIntoConfig(next, signals, date)
 		: { config: next, changed: false };
 	const resolvedNext = synced.config;
-	if (patch.examTimetable !== undefined) {
-		const affectedDates = new Set([...current.examTimetable, ...resolvedNext.examTimetable].map((entry) => entry.date).filter((value): value is string => Boolean(value) && value! >= date));
-		resolvedNext.plans = Object.fromEntries(Object.entries(resolvedNext.plans).filter(([planDate]) => !affectedDates.has(planDate)));
-	}
+	const examChanges = patch.examTimetable !== undefined ? reconcileExamPlans(resolvedNext, current.examTimetable, now) : undefined;
+	if (examChanges) resolvedNext.plans = examChanges.plans;
 
 	const scheduleInputsChanged =
 		patch.intensity !== undefined ||
 		patch.fixedEvents !== undefined ||
-		(patch.examTimetable !== undefined && [...current.examTimetable, ...resolvedNext.examTimetable].some((entry) => entry.date === date)) ||
 		patch.milestones !== undefined ||
 		patch.lifestyle !== undefined ||
 		patch.dayOverrides !== undefined ||
@@ -1190,6 +1247,7 @@ export function patchPlannerConfig(
 	return {
 		config: saved,
 		plan: activePlan,
+		...(examChanges?.notice ? { examAdjustmentNotice: examChanges.notice } : {}),
 		activeStatus: resolveActiveBlockStatus(activePlan, saved.logs[date], now),
 		signals,
 		aiAvailability: getPlannerAiAvailability(),
@@ -3124,7 +3182,20 @@ export async function chatWithPlannerCoachServer(
 		throw new PlannerAiUnavailable("No model is configured for Coach Chat (open Settings -> Models).");
 	}
 
-	const preparedImages = await prepareSubmissionImages(opts.images, resolved.engine);
+	let requestImages = opts.images;
+	let attachmentText = opts.attachmentText ?? "";
+	if (!opts.attachments?.length && !opts.images?.length && !opts.attachmentText?.trim()) {
+		const latestAttachments = [...(current.coachChat ?? [])].reverse().find((message) => message.attachments?.length)?.attachments;
+		if (latestAttachments?.length) {
+			// The attachment helper also imports the material extractor from this
+			// module; defer the import to avoid a module-initialization cycle.
+			const { loadCoachAttachments } = await import("./coach-attachments.ts");
+			const loaded = await loadCoachAttachments(latestAttachments, path.dirname(filePath));
+			requestImages = loaded.images;
+			attachmentText = loaded.attachmentText;
+		}
+	}
+	const preparedImages = await prepareSubmissionImages(requestImages, resolved.engine);
 	const band = INTENSITY_STUDY_BOUNDS[current.intensity];
 	const existingOverride = current.dayOverrides?.[date];
 	const existingLog = current.logs[date];
@@ -3227,7 +3298,7 @@ OPERATING RULES:
 		role: resolved.role,
 		engine: resolved.engine,
 		systemPrompt,
-		promptText: `Student context:\n${JSON.stringify(coachContext)}\n\nStudent's new message:\n${userText}\n\nAttached documents:\n${opts.attachmentText ?? ""}`,
+		promptText: `Student context:\n${JSON.stringify(coachContext)}\n\nStudent's new message:\n${userText}\n\nAttached documents:\n${attachmentText}`,
 		images: preparedImages,
 		toolName: "submit_coach_response",
 		toolDescription: "Submit the conversational coaching reply and any structured schedule/routine/lifestyle edits.",
@@ -3272,8 +3343,11 @@ OPERATING RULES:
 			const existing = nextConfig.examTimetable.find((entry) => entry.id === op.id);
 			if (op.action === "delete") {
 				if (!existing || !allowDelete || (!isExplicitDeleteTarget(userText, existing.title, nextConfig.examTimetable.filter((entry) => entry.id !== existing.id).map((entry) => entry.title)) || nextConfig.examTimetable.filter((e) => normalizeSubjectKey(e.title) === normalizeSubjectKey(existing.title)).length !== 1)) { rejectedOperations.push("xóa lịch thi chưa được chỉ rõ"); continue; }
-				nextConfig = { ...nextConfig, examTimetable: nextConfig.examTimetable.filter((entry) => entry.id !== existing.id), plans: Object.fromEntries(Object.entries(nextConfig.plans).filter(([planDate]) => planDate !== existing.date || planDate < date)) };
-				patchLabels.push(`Đã xóa lịch thi ${existing.title}`); if (existing.date === date) expandedScheduleChange = true; continue;
+				const previousExams = nextConfig.examTimetable;
+				nextConfig = { ...nextConfig, examTimetable: previousExams.filter((entry) => entry.id !== existing.id) };
+				const examChanges = reconcileExamPlans(nextConfig, previousExams, now);
+				nextConfig = { ...nextConfig, plans: examChanges.plans };
+				patchLabels.push(`Đã xóa lịch thi ${existing.title}`); if (examChanges.notice) patchLabels.push(examChanges.notice); continue;
 			}
 			if (op.action === "update" && !existing) { rejectedOperations.push("lịch thi không tồn tại"); continue; }
 			if (op.action === "add" && nextConfig.examTimetable.length >= 500) { rejectedOperations.push("lịch thi đã đạt giới hạn"); continue; }
@@ -3283,9 +3357,11 @@ OPERATING RULES:
 			const valid = sanitizePlannerConfig({ examTimetable: [candidate] }).examTimetable[0];
 			if (!valid) { rejectedOperations.push("tên kỳ thi chưa hợp lệ"); continue; }
 			if (!existing && nextConfig.examTimetable.some((entry) => entry.title.toLocaleLowerCase() === valid.title.toLocaleLowerCase() && entry.date === valid.date && entry.startTime === valid.startTime)) { rejectedOperations.push(`lịch thi ${valid.title} đã tồn tại`); continue; }
-			const affectedDates = new Set([existing?.date, valid.date].filter((value): value is string => Boolean(value) && value! >= date));
-			nextConfig = { ...nextConfig, examTimetable: existing ? nextConfig.examTimetable.map((entry) => entry.id === valid.id ? valid : entry) : [...nextConfig.examTimetable, valid], plans: Object.fromEntries(Object.entries(nextConfig.plans).filter(([planDate]) => !affectedDates.has(planDate))) };
-			patchLabels.push(`Lịch thi ${valid.title} · ${valid.date ?? "Chưa có lịch"}`); if (affectedDates.has(date)) expandedScheduleChange = true;
+			const previousExams = nextConfig.examTimetable;
+			nextConfig = { ...nextConfig, examTimetable: existing ? previousExams.map((entry) => entry.id === valid.id ? valid : entry) : [...previousExams, valid] };
+			const examChanges = reconcileExamPlans(nextConfig, previousExams, now);
+			nextConfig = { ...nextConfig, plans: examChanges.plans };
+			patchLabels.push(`Lịch thi ${valid.title} · ${valid.date ?? "Chưa có lịch"}`); if (examChanges.notice) patchLabels.push(examChanges.notice);
 		}
 
 		for (const [index, op] of (payload.weeklyEventOperations ?? []).entries()) {
@@ -3477,9 +3553,15 @@ OPERATING RULES:
 			if (op.studyTargetHoursOverride !== undefined) patchLabels.push(`Target ${op.studyTargetHoursOverride}h`);
 		}
 
-		if (patchLabels.length > 0 || payload.regenerateTodaySchedule || payload.todayOverridePatch?.blocks !== undefined) {
+		// Adding an exam is not itself a request to discard and regenerate the
+		// day's tailored plan. Models sometimes set this flag along with an exam
+		// operation; only honor it here when the user also requested replanning.
+		const examOnly = Boolean(payload.examTimetableOperations?.length) && !payload.todayOverridePatch && !payload.lifestylePatch && !payload.weeklyEventOperations?.length && !payload.milestoneOperations?.length;
+		const explicitlyRequestedReplan = /\b(?:replan|reschedule|regenerate)\b|(?:xếp|lập|tính|sắp)\s+(?:lại\s+)?lịch|(?:điều chỉnh|sửa)\s+(?:lại\s+)?lịch\s+(?:học|hôm nay)/i.test(userText);
+		const regenerateToday = Boolean(payload.regenerateTodaySchedule && (!examOnly || explicitlyRequestedReplan));
+		if (patchLabels.length > 0 || regenerateToday || payload.todayOverridePatch?.blocks !== undefined) {
 			// A new automatic schedule must not silently reuse a previous tailored timeline.
-			if (payload.regenerateTodaySchedule && !payload.todayOverridePatch && nextConfig.dayOverrides?.[date]?.customBlocks) {
+			if (regenerateToday && !payload.todayOverridePatch && nextConfig.dayOverrides?.[date]?.customBlocks) {
 				nextConfig = {
 					...nextConfig,
 					dayOverrides: {
@@ -3493,7 +3575,7 @@ OPERATING RULES:
 				lastCoachUndo: undoSnapshot,
 			});
 			const freshSignals = buildPlannerPersonalSignals(nextConfig, { ...opts, date, now });
-			const isReplan = Boolean(payload.regenerateTodaySchedule || payload.todayOverridePatch || payload.lifestylePatch || expandedScheduleChange);
+			const isReplan = Boolean(regenerateToday || payload.todayOverridePatch || payload.lifestylePatch || expandedScheduleChange);
 			const proposedBlocks = payload.todayOverridePatch?.blocks;
 			const proposedCustom = proposedBlocks ? buildCustomBlocksFromCoach(proposedBlocks, date) : [];
 			let adjustedCustom = false;
@@ -3554,8 +3636,10 @@ OPERATING RULES:
 			if (isReplan) {
 				rebuiltPlan.coachSummary = clipPreservingLatex(coachReply, 340);
 				rebuiltPlan.modelUsed = resolved.modelLabel;
-				nextConfig = { ...nextConfig, plans: { ...nextConfig.plans, [date]: rebuiltPlan } };
 			}
+			// Persist an initially missing plan before recording the undo snapshot;
+			// otherwise the read after saving creates one and invalidates Undo.
+			if (isReplan || !nextConfig.plans[date]) nextConfig = { ...nextConfig, plans: { ...nextConfig.plans, [date]: rebuiltPlan } };
 			const summaryText = clippedOrRejected
 				? "Lịch đã được điều chỉnh theo thời gian còn lại; xem các khung đã áp dụng."
 				: expandedScheduleChange || (payload.journalOperations?.length ?? 0) > 0
@@ -3606,6 +3690,12 @@ OPERATING RULES:
 		...(appliedChange ? { appliedChange } : {}),
 	};
 
+	// A read-only Coach reply can take long enough for the learner to update
+	// check-ins, plans, or even the conversation in the meantime. Append the
+	// reply to the latest state instead of writing the stale request snapshot.
+	const latest = readPlannerConfig(filePath);
+	if (!payload.shouldApplyChanges) nextConfig = latest;
+	else nextConfig = { ...nextConfig, coachChat: latest.coachChat };
 	let saved: PlannerConfig;
 	try {
 		if (previousExam && pendingExam && JSON.stringify(coachExamState(previousExam)) !== JSON.stringify(coachExamState(pendingExam))) {

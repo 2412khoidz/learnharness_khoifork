@@ -7,11 +7,11 @@ import { extractPlannerMaterialFile } from "./planner.ts";
 
 export type CoachAttachment = { id: string; name: string; mimeType: string; size: number };
 const MAX_TOTAL = 25 * 1024 * 1024;
-const directory = () => path.join(PATHS.data, "coach-attachments");
+const directory = (dataDir = PATHS.data) => path.join(dataDir, "coach-attachments");
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Validate and extract before writing, so failed requests never leave partial attachments. */
-export async function prepareCoachAttachments(files: File[]): Promise<{ attachments: CoachAttachment[]; images: ImageContent[]; attachmentText: string; save: () => void; cleanup: () => void; cleanupIfUnreferenced: () => void }> {
+export async function prepareCoachAttachments(files: File[], dataDir = PATHS.data): Promise<{ attachments: CoachAttachment[]; images: ImageContent[]; attachmentText: string; save: () => void; cleanup: () => void; cleanupIfUnreferenced: () => void }> {
 	if (files.length > 5) throw new Error("Choose at most 5 attachments.");
 	if (files.reduce((n, file) => n + file.size, 0) > MAX_TOTAL) throw new Error("Attachments exceed the 25 MB total limit.");
 	const pending: Array<{ meta: CoachAttachment; bytes: Buffer }> = [];
@@ -36,13 +36,13 @@ export async function prepareCoachAttachments(files: File[]): Promise<{ attachme
 	const cleanup = () => { for (const dest of written) { try { fs.unlinkSync(dest); } catch { /* best effort */ } } };
 	return {
 		attachments: pending.map(({ meta }) => meta), images, attachmentText: texts.join("\n\n"),
-		save: () => { fs.mkdirSync(directory(), { recursive: true }); for (const item of pending) { const dest = path.join(directory(), item.meta.id); fs.writeFileSync(dest, item.bytes, { flag: "wx", mode: 0o600 }); written.push(dest); } },
+		save: () => { fs.mkdirSync(directory(dataDir), { recursive: true }); for (const item of pending) { const dest = path.join(directory(dataDir), item.meta.id); fs.writeFileSync(dest, item.bytes, { flag: "wx", mode: 0o600 }); written.push(dest); } },
 		cleanup,
 		cleanupIfUnreferenced: () => {
 			// A failure after the chat was committed must not remove files it now
 			// references. If the state cannot be read, preserve files conservatively.
 			try {
-				const config = JSON.parse(fs.readFileSync(path.join(PATHS.data, "planner.json"), "utf8")) as { coachChat?: Array<{ attachments?: Array<{ id?: string }> }> };
+				const config = JSON.parse(fs.readFileSync(path.join(dataDir, "planner.json"), "utf8")) as { coachChat?: Array<{ attachments?: Array<{ id?: string }> }> };
 				const ids = new Set((config.coachChat ?? []).flatMap((message) => (message.attachments ?? []).map((a) => a.id)));
 				if (!pending.some(({ meta }) => ids.has(meta.id))) cleanup();
 			} catch (error) {
@@ -52,7 +52,22 @@ export async function prepareCoachAttachments(files: File[]): Promise<{ attachme
 	};
 }
 
-export function readCoachAttachment(id: string): Buffer | null {
+export function readCoachAttachment(id: string, dataDir = PATHS.data): Buffer | null {
 	if (!idPattern.test(id)) return null;
-	try { return fs.readFileSync(path.join(directory(), id)); } catch { return null; }
+	try { return fs.readFileSync(path.join(directory(dataDir), id)); } catch { return null; }
+}
+
+/** Re-open the latest saved attachments without creating additional copies. */
+export async function loadCoachAttachments(attachments: readonly CoachAttachment[], dataDir = PATHS.data): Promise<{ images: ImageContent[]; attachmentText: string }> {
+	const files = attachments.map((attachment) => {
+		const bytes = readCoachAttachment(attachment.id, dataDir);
+		if (!bytes) throw new Error(`Không thể đọc tệp đã gửi trước đó: ${attachment.name}. Vui lòng đính kèm lại.`);
+		return new File([new Uint8Array(bytes)], attachment.name, { type: attachment.mimeType });
+	});
+	try {
+		const prepared = await prepareCoachAttachments(files, dataDir);
+		return { images: prepared.images, attachmentText: prepared.attachmentText };
+	} catch (error) {
+		throw new Error(`Không thể đọc tệp đã gửi trước đó. Vui lòng đính kèm lại. ${error instanceof Error ? error.message : ""}`.trim());
+	}
 }

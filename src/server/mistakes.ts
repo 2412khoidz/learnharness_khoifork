@@ -1,4 +1,4 @@
-import { findExplainMistakeByCallId, findMistakes, mergeMistakes, type MistakeDraft, type MistakeRecord } from "../core/mistakes.ts";
+import { findExplainMistakeByCallId, findMistakes, mergeMistakes, restorePracticeAnswer, type MistakeDraft, type MistakeRecord } from "../core/mistakes.ts";
 import type { PiEngine } from "../agent/models.ts";
 import { readMistakes, updateMistakes } from "../store/mistakes.ts";
 import { effectiveSettings, stores } from "./stores.ts";
@@ -92,7 +92,12 @@ function mergeSessionDrafts(
 	const stale = existing.some(
 		(r) => r.chatId === record.id && (r.sessionTitle !== record.title || r.sessionKind !== kind || r.sources.join("\n") !== sources.join("\n")),
 	);
-	if (!stale && drafts.every((d) => known.has(d.id))) return [];
+	const existingById = new Map(existing.map((record) => [record.id, record]));
+	const needsAnswerRecovery = drafts.some((draft) => {
+		const record = existingById.get(draft.id);
+		return record && restorePracticeAnswer(record, draft) !== record;
+	});
+	if (!stale && !needsAnswerRecovery && drafts.every((d) => known.has(d.id))) return [];
 	updateMistakes((records) => {
 		const merged = mergeMistakes(records, drafts, { chatId: record.id, title: record.title, kind, sources, now: new Date().toISOString() });
 		added = merged.added;

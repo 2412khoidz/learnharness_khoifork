@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, it } from "node:test";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
 import type { PiEngine } from "../src/agent/models.ts";
-import { chatWithPlannerCoachServer, checkInPlannerHabit, patchPlannerConfig, readPlannerSnapshot, undoPlannerCoachChangeServer } from "../src/server/planner.ts";
+import { chatWithPlannerCoachServer, checkInPlannerHabit, patchPlannerConfig, readPlannerConfig, readPlannerSnapshot, savePlannerConfig, undoPlannerCoachChangeServer } from "../src/server/planner.ts";
 import { readExamPrepConfig, writeExamPrepConfig } from "../src/server/exam-prep.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-coach-permissions-"));
@@ -62,6 +62,28 @@ it("does not claim a change happened when the model submitted none", async () =>
 	const result = await chatWithPlannerCoachServer({ ...files, message: "Sửa lịch giúp mình", engineOverride: engine({ reply: "Mình đã sửa lịch của bạn.", shouldApplyChanges: false }) });
 	assert.match(result.assistantMessage.text, /chưa áp dụng/i);
 	assert.equal(result.appliedChange, undefined);
+});
+
+it("preserves a check-in made while Coach answers a read-only question", async () => {
+	const files = fixture("read-only-race");
+	const model = engine({ reply: "Bạn có lịch học hôm nay.", shouldApplyChanges: false }, () => {
+		checkInPlannerHabit({ date, energyScore: 4 }, files);
+	});
+	const result = await chatWithPlannerCoachServer({ ...files, message: "Hôm nay có gì?", engineOverride: model });
+	assert.equal(result.snapshot.config.logs[date]?.energyScore, 4);
+	assert.equal(readPlannerSnapshot(files).config.logs[date]?.energyScore, 4);
+	assert.equal(result.assistantMessage.text, "Bạn có lịch học hôm nay.");
+});
+
+it("preserves another conversation message while applying an otherwise valid edit", async () => {
+	const files = fixture("chat-race");
+	const model = engine({ reply: "Đã sửa.", shouldApplyChanges: true, weeklyEventOperations: [{ action: "update", id: "wed", startTime: "07:00" }] }, () => {
+		const latest = readPlannerConfig(files.plannerFile);
+		savePlannerConfig({ ...latest, coachChat: [{ id: "concurrent", role: "user", text: "Tin nhắn khác", timestamp: new Date(now).toISOString() }] }, files.plannerFile);
+	});
+	const result = await chatWithPlannerCoachServer({ ...files, message: "Sửa ca sáng", engineOverride: model });
+	assert.equal(result.snapshot.config.fixedEvents.find((event) => event.id === "wed")?.startTime, "07:00");
+	assert.ok(result.snapshot.config.coachChat?.some((message) => message.id === "concurrent"));
 });
 
 it("updates a linked exam and the specifically requested historic journal, then undoes both", async () => {

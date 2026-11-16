@@ -76,6 +76,7 @@ const session: LhMessage[] = [
 	result("q7", "explain", { kind: "explain", questionText: "free recall", dontKnow: false, answers: [], answeredAt: "t" }), // not graded
 	call("p1", "problem", { statement: "Prove the sum is even.", modelSolution: "Pair them." }),
 	result("p1", "problem", null),
+	{ id: "m_p1_think", role: "custom", customType: "practice-thinking", content: "Your thinking:\nI checked parity by pairing terms and still couldn't finish the argument.", details: { problemCallId: "p1", text: "I checked parity by pairing terms and still couldn't finish the argument." }, timestamp: 1 } as unknown as LhMessage,
 	call("c1", "conclude", { outcome: "surrendered", verdict: "Never found the pairing.", missClass: "structural" }),
 	result("c1", "conclude", null),
 	call("p2", "problem", { statement: "Another.", modelSolution: "x" }),
@@ -111,9 +112,33 @@ describe("findMistakes", () => {
 		assert.equal(p.question, "Prove the sum is even.");
 		assert.equal(p.correctAnswer, "Pair them.");
 		assert.equal(p.outcome, "surrendered");
-		assert.equal(p.yourAnswer, "Gave up");
+		assert.equal(p.yourAnswer, "I checked parity by pairing terms and still couldn't finish the argument.");
 		assert.equal(p.verdict, "Never found the pairing.");
 		assert.equal(p.missClass, "structural");
+	});
+	it("keeps the learner's actual practice reasoning instead of the app verdict text", () => {
+		const practiceSession: LhMessage[] = [
+			call("p1", "problem", { statement: "Solve for x.", modelSolution: "x = 3" }),
+			result("p1", "problem", null),
+			{ id: "m_t1", role: "custom", customType: "practice-thinking", content: "Your thinking:\nI tried to isolate x and got stuck on the denominator.", details: { problemCallId: "p1", text: "I tried to isolate x and got stuck on the denominator." }, timestamp: 1 } as unknown as LhMessage,
+			call("c1", "conclude", { outcome: "solvedWithHints", verdict: "Good path, but needed the missing step.", rung: "R1", missClass: "execution", retest: false }),
+			result("c1", "conclude", null),
+		];
+		const draft = findMistakes("chat_practice", practiceSession)[0]!;
+		assert.equal(draft.outcome, "solvedWithHints");
+		assert.equal(draft.yourAnswer, "I tried to isolate x and got stuck on the denominator.");
+		assert.equal(draft.correctAnswer, "x = 3");
+	});
+	it("keeps image-only and missing-text Practice attempts visible", () => {
+		const imageSession: LhMessage[] = [
+			call("p", "problem", { statement: "Find x.", modelSolution: "x = 3" }),
+			result("p", "problem", null),
+			{ id: "img", role: "custom", customType: "practice-thinking", content: "Your thinking:\n", details: { problemCallId: "p", text: "", images: [{ type: "image", mimeType: "image/png", data: "eA==" }] }, timestamp: 1 } as unknown as LhMessage,
+			call("c", "conclude", { outcome: "solvedWithHints", verdict: "Needed a hint." }),
+			result("c", "conclude", null),
+		];
+		assert.equal(findMistakes("chat_image", imageSession)[0]?.yourAnswer, "Bài làm bằng ảnh — xem phiên gốc.");
+		assert.equal(findMistakes("chat_empty", imageSession.filter((message) => (message as { id?: string }).id !== "img"))[0]?.yourAnswer, "Không có văn bản bài làm — xem phiên gốc.");
 	});
 	it("picks up AI-flagged explain and recall checks (with or without explicit toolCallId) and skips unflagged ones", () => {
 		const freeSession: LhMessage[] = [
@@ -196,6 +221,18 @@ describe("mergeMistakes", () => {
 		const first = mergeMistakes([], findMistakes("chat1", session), META).records.map((r) => ({ ...r, status: "ready" as const }));
 		const next = mergeMistakes(first, [], { ...META, title: "Renamed" });
 		assert.ok(next.records.every((r) => r.status === "ready" && r.sessionTitle === "Renamed"));
+	});
+	it("restores only an old outcome label while preserving the saved analysis", () => {
+		const draft = findMistakes("chat1", session).find((item) => item.kind === "problem")!;
+		const original = mergeMistakes([], [draft], META).records[0]!;
+		const analysis = { errorType: "knowledge-gap" as const, topic: "Parity", whatYouDid: "a", correct: "b", rule: "c" };
+		const old = { ...original, yourAnswer: "Gave up", status: "ready" as const, analysis };
+		const fixed = mergeMistakes([old], [draft], META).records[0]!;
+		assert.equal(fixed.yourAnswer, draft.yourAnswer);
+		assert.deepEqual(fixed.analysis, analysis);
+		assert.equal(fixed.status, "ready");
+		const custom = { ...old, yourAnswer: "My own edited answer" };
+		assert.equal(mergeMistakes([custom], [draft], META).records[0]?.yourAnswer, custom.yourAnswer);
 	});
 });
 
