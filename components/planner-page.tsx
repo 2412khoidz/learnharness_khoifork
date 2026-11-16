@@ -4,12 +4,16 @@ import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "rea
 import Link from "next/link";
 import {
 	addDaysToDate,
+	buildMonthGridDates,
+	computeLocalPlannerPlan,
 	daysBetweenDates,
 	WEEKDAY_LABELS,
 	WEEKDAYS,
 	type CognitiveLoad,
 	type DailyHabitLog,
 	type DailyStudyPlan,
+	type DayOneOffEvent,
+	type DayOverride,
 	type FixedEventCategory,
 	type FixedWeeklyEvent,
 	type LifestyleConfig,
@@ -32,12 +36,17 @@ import {
 	ArrowUpRightIcon,
 	CalendarClockIcon,
 	CheckCircle2Icon,
+	ChevronLeftIcon,
+	ChevronRightIcon,
 	CircleIcon,
 	CpuIcon,
+	FileUpIcon,
 	FlameIcon,
 	HeartPulseIcon,
 	ImagePlusIcon,
+	Link2Icon,
 	MoonIcon,
+	PencilIcon,
 	PlusIcon,
 	RefreshCwIcon,
 	ScaleIcon,
@@ -74,6 +83,15 @@ const BLOCK_STYLE: Record<PlannedBlock["type"], string> = {
 	fixed: "border-l-4 border-l-muted-foreground/40 bg-muted/35",
 	sleep: "border-l-4 border-l-primary/50 bg-primary/5",
 };
+
+const MONTH_NAMES = [
+	"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const;
+
+function stripInlineLatex(text: string): string {
+	return text.replace(/\$+([^$]*)\$+/g, "$1").replace(/\s+/g, " ").trim();
+}
 
 function formatMinCompact(min: number): string {
 	const h = Math.floor(min / 60);
@@ -383,7 +401,7 @@ export function PlannerPage() {
 												? `${snap.signals.subjectSignals.reduce((a, s) => a + s.dueCount, 0)} FSRS cards due · ${snap.signals.subjectSignals.reduce((a, s) => a + s.weakCount, 0)} weak foundations tracked.`
 												: "Add exams, competitions, or weekly fixed events to tailor your study quotas."}
 											{snap.signals.mistakeHints?.recentRules[0]
-												? ` Top mistake rule: "${snap.signals.mistakeHints.recentRules[0]}"`
+												? ` Top mistake rule: "${stripInlineLatex(snap.signals.mistakeHints.recentRules[0])}"`
 												: ""}
 										</p>
 									)}
@@ -435,7 +453,7 @@ export function PlannerPage() {
 								<MilestonesTab
 									snap={snap}
 									busy={busy}
-									onSaveMilestones={(milestones) => patchPlanner({ milestones })}
+									onPatch={patchPlanner}
 									onError={setErrorMsg}
 								/>
 							)}
@@ -665,14 +683,15 @@ function TodayQuotasTab({
 function MilestonesTab({
 	snap,
 	busy,
-	onSaveMilestones,
+	onPatch,
 	onError,
 }: {
 	snap: PlannerSnapshot;
 	busy: boolean;
-	onSaveMilestones: (milestones: StudyMilestone[]) => Promise<void>;
+	onPatch: (patch: Partial<PlannerConfig>) => Promise<void>;
 	onError: (msg: string) => void;
 }) {
+	const [editingId, setEditingId] = useState<string | null>(null);
 	const [kind, setKind] = useState<MilestoneKind>("competition");
 	const [title, setTitle] = useState("");
 	const [subject, setSubject] = useState("");
@@ -683,18 +702,91 @@ function MilestonesTab({
 	const [notes, setNotes] = useState("");
 	const [topics, setTopics] = useState<SyllabusTopic[]>([]);
 	const [sourceSummary, setSourceSummary] = useState("");
+	const [examProfileId, setExamProfileId] = useState("");
+	const [clusterIds, setClusterIds] = useState<string[]>([]);
 	const [researching, setResearching] = useState(false);
+	const [extractingFile, setExtractingFile] = useState(false);
 
-	const runAiResearch = async (preferLocal = false) => {
-		const effectiveTitle = title.trim() || notes.split(/\r?\n/)[0]?.trim() || "";
-		if (!effectiveTitle) return onError("Enter an exam, competition, or project name (or syllabus outline) first.");
-		if (!title.trim()) setTitle(effectiveTitle.slice(0, 80));
+	// Interactive Google-Calendar-style Month / Year view & selected day inspector
+	const [calView, setCalView] = useState<"month" | "year">("month");
+	const [cursorYear, setCursorYear] = useState(() => Number(snap.plan.date.slice(0, 4)));
+	const [cursorMonth, setCursorMonth] = useState(() => Number(snap.plan.date.slice(5, 7)) - 1);
+	const [selectedDate, setSelectedDate] = useState(snap.plan.date);
+
+	const activeOverride: DayOverride | undefined = snap.config.dayOverrides?.[selectedDate];
+	const [ovStart, setOvStart] = useState("08:00");
+	const [ovEnd, setOvEnd] = useState("10:00");
+	const [ovTitle, setOvTitle] = useState("");
+	const [ovCat, setOvCat] = useState<FixedEventCategory>("other");
+	const [ovNoteDraft, setOvNoteDraft] = useState("");
+	const [ovHoursDraft, setOvHoursDraft] = useState("");
+
+	useEffect(() => {
+		const ov = snap.config.dayOverrides?.[selectedDate];
+		setOvNoteDraft(ov?.note ?? "");
+		setOvHoursDraft(ov?.studyTargetHoursOverride !== undefined ? String(ov.studyTargetHoursOverride) : "");
+	}, [selectedDate, snap.config.dayOverrides]);
+
+	const resetMilestoneForm = (targetDate?: string) => {
+		setEditingId(null);
+		setKind("competition");
+		setTitle("");
+		setSubject("");
+		setDueDate(targetDate ?? selectedDate);
+		setPriority(3);
+		setLoad("heavy");
+		setHours(20);
+		setNotes("");
+		setTopics([]);
+		setSourceSummary("");
+		setExamProfileId("");
+		setClusterIds([]);
+	};
+
+	const loadMilestoneForEdit = (m: StudyMilestone) => {
+		setEditingId(m.id);
+		setKind(m.kind);
+		setTitle(m.title);
+		setSubject(m.subject);
+		setDueDate(m.dueDate);
+		setPriority(m.priority);
+		setLoad(m.cognitiveLoad);
+		setHours(m.estimatedHours);
+		setNotes(m.notes ?? "");
+		setTopics(m.syllabusTopics.map((t) => ({ ...t })));
+		setSourceSummary(m.sourceSummary ?? "");
+		setExamProfileId(m.examProfileId ?? "");
+		setClusterIds([...m.clusterIds]);
+	};
+
+	const callResearchApi = async (opts: {
+		preferLocal?: boolean;
+		pullOnly?: boolean;
+		overrideClusters?: string[];
+		overrideExamProfileId?: string;
+		overrideTitle?: string;
+	}) => {
+		const cids = opts.overrideClusters ?? clusterIds;
+		const exId = opts.overrideExamProfileId ?? (examProfileId || undefined);
+		const effectiveTitle = (opts.overrideTitle ?? title).trim() || notes.split(/\r?\n/)[0]?.trim() || "";
+		if (!effectiveTitle && !opts.pullOnly && !exId && cids.length === 0) {
+			return onError("Enter an exam/competition title, paste syllabus notes, or link a Graph cluster/Exam profile first.");
+		}
 		setResearching(true);
 		try {
 			const res = await fetch("/api/planner/research-exam", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ title: effectiveTitle, kind, dueDate, materialsText: notes, preferLocal }),
+				body: JSON.stringify({
+					title: effectiveTitle,
+					kind,
+					dueDate,
+					materialsText: notes,
+					clusterIds: cids,
+					examProfileId: exId,
+					pullOnly: Boolean(opts.pullOnly),
+					preferLocal: Boolean(opts.preferLocal),
+				}),
 			});
 			const body = (await res.json()) as {
 				error?: string;
@@ -704,14 +796,25 @@ function MilestonesTab({
 				estimatedHours?: number;
 				syllabusTopics?: SyllabusTopic[];
 				sourceSummary?: string;
+				pulledContext?: string;
 			};
 			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-			if (body.subject) setSubject(body.subject);
-			if (body.cognitiveLoad) setLoad(body.cognitiveLoad);
-			if (body.priority) setPriority(body.priority);
-			if (body.estimatedHours) setHours(body.estimatedHours);
-			if (body.syllabusTopics) setTopics(body.syllabusTopics);
+			if (body.subject && !subject.trim()) setSubject(body.subject);
+			else if (!opts.pullOnly && body.subject) setSubject(body.subject);
+			if (body.cognitiveLoad && !opts.pullOnly) setLoad(body.cognitiveLoad);
+			if (body.priority && !opts.pullOnly) setPriority(body.priority);
+			if (body.estimatedHours && body.syllabusTopics && body.syllabusTopics.length > 0) {
+				setHours(body.estimatedHours);
+				setTopics(body.syllabusTopics);
+			}
 			if (body.sourceSummary) setSourceSummary(body.sourceSummary);
+			if (opts.pullOnly && body.pulledContext?.trim() && !notes.includes("[Session/Cluster:")) {
+				setNotes((prev) =>
+					prev.trim()
+						? `${prev.trim()}\n\n${body.pulledContext!.trim()}`
+						: body.pulledContext!.trim(),
+				);
+			}
 		} catch (e) {
 			onError(e instanceof Error ? e.message : "Syllabus research failed.");
 		} finally {
@@ -719,48 +822,79 @@ function MilestonesTab({
 		}
 	};
 
-	const onPickMaterialFile = (e: ChangeEvent<HTMLInputElement>) => {
+	const onSelectExamProfile = (id: string) => {
+		setExamProfileId(id);
+		if (!id) return;
+		const prof = snap.signals.examPrep.config.exams.find((x) => x.id === id);
+		if (!prof) return;
+		const scopeLabels = snap.signals.examPrep.availableScopes
+			.filter((s) => prof.clusterIds.includes(s.id))
+			.map((s) => s.label);
+		if (!title.trim() || !editingId) setTitle(prof.title);
+		if (!subject.trim() && scopeLabels[0]) setSubject(scopeLabels[0]);
+		if (prof.date) setDueDate(prof.date);
+		setClusterIds([...prof.clusterIds]);
+		if (prof.clusterIds.length > 0) {
+			void callResearchApi({
+				pullOnly: true,
+				overrideClusters: prof.clusterIds,
+				overrideExamProfileId: prof.id,
+				overrideTitle: prof.title,
+			});
+		}
+	};
+
+	const onPickMaterialFile = async (e: ChangeEvent<HTMLInputElement>) => {
 		const file = e.target.files?.[0];
+		e.target.value = "";
 		if (!file) return;
-		const reader = new FileReader();
-		reader.onload = () => {
-			if (typeof reader.result !== "string") return;
-			const content = reader.result.slice(0, 8000);
+		setExtractingFile(true);
+		try {
+			const form = new FormData();
+			form.append("file", file);
+			const res = await fetch("/api/planner/extract-material", { method: "POST", body: form });
+			const body = (await res.json()) as { error?: string; text?: string; notice?: string };
+			if (!res.ok || !body.text) throw new Error(body.error || `Could not extract ${file.name}`);
+
 			if (file.name.toLowerCase().endsWith(".ics")) {
-				const sumMatch = /^SUMMARY(?:;[^:]*)?:(.+)$/im.exec(content);
-				const dtMatch = /^DTSTART(?:;[^:]*)?:(\d{4})(\d{2})(\d{2})/im.exec(content);
+				const sumMatch = /^SUMMARY(?:;[^:]*)?:(.+)$/im.exec(body.text);
+				const dtMatch = /^DTSTART(?:;[^:]*)?:(\d{4})(\d{2})(\d{2})/im.exec(body.text);
 				if (sumMatch && !title.trim()) setTitle(sumMatch[1]!.trim().slice(0, 100));
 				if (dtMatch) setDueDate(`${dtMatch[1]}-${dtMatch[2]}-${dtMatch[3]}`);
 			}
-			setNotes((prev) => (prev.trim() ? `${prev.trim()}\n${content}` : content));
-		};
-		reader.readAsText(file);
-		e.target.value = "";
+			const header = `[File: ${file.name}${body.notice ? ` — ${body.notice}` : ""}]`;
+			setNotes((prev) => (prev.trim() ? `${prev.trim()}\n\n${header}\n${body.text}` : `${header}\n${body.text}`));
+		} catch (err) {
+			onError(err instanceof Error ? err.message : "Failed to extract material file.");
+		} finally {
+			setExtractingFile(false);
+		}
 	};
 
-	const addMilestone = async () => {
+	const saveMilestoneForm = async () => {
 		if (!title.trim()) return;
-		const next: StudyMilestone = {
-			id: `ms_${Date.now()}`,
+		const existing = editingId ? snap.config.milestones.find((m) => m.id === editingId) : undefined;
+		const record: StudyMilestone = {
+			id: existing?.id ?? (examProfileId ? `ep_${examProfileId}` : `ms_${Date.now()}`),
 			kind,
 			title: title.trim(),
 			subject: subject.trim() || title.trim(),
 			dueDate,
 			priority,
 			cognitiveLoad: load,
-			clusterIds: [],
+			clusterIds: [...clusterIds],
 			estimatedHours: Number(hours) || 10,
-			completedHours: 0,
+			completedHours: existing?.completedHours ?? 0,
 			syllabusTopics: topics,
 			notes: notes.trim(),
 			...(sourceSummary ? { sourceSummary } : {}),
+			...(examProfileId ? { examProfileId } : {}),
 		};
-		await onSaveMilestones([...snap.config.milestones, next]);
-		setTitle("");
-		setSubject("");
-		setNotes("");
-		setTopics([]);
-		setSourceSummary("");
+		const nextList = existing
+			? snap.config.milestones.map((m) => (m.id === existing.id ? record : m))
+			: [...snap.config.milestones.filter((m) => !examProfileId || m.examProfileId !== examProfileId), record];
+		await onPatch({ milestones: nextList });
+		resetMilestoneForm(dueDate);
 	};
 
 	const toggleTopicDone = async (msId: string, topicId: string) => {
@@ -772,7 +906,45 @@ function MilestonesTab({
 					syllabusTopics: m.syllabusTopics.map((t) => (t.id === topicId ? { ...t, done: !t.done } : t)),
 				},
 		);
-		await onSaveMilestones(next);
+		await onPatch({ milestones: next });
+	};
+
+	const saveDayOverride = async (dateStr: string, patch: Partial<DayOverride> | null) => {
+		const currentMap = { ...(snap.config.dayOverrides ?? {}) };
+		if (patch === null) {
+			delete currentMap[dateStr];
+		} else {
+			const merged: DayOverride = {
+				...(currentMap[dateStr] ?? { date: dateStr }),
+				...patch,
+				date: dateStr,
+			};
+			if (
+				!merged.skipFixedEvents &&
+				(!merged.extraBusyEvents || merged.extraBusyEvents.length === 0) &&
+				!merged.note?.trim() &&
+				merged.studyTargetHoursOverride === undefined
+			) {
+				delete currentMap[dateStr];
+			} else {
+				currentMap[dateStr] = merged;
+			}
+		}
+		await onPatch({ dayOverrides: currentMap });
+	};
+
+	const addDayEvent = async () => {
+		if (!ovTitle.trim()) return;
+		const nextEvent: DayOneOffEvent = {
+			id: `ev_${Date.now()}`,
+			startTime: ovStart,
+			endTime: ovEnd,
+			title: ovTitle.trim(),
+			category: ovCat,
+		};
+		const existing = activeOverride?.extraBusyEvents ?? [];
+		await saveDayOverride(selectedDate, { extraBusyEvents: [...existing, nextEvent] });
+		setOvTitle("");
 	};
 
 	const sorted = useMemo(
@@ -780,54 +952,372 @@ function MilestonesTab({
 		[snap.config.milestones],
 	);
 
-	// 28-day mini horizon calendar starting today
-	const horizonDays = useMemo(() => {
-		const byDate = new Map<string, StudyMilestone[]>();
+	const milestonesByDate = useMemo(() => {
+		const map = new Map<string, StudyMilestone[]>();
 		for (const m of sorted) {
-			const list = byDate.get(m.dueDate) ?? [];
+			const list = map.get(m.dueDate) ?? [];
 			list.push(m);
-			byDate.set(m.dueDate, list);
+			map.set(m.dueDate, list);
 		}
-		return Array.from({ length: 28 }, (_, i) => {
-			const date = addDaysToDate(snap.plan.date, i);
-			return { date, dayNum: date.slice(8), items: byDate.get(date) ?? [] };
-		});
-	}, [snap.plan.date, sorted]);
+		return map;
+	}, [sorted]);
+
+	const monthCells = useMemo(() => buildMonthGridDates(cursorYear, cursorMonth), [cursorYear, cursorMonth]);
+	const fixedWeekdaysWithClasses = useMemo(
+		() => new Set(snap.config.fixedEvents.map((e) => e.dayOfWeek)),
+		[snap.config.fixedEvents],
+	);
+
+	const selectedDayMilestones = milestonesByDate.get(selectedDate) ?? [];
+	const selectedDayPreview = useMemo(
+		() =>
+			computeLocalPlannerPlan(snap.config, {
+				...snap.signals,
+				date: selectedDate,
+			}),
+		[snap.config, snap.signals, selectedDate],
+	);
+
+	const selectDate = (dateStr: string) => {
+		setSelectedDate(dateStr);
+		if (!editingId) setDueDate(dateStr);
+		setCursorYear(Number(dateStr.slice(0, 4)));
+		setCursorMonth(Number(dateStr.slice(5, 7)) - 1);
+	};
+
+	const goPrev = () => {
+		if (calView === "year") {
+			setCursorYear((y) => y - 1);
+		} else if (cursorMonth === 0) {
+			setCursorYear((y) => y - 1);
+			setCursorMonth(11);
+		} else {
+			setCursorMonth((m) => m - 1);
+		}
+	};
+
+	const goNext = () => {
+		if (calView === "year") {
+			setCursorYear((y) => y + 1);
+		} else if (cursorMonth === 11) {
+			setCursorYear((y) => y + 1);
+			setCursorMonth(0);
+		} else {
+			setCursorMonth((m) => m + 1);
+		}
+	};
 
 	return (
 		<div className="grid gap-4 lg:grid-cols-12">
 			<div className="flex flex-col gap-3 lg:col-span-7">
-				{/* Compact 4-week milestone calendar strip */}
+				{/* Interactive Google-Calendar-style Month & Year Calendar */}
 				<div className="rounded-xl border bg-card p-3.5">
-					<div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
-						<span>Next 28 Days — Exam, Competition & Deadline Markers</span>
-						<span>Today: {snap.plan.date}</span>
-					</div>
-					<div className="grid grid-cols-7 gap-1 text-center text-[11px]">
-						{horizonDays.map((cell) => (
-							<div
-								key={cell.date}
-								className={cn(
-									"flex min-h-11 flex-col items-center justify-between rounded-md border p-1",
-									cell.date === snap.plan.date && "border-primary bg-primary/5",
-									cell.items.length > 0 && "border-warning/50 bg-warning/10",
-								)}
-								title={cell.items.map((x) => `${x.title} (${x.kind})`).join(", ")}
+					<div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+						<div className="flex items-center gap-1">
+							<button
+								type="button"
+								onClick={goPrev}
+								aria-label="Previous calendar period"
+								className="rounded-md border p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
 							>
-								<span className="tabular-nums text-[10px] text-muted-foreground">{cell.dayNum}</span>
-								{cell.items.length > 0 ? (
-									<span className="w-full truncate rounded bg-primary/15 px-1 text-[9px] font-medium text-foreground">
-										{cell.items[0]!.title}
-									</span>
-								) : (
-									<span className="h-2" />
-								)}
+								<ChevronLeftIcon className="size-3.5" />
+							</button>
+							<span className="min-w-28 text-center text-sm font-medium">
+								{calView === "month" ? `${MONTH_NAMES[cursorMonth]} ${cursorYear}` : `${cursorYear}`}
+							</span>
+							<button
+								type="button"
+								onClick={goNext}
+								aria-label="Next calendar period"
+								className="rounded-md border p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+							>
+								<ChevronRightIcon className="size-3.5" />
+							</button>
+							<button
+								type="button"
+								onClick={() => selectDate(snap.plan.date)}
+								className="ml-1 rounded-md border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+							>
+								Today
+							</button>
+						</div>
+						<div className="inline-flex rounded-md border bg-muted/40 p-0.5 text-[11px]">
+							<button
+								type="button"
+								onClick={() => setCalView("month")}
+								className={cn("rounded px-2 py-0.5", calView === "month" ? "bg-card font-medium shadow-xs" : "text-muted-foreground")}
+							>
+								Month
+							</button>
+							<button
+								type="button"
+								onClick={() => setCalView("year")}
+								className={cn("rounded px-2 py-0.5", calView === "year" ? "bg-card font-medium shadow-xs" : "text-muted-foreground")}
+							>
+								Year
+							</button>
+						</div>
+					</div>
+
+					{calView === "month" ? (
+						<div>
+							<div className="mb-1 grid grid-cols-7 gap-1 text-center text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+								{WEEKDAYS.map((w) => (
+									<div key={w}>{WEEKDAY_LABELS[w]}</div>
+								))}
 							</div>
-						))}
+							<div className="grid grid-cols-7 gap-1 text-[11px]">
+								{monthCells.map((cell, idx) => {
+									const items = milestonesByDate.get(cell.date) ?? [];
+									const ov = snap.config.dayOverrides?.[cell.date];
+									const weekday = WEEKDAYS[idx % 7]!;
+									const hasClass = !ov?.skipFixedEvents && fixedWeekdaysWithClasses.has(weekday);
+									const isToday = cell.date === snap.plan.date;
+									const isSelected = cell.date === selectedDate;
+									return (
+										<button
+											key={cell.date}
+											type="button"
+											onClick={() => selectDate(cell.date)}
+											className={cn(
+												"flex min-h-14 flex-col items-stretch justify-between rounded-md border p-1 text-left transition-colors hover:bg-accent/50",
+												!cell.inMonth && "opacity-45",
+												isToday && "border-primary/70 bg-primary/5",
+												items.length > 0 && "border-warning/60 bg-warning/5",
+												isSelected && "ring-2 ring-primary",
+											)}
+											title={[...items.map((x) => `${x.title} (${x.kind})`), ov?.note].filter(Boolean).join(" · ") || cell.date}
+										>
+											<div className="flex items-center justify-between gap-1">
+												<span className={cn("tabular-nums text-[10px]", isToday ? "font-bold text-primary" : "text-muted-foreground")}>
+													{cell.dayNum}
+												</span>
+												<span className="flex items-center gap-0.5">
+													{ov && <span className="size-1.5 rounded-full bg-primary" title="Custom day override" />}
+													{hasClass && <span className="size-1 rounded-full bg-muted-foreground/50" title="Weekly TKB" />}
+												</span>
+											</div>
+											<div className="mt-0.5 flex flex-col gap-0.5">
+												{items.slice(0, 2).map((it) => (
+													<span
+														key={it.id}
+														className={cn("w-full truncate rounded border px-1 text-[9px] font-medium", KIND_BADGE[it.kind])}
+													>
+														{it.title}
+													</span>
+												))}
+												{items.length > 2 && (
+													<span className="text-[9px] text-muted-foreground">+{items.length - 2} more</span>
+												)}
+											</div>
+										</button>
+									);
+								})}
+							</div>
+						</div>
+					) : (
+						<div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+							{MONTH_NAMES.map((mName, mIdx) => {
+								const miniCells = buildMonthGridDates(cursorYear, mIdx);
+								return (
+									<div key={mName} className="rounded-lg border bg-background/50 p-2">
+										<button
+											type="button"
+											onClick={() => {
+												setCursorMonth(mIdx);
+												setCalView("month");
+											}}
+											className="mb-1.5 text-xs font-semibold hover:text-primary hover:underline"
+										>
+											{mName} {cursorYear}
+										</button>
+										<div className="grid grid-cols-7 gap-0.5 text-center text-[9px]">
+											{miniCells.map((cell) => {
+												if (!cell.inMonth) return <span key={cell.date} className="h-4" />;
+												const items = milestonesByDate.get(cell.date) ?? [];
+												const ov = snap.config.dayOverrides?.[cell.date];
+												const isToday = cell.date === snap.plan.date;
+												const isSelected = cell.date === selectedDate;
+												return (
+													<button
+														key={cell.date}
+														type="button"
+														onClick={() => {
+															selectDate(cell.date);
+														}}
+														title={items.map((x) => `${x.title} (${x.kind})`).join(", ") || cell.date}
+														className={cn(
+															"flex h-5 items-center justify-center rounded tabular-nums transition-colors hover:bg-accent",
+															items.length > 0 && "bg-warning/25 font-semibold text-foreground",
+															ov && items.length === 0 && "bg-primary/15 font-medium text-primary",
+															isToday && "border border-primary",
+															isSelected && "ring-1 ring-primary bg-primary text-primary-foreground",
+														)}
+													>
+														{cell.dayNum}
+													</button>
+												);
+											})}
+										</div>
+									</div>
+								);
+							})}
+						</div>
+					)}
+				</div>
+
+				{/* Selected Day Inspector & Day Editor */}
+				<div className="rounded-xl border bg-card p-3.5 text-xs" data-testid="planner-selected-day">
+					<div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
+						<div>
+							<span className="text-sm font-medium">{selectedDate}</span>
+							<span className="ml-2 text-[11px] text-muted-foreground">
+								Preview: {selectedDayPreview.plannedStudyHours}h study · {selectedDayPreview.freeHoursTotal}h free · {selectedDayPreview.blocks.filter((b) => b.type === "fixed").length} fixed
+							</span>
+						</div>
+						<button
+							type="button"
+							onClick={() => resetMilestoneForm(selectedDate)}
+							className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] hover:bg-accent"
+						>
+							<PlusIcon className="size-3" /> Add milestone on {selectedDate}
+						</button>
+					</div>
+
+					{selectedDayMilestones.length > 0 && (
+						<div className="mt-2.5 flex flex-col gap-1.5">
+							{selectedDayMilestones.map((m) => (
+								<div key={m.id} className="flex items-center justify-between gap-2 rounded-lg border bg-muted/30 px-2.5 py-1.5">
+									<div className="min-w-0">
+										<span className={cn("mr-1.5 rounded border px-1 py-0 text-[9px] uppercase", KIND_BADGE[m.kind])}>{m.kind}</span>
+										<span className="font-medium">{m.title}</span>
+										<span className="ml-1.5 text-[11px] text-muted-foreground">({m.completedHours}/{m.estimatedHours}h)</span>
+									</div>
+									<button
+										type="button"
+										onClick={() => loadMilestoneForEdit(m)}
+										className="shrink-0 rounded border px-2 py-0.5 text-[11px] hover:bg-accent"
+									>
+										Edit
+									</button>
+								</div>
+							))}
+						</div>
+					)}
+
+					<div className="mt-3 grid gap-2.5 sm:grid-cols-2">
+						<label className="flex items-center gap-2 text-xs text-foreground">
+							<input
+								type="checkbox"
+								checked={Boolean(activeOverride?.skipFixedEvents)}
+								onChange={(e) => void saveDayOverride(selectedDate, { skipFixedEvents: e.target.checked })}
+							/>
+							Skip recurring weekly TKB on this date
+						</label>
+						<div className="flex items-center gap-2">
+							<label className="text-[11px] text-muted-foreground">Study target (h):</label>
+							<input
+								type="number"
+								min={0}
+								max={14}
+								step={0.5}
+								placeholder="Auto"
+								value={ovHoursDraft}
+								onChange={(e) => setOvHoursDraft(e.target.value)}
+								className="w-20 rounded border bg-background px-2 py-0.5 text-xs"
+							/>
+							<button
+								type="button"
+								disabled={busy}
+								onClick={() =>
+									void saveDayOverride(selectedDate, {
+										studyTargetHoursOverride: ovHoursDraft.trim() === "" ? undefined : Number(ovHoursDraft),
+										note: ovNoteDraft,
+									})
+								}
+								className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent"
+							>
+								Save Day
+							</button>
+						</div>
+					</div>
+					<div className="mt-2">
+						<input
+							type="text"
+							value={ovNoteDraft}
+							onChange={(e) => setOvNoteDraft(e.target.value)}
+							placeholder="Day note (e.g. Exam day, travel, mock test...)"
+							className="w-full rounded-md border bg-background px-2.5 py-1 text-xs"
+						/>
+					</div>
+
+					{/* One-off busy events just for selectedDate */}
+					{(activeOverride?.extraBusyEvents?.length ?? 0) > 0 && (
+						<div className="mt-2 flex flex-wrap gap-1.5">
+							{activeOverride!.extraBusyEvents!.map((ev) => (
+								<span key={ev.id} className="inline-flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-0.5 text-[11px]">
+									<span className="tabular-nums text-muted-foreground">{ev.startTime}–{ev.endTime}</span>
+									<span className="font-medium">{ev.title}</span>
+									<button
+										type="button"
+										onClick={() =>
+											void saveDayOverride(selectedDate, {
+												extraBusyEvents: activeOverride!.extraBusyEvents!.filter((x) => x.id !== ev.id),
+											})
+										}
+										className="text-muted-foreground hover:text-destructive"
+									>
+										×
+									</button>
+								</span>
+							))}
+						</div>
+					)}
+					<div className="mt-2 flex flex-wrap items-center gap-1.5">
+						<input type="time" value={ovStart} onChange={(e) => setOvStart(e.target.value)} className="rounded border bg-background px-1.5 py-1 text-[11px]" />
+						<span>–</span>
+						<input type="time" value={ovEnd} onChange={(e) => setOvEnd(e.target.value)} className="rounded border bg-background px-1.5 py-1 text-[11px]" />
+						<select value={ovCat} onChange={(e) => setOvCat(e.target.value as FixedEventCategory)} className="rounded border bg-background px-1.5 py-1 text-[11px]">
+							<option value="other">Exam / Event</option>
+							<option value="class">Extra Class</option>
+							<option value="club">Contest / Club</option>
+							<option value="commute">Travel</option>
+						</select>
+						<input
+							type="text"
+							value={ovTitle}
+							onChange={(e) => setOvTitle(e.target.value)}
+							placeholder="One-off event on this date..."
+							className="min-w-32 flex-1 rounded border bg-background px-2 py-1 text-[11px]"
+						/>
+						<button
+							type="button"
+							disabled={busy || !ovTitle.trim()}
+							onClick={() => void addDayEvent()}
+							className="rounded border px-2 py-1 text-[11px] hover:bg-accent disabled:opacity-40"
+						>
+							+ Event
+						</button>
 					</div>
 				</div>
 
 				{/* Milestone list */}
+				<div className="flex items-center justify-between">
+					<h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+						All Milestones & Synced Exam Profiles ({sorted.length})
+					</h3>
+					{snap.signals.examPrep.config.exams.length > 0 && (
+						<button
+							type="button"
+							disabled={busy}
+							onClick={() => void onPatch({ dismissedExamProfileIds: [] })}
+							className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+						>
+							<RefreshCwIcon className="size-3" /> Sync Exam Profiles
+						</button>
+					)}
+				</div>
+
 				{sorted.length === 0 ? (
 					<div className="rounded-xl border border-dashed p-6 text-center text-xs text-muted-foreground">
 						No exams, competitions, or project deadlines added yet. Add one on the right!
@@ -844,6 +1334,11 @@ function MilestonesTab({
 											<span className={cn("rounded border px-1.5 py-0.5 text-[10px] uppercase", KIND_BADGE[m.kind])}>
 												{m.kind}
 											</span>
+											{m.examProfileId && (
+												<span className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+													Exam Prep
+												</span>
+											)}
 											<span className="text-sm font-medium">{m.title}</span>
 											<span className="text-xs text-muted-foreground">
 												({dLeft >= 0 ? `D-${dLeft}` : `Overdue ${Math.abs(dLeft)}d`})
@@ -851,17 +1346,29 @@ function MilestonesTab({
 										</div>
 										<div className="mt-1 text-xs text-muted-foreground">
 											Subject: {m.subject} · Due {m.dueDate} · {m.completedHours}/{m.estimatedHours}h ({pct}%) · {m.cognitiveLoad}
+											{m.clusterIds.length > 0 ? ` · ${m.clusterIds.length} linked cluster${m.clusterIds.length === 1 ? "" : "s"}` : ""}
 										</div>
 									</div>
-									<button
-										type="button"
-										disabled={busy}
-										onClick={() => void onSaveMilestones(snap.config.milestones.filter((x) => x.id !== m.id))}
-										className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-destructive"
-										title="Remove milestone"
-									>
-										<TrashIcon className="size-3.5" />
-									</button>
+									<div className="flex shrink-0 items-center gap-1">
+										<button
+											type="button"
+											disabled={busy}
+											onClick={() => loadMilestoneForEdit(m)}
+											className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+											title="Edit milestone"
+										>
+											<PencilIcon className="size-3.5" />
+										</button>
+										<button
+											type="button"
+											disabled={busy}
+											onClick={() => void onPatch({ milestones: snap.config.milestones.filter((x) => x.id !== m.id) })}
+											className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-destructive"
+											title="Remove milestone"
+										>
+											<TrashIcon className="size-3.5" />
+										</button>
+									</div>
 								</div>
 								{m.sourceSummary && (
 									<p className="mt-1.5 text-[11px] text-muted-foreground">{m.sourceSummary}</p>
@@ -889,13 +1396,81 @@ function MilestonesTab({
 				)}
 			</div>
 
-			{/* Add & AI Research Form */}
+			{/* Add / Edit & Research Form */}
 			<div className="rounded-xl border bg-card p-4 lg:col-span-5">
-				<h3 className="text-sm font-medium">Add Exam / Competition / Project</h3>
+				<div className="flex items-center justify-between">
+					<h3 className="text-sm font-medium">{editingId ? "Edit Milestone" : "Add Exam / Competition / Project"}</h3>
+					{editingId && (
+						<button type="button" onClick={() => resetMilestoneForm()} className="text-xs text-muted-foreground hover:underline">
+							Cancel edit
+						</button>
+					)}
+				</div>
 				<p className="mt-0.5 text-xs text-muted-foreground">
-					Enter manually or run 1-shot AI syllabus estimation once (saved statically).
+					Link an existing Exam Profile / Graph sessions to pull materials automatically, or add extra PDF/notes.
 				</p>
+
 				<div className="mt-3 flex flex-col gap-2.5 text-xs">
+					{snap.signals.examPrep.config.exams.length > 0 && (
+						<div>
+							<label className="mb-1 flex items-center gap-1 text-muted-foreground">
+								<Link2Icon className="size-3" /> Link Exam Prep Profile (auto-sync)
+							</label>
+							<select
+								value={examProfileId}
+								onChange={(e) => onSelectExamProfile(e.target.value)}
+								className="w-full rounded-md border bg-background px-2 py-1.5"
+							>
+								<option value="">None (manual milestone)</option>
+								{snap.signals.examPrep.config.exams.map((ex) => (
+									<option key={ex.id} value={ex.id}>
+										{ex.title} {ex.date ? `(${ex.date})` : ""}
+									</option>
+								))}
+							</select>
+						</div>
+					)}
+
+					{snap.signals.examPrep.availableScopes.length > 0 && (
+						<div>
+							<div className="mb-1 flex items-center justify-between text-muted-foreground">
+								<span>Link Graph Clusters / Sessions ({clusterIds.length})</span>
+								{clusterIds.length > 0 && (
+									<button
+										type="button"
+										disabled={researching}
+										onClick={() => void callResearchApi({ pullOnly: true })}
+										className="text-[11px] font-medium text-primary hover:underline disabled:opacity-40"
+									>
+										Pull Context (0 tokens)
+									</button>
+								)}
+							</div>
+							<div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto rounded-md border bg-background/50 p-1.5">
+								{snap.signals.examPrep.availableScopes.map((sc) => {
+									const active = clusterIds.includes(sc.id);
+									return (
+										<button
+											key={sc.id}
+											type="button"
+											onClick={() =>
+												setClusterIds((prev) =>
+													prev.includes(sc.id) ? prev.filter((x) => x !== sc.id) : [...prev, sc.id],
+												)
+											}
+											className={cn(
+												"rounded border px-2 py-0.5 text-[11px] transition-colors",
+												active ? "border-primary bg-primary/15 font-medium text-foreground" : "text-muted-foreground hover:bg-accent",
+											)}
+										>
+											{sc.label} ({sc.nodeCount})
+										</button>
+									);
+								})}
+							</div>
+						</div>
+					)}
+
 					<div className="grid grid-cols-2 gap-2">
 						<div>
 							<label className="mb-1 block text-muted-foreground">Type</label>
@@ -980,51 +1555,52 @@ function MilestonesTab({
 						</div>
 					</div>
 					<div>
-						<div className="mb-1 flex items-center justify-between">
-							<label className="text-muted-foreground">Materials / Syllabus Notes (optional)</label>
-							<label className="cursor-pointer text-[11px] text-primary hover:underline">
-								Upload .md / .txt / .ics
-								<input type="file" accept=".md,.txt,.ics" onChange={onPickMaterialFile} className="hidden" />
+						<div className="mb-1 flex flex-wrap items-center justify-between gap-1">
+							<label className="text-muted-foreground">Materials / Syllabus Notes</label>
+							<label className="inline-flex cursor-pointer items-center gap-1 text-[11px] text-primary hover:underline">
+								{extractingFile ? <BrailleSpinner /> : <FileUpIcon className="size-3" />}
+								<span>{extractingFile ? "Extracting..." : "Upload .pdf / .epub / .md / .txt"}</span>
+								<input type="file" accept=".pdf,.epub,.md,.txt,.tex,.ics" onChange={(e) => void onPickMaterialFile(e)} className="hidden" />
 							</label>
 						</div>
 						<textarea
 							rows={3}
 							value={notes}
 							onChange={(e) => setNotes(e.target.value)}
-							placeholder="Paste đề cương, tên giáo trình hoặc các chương cần ôn..."
+							placeholder="Paste đề cương, giáo trình hoặc kéo context từ session..."
 							className="w-full rounded-md border bg-background px-2.5 py-1.5"
 						/>
 					</div>
-					<div className="flex flex-wrap gap-2 pt-1">
+					<div className="grid grid-cols-2 gap-2 pt-1">
 						<button
 							type="button"
-							disabled={researching || !notes.trim()}
-							onClick={() => void runAiResearch(true)}
+							disabled={researching || (!notes.trim() && clusterIds.length === 0 && !examProfileId)}
+							onClick={() => void callResearchApi({ preferLocal: true })}
 							className="inline-flex items-center justify-center gap-1 rounded-md border px-2.5 py-1.5 font-medium hover:bg-accent disabled:opacity-40"
 						>
 							Parse Outline (0 tokens)
 						</button>
 						<button
 							type="button"
-							disabled={researching || !title.trim()}
-							onClick={() => void runAiResearch(false)}
-							className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border bg-muted/50 px-3 py-1.5 font-medium hover:bg-accent disabled:opacity-40"
+							disabled={researching || (!title.trim() && !examProfileId && clusterIds.length === 0)}
+							onClick={() => void callResearchApi({ preferLocal: false })}
+							className="inline-flex items-center justify-center gap-1.5 rounded-md border bg-muted/50 px-2.5 py-1.5 font-medium hover:bg-accent disabled:opacity-40"
 						>
 							{researching ? <BrailleSpinner /> : <WandSparklesIcon className="size-3.5 text-primary" />}
-							Auto-Research Syllabus (AI)
-						</button>
-						<button
-							type="button"
-							disabled={busy || !title.trim()}
-							onClick={() => void addMilestone()}
-							className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
-						>
-							<PlusIcon className="size-3.5" /> Add
+							Auto-Research (AI)
 						</button>
 					</div>
+					<button
+						type="button"
+						disabled={busy || !title.trim()}
+						onClick={() => void saveMilestoneForm()}
+						className="inline-flex w-full items-center justify-center gap-1 rounded-md bg-primary px-3 py-2 font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+					>
+						<PlusIcon className="size-3.5" /> {editingId ? "Save Milestone Changes" : "Add Milestone"}
+					</button>
 					{topics.length > 0 && (
 						<div className="mt-1 rounded-lg border bg-muted/30 p-2">
-							<div className="mb-1 text-[11px] font-medium">Preview Researched Topics ({topics.length}):</div>
+							<div className="mb-1 text-[11px] font-medium">Preview Syllabus Topics ({topics.length}):</div>
 							<ul className="space-y-0.5 text-[11px] text-muted-foreground">
 								{topics.map((t) => (
 									<li key={t.id}>• {t.title} (~{t.estHours}h)</li>
@@ -1049,6 +1625,7 @@ function WeeklyTkbTab({
 	onSaveFixedEvents: (events: FixedWeeklyEvent[]) => Promise<void>;
 	onError: (msg: string) => void;
 }) {
+	const [editingId, setEditingId] = useState<string | null>(null);
 	const [day, setDay] = useState<Weekday>("mon");
 	const [startTime, setStartTime] = useState("07:30");
 	const [endTime, setEndTime] = useState("09:30");
@@ -1059,8 +1636,33 @@ function WeeklyTkbTab({
 	const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
 	const [parsing, setParsing] = useState(false);
 
-	const addManual = async () => {
+	const startEditEvent = (ev: FixedWeeklyEvent) => {
+		setEditingId(ev.id);
+		setDay(ev.dayOfWeek);
+		setStartTime(ev.startTime);
+		setEndTime(ev.endTime);
+		setTitle(ev.title);
+		setCategory(ev.category);
+	};
+
+	const cancelEditEvent = () => {
+		setEditingId(null);
+		setTitle("");
+	};
+
+	const saveManualOrEdit = async () => {
 		if (!title.trim()) return;
+		if (editingId) {
+			const nextList = snap.config.fixedEvents.map((ev) =>
+				ev.id !== editingId
+					? ev
+					: { ...ev, dayOfWeek: day, startTime, endTime, title: title.trim(), category },
+			);
+			await onSaveFixedEvents(nextList);
+			setEditingId(null);
+			setTitle("");
+			return;
+		}
 		const next: FixedWeeklyEvent = {
 			id: `fix_${Date.now()}`,
 			dayOfWeek: day,
@@ -1127,8 +1729,17 @@ function WeeklyTkbTab({
 		<div className="flex flex-col gap-4">
 			{/* Dual Manual Add + AI/Local Import */}
 			<div className="grid gap-4 lg:grid-cols-2">
-				<div className="rounded-xl border bg-card p-4">
-					<h3 className="text-sm font-medium">Method 1: Add to Weekly Grid (Manual · 0 tokens)</h3>
+				<div className={cn("rounded-xl border bg-card p-4", editingId && "border-primary/60 ring-1 ring-primary/30")}>
+					<div className="flex items-center justify-between">
+						<h3 className="text-sm font-medium">
+							{editingId ? "Edit Weekly Block" : "Method 1: Add to Weekly Grid (Manual · 0 tokens)"}
+						</h3>
+						{editingId && (
+							<button type="button" onClick={cancelEditEvent} className="text-xs text-muted-foreground hover:underline">
+								Cancel
+							</button>
+						)}
+					</div>
 					<div className="mt-3 grid grid-cols-2 gap-2 text-xs">
 						<select
 							value={day}
@@ -1174,10 +1785,10 @@ function WeeklyTkbTab({
 						<button
 							type="button"
 							disabled={busy || !title.trim()}
-							onClick={() => void addManual()}
+							onClick={() => void saveManualOrEdit()}
 							className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-40"
 						>
-							<PlusIcon className="size-3.5" /> Add
+							<PlusIcon className="size-3.5" /> {editingId ? "Save" : "Add"}
 						</button>
 					</div>
 				</div>
@@ -1235,21 +1846,44 @@ function WeeklyTkbTab({
 								<div className="py-4 text-center text-[11px] text-muted-foreground/60">Free</div>
 							) : (
 								items.map((ev) => (
-									<div key={ev.id} className="group relative rounded-lg border bg-muted/40 p-2 text-xs">
-										<div className="text-[10px] font-medium tabular-nums text-muted-foreground">
-											{ev.startTime}–{ev.endTime}
-										</div>
-										<div className="mt-0.5 truncate font-medium">{ev.title}</div>
+									<div
+										key={ev.id}
+										className={cn(
+											"group relative rounded-lg border bg-muted/40 p-2 text-xs transition-colors hover:bg-muted/70",
+											editingId === ev.id && "border-primary ring-1 ring-primary",
+										)}
+									>
 										<button
 											type="button"
-											onClick={() =>
-												void onSaveFixedEvents(snap.config.fixedEvents.filter((x) => x.id !== ev.id))
-											}
-											aria-label={`Remove ${ev.title}`}
-											className="absolute right-1 top-1 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+											onClick={() => startEditEvent(ev)}
+											className="w-full pr-10 text-left"
+											title={`Edit ${ev.title}`}
 										>
-											<TrashIcon className="size-3" />
+											<div className="text-[10px] font-medium tabular-nums text-muted-foreground">
+												{ev.startTime}–{ev.endTime}
+											</div>
+											<div className="mt-0.5 truncate font-medium">{ev.title}</div>
 										</button>
+										<div className="absolute right-1 top-1 flex items-center gap-0.5">
+											<button
+												type="button"
+												onClick={() => startEditEvent(ev)}
+												aria-label={`Edit ${ev.title}`}
+												className="rounded p-0.5 text-muted-foreground opacity-65 transition-opacity hover:text-foreground hover:opacity-100"
+											>
+												<PencilIcon className="size-3" />
+											</button>
+											<button
+												type="button"
+												onClick={() =>
+													void onSaveFixedEvents(snap.config.fixedEvents.filter((x) => x.id !== ev.id))
+												}
+												aria-label={`Remove ${ev.title}`}
+												className="rounded p-0.5 text-muted-foreground opacity-65 transition-opacity hover:text-destructive hover:opacity-100"
+											>
+												<TrashIcon className="size-3" />
+											</button>
+										</div>
 									</div>
 								))
 							)}
@@ -1344,6 +1978,85 @@ function LifestyleTab({
 								className="w-full rounded-md border bg-background px-2 py-1"
 							/>
 						</div>
+					</div>
+				</div>
+
+				<div className="border-t pt-3">
+					<div className="flex items-center justify-between">
+						<h3 className="text-sm font-medium">Meals &amp; Midday Rest Slots</h3>
+						<button
+							type="button"
+							onClick={() =>
+								setDraft({
+									...draft,
+									meals: [
+										...draft.meals,
+										{ id: `meal_${Date.now()}`, label: "Meal / Rest", startTime: "15:30", durationMin: 30 },
+									],
+								})
+							}
+							className="inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] hover:bg-accent"
+						>
+							<PlusIcon className="size-3" /> Add slot
+						</button>
+					</div>
+					<div className="mt-2 flex flex-col gap-2">
+						{draft.meals.map((m, idx) => (
+							<div key={m.id} className="flex flex-wrap items-center gap-2">
+								<input
+									type="text"
+									value={m.label}
+									onChange={(e) =>
+										setDraft({
+											...draft,
+											meals: draft.meals.map((x, j) => (j === idx ? { ...x, label: e.target.value } : x)),
+										})
+									}
+									placeholder="Meal name"
+									className="min-w-28 flex-1 rounded-md border bg-background px-2 py-1"
+								/>
+								<input
+									type="time"
+									value={m.startTime}
+									onChange={(e) =>
+										setDraft({
+											...draft,
+											meals: draft.meals.map((x, j) => (j === idx ? { ...x, startTime: e.target.value } : x)),
+										})
+									}
+									className="rounded-md border bg-background px-2 py-1"
+								/>
+								<input
+									type="number"
+									min={15}
+									max={120}
+									step={5}
+									value={m.durationMin}
+									onChange={(e) =>
+										setDraft({
+											...draft,
+											meals: draft.meals.map((x, j) => (j === idx ? { ...x, durationMin: Number(e.target.value) || 30 } : x)),
+										})
+									}
+									className="w-16 rounded-md border bg-background px-2 py-1"
+									title="Duration (minutes)"
+								/>
+								<span className="text-[11px] text-muted-foreground">m</span>
+								<button
+									type="button"
+									onClick={() =>
+										setDraft({
+											...draft,
+											meals: draft.meals.filter((_, j) => j !== idx),
+										})
+									}
+									aria-label={`Remove ${m.label}`}
+									className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-destructive"
+								>
+									<TrashIcon className="size-3.5" />
+								</button>
+							</div>
+						))}
 					</div>
 				</div>
 

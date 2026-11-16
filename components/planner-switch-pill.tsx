@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ArrowRightIcon, CalendarClockIcon, CheckIcon, ClockIcon, XIcon } from "lucide-react";
 import {
@@ -31,9 +31,6 @@ export function PlannerSwitchPill() {
 	const [nowMs, setNowMs] = useState(() => Date.now());
 	const [snoozeUntilMs, setSnoozeUntilMs] = useState(0);
 	const [dismissedKey, setDismissedKey] = useState<string | null>(null);
-	const [idleReturnMin, setIdleReturnMin] = useState<number | null>(null);
-	const lastActivityRef = useRef<number>(Date.now());
-	const isStudyingRef = useRef(false);
 
 	const load = useCallback(async () => {
 		try {
@@ -52,84 +49,19 @@ export function PlannerSwitchPill() {
 		return () => clearInterval(tick);
 	}, [load]);
 
-	useEffect(() => {
-		const IDLE_THRESHOLD_MS = 8 * 60_000;
-		const onActivity = () => {
-			if (document.visibilityState === "hidden") return;
-			const now = Date.now();
-			const gap = now - lastActivityRef.current;
-			lastActivityRef.current = now;
-			if (isStudyingRef.current && gap >= IDLE_THRESHOLD_MS) {
-				setIdleReturnMin(Math.min(180, Math.round(gap / 60_000)));
-			}
-		};
-		window.addEventListener("mousemove", onActivity, { passive: true });
-		window.addEventListener("keydown", onActivity, { passive: true });
-		document.addEventListener("visibilitychange", onActivity);
-		return () => {
-			window.removeEventListener("mousemove", onActivity);
-			window.removeEventListener("keydown", onActivity);
-			document.removeEventListener("visibilitychange", onActivity);
-		};
-	}, []);
-
 	useServerEvent("planner-changed", load);
 
-	if (pathname?.startsWith("/planner") || !payload?.plan) {
-		isStudyingRef.current = false;
-		return null;
-	}
+	if (pathname?.startsWith("/planner") || !payload?.plan) return null;
 	const hasConfiguredWork =
 		(payload.config?.milestones?.length ?? 0) > 0 ||
 		(payload.config?.fixedEvents?.length ?? 0) > 0;
-	if (!hasConfiguredWork) {
-		isStudyingRef.current = false;
-		return null;
-	}
+	if (!hasConfiguredWork) return null;
+
+	if (nowMs < snoozeUntilMs) return null;
 
 	const plan = payload.plan;
 	const log = payload.config?.logs?.[plan.date];
 	const status = resolveActiveBlockStatus(plan, log, nowMs);
-	isStudyingRef.current = status.currentBlock?.type === "study";
-
-	if (idleReturnMin !== null) {
-		const logIdleBreak = async () => {
-			await fetch("/api/planner/checkin", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ date: plan.date, hobbyDone: true }),
-			}).catch(() => {});
-			setIdleReturnMin(null);
-			void load();
-		};
-		return (
-			<div
-				data-testid="planner-idle-pill"
-				className="fixed bottom-4 right-4 z-30 hidden max-w-md items-center gap-2 rounded-full border border-primary/30 bg-card/95 px-3 py-1.5 text-xs shadow-lg backdrop-blur sm:flex"
-			>
-				<ClockIcon className="size-3.5 shrink-0 text-primary" />
-				<span className="truncate text-foreground">
-					Idle {idleReturnMin}m — count as break/hobby?
-				</span>
-				<button
-					type="button"
-					onClick={() => void logIdleBreak()}
-					className="rounded-full bg-primary px-2.5 py-0.5 text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
-				>
-					Log Break
-				</button>
-				<button
-					type="button"
-					onClick={() => setIdleReturnMin(null)}
-					className="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
-				>
-					Dismiss
-				</button>
-			</div>
-		);
-	}
-
-	if (nowMs < snoozeUntilMs) return null;
 
 	const activeKey = status.shouldPromptSwitch
 		? `switch_${status.recentlyEndedBlock?.id ?? status.currentBlock?.id ?? ""}_${status.nextStudyBlock?.id ?? ""}`

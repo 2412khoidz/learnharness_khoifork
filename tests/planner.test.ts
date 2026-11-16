@@ -14,6 +14,7 @@ import {
 	applyHabitCheckIn,
 	applyLlmPlanOutput,
 	buildCompactPlannerDigest,
+	buildMonthGridDates,
 	computeExamPrepStatus,
 	computeHabitStrengthSummary,
 	computeLocalPlannerPlan,
@@ -35,15 +36,18 @@ import {
 import type { PiEngine } from "../src/agent/models.ts";
 import { buildMobileHtml } from "../src/server/phone-mobile-ui.ts";
 import {
+	buildLinkedClusterContext,
 	checkInPlannerHabit,
 	closePhoneUploadSession,
 	createPhoneUploadSession,
+	extractPlannerMaterialFile,
 	generatePlannerSchedule,
 	getMobileCompanionState,
 	patchPlannerConfig,
 	parseWeeklyScheduleInput,
 	readPlannerSnapshot,
 	researchExamSyllabus,
+	writeExamPrepConfig,
 } from "../src/server/index.ts";
 
 function fakeSubmitEngine(toolName: string, args: unknown): PiEngine {
@@ -458,6 +462,29 @@ describe("Study Planner core logic", () => {
 		);
 		assert.equal(withAdded.logs["2026-11-16"]?.loggedStudyMinBySubject["Giải tích"], 30);
 		assert.equal(withAdded.milestones[0]?.completedHours, 1.5);
+
+		// Month grid builder & dayOverrides support for interactive Google-Calendar-style editing
+		const novGrid = buildMonthGridDates(2026, 10); // November 2026
+		assert.equal(novGrid.length, 42);
+		assert.equal(novGrid.filter((c) => c.inMonth).length, 30);
+
+		const ovCfg = sanitizePlannerConfig({
+			...pacedCfg,
+			fixedEvents: [{ id: "f1", dayOfWeek: "mon", startTime: "08:00", endTime: "10:00", title: "Weekly Class", category: "class" }],
+			dayOverrides: {
+				"2026-11-16": {
+					date: "2026-11-16",
+					skipFixedEvents: true,
+					extraBusyEvents: [{ id: "e1", startTime: "07:30", endTime: "11:00", title: "Olympic Contest", category: "other" }],
+					studyTargetHoursOverride: 0,
+					note: "Exam morning",
+				},
+			},
+		});
+		const ovPlan = computeLocalPlannerPlan(ovCfg, sampleSignals("2026-11-16"));
+		assert.ok(!ovPlan.blocks.some((b) => b.title === "Weekly Class"));
+		assert.ok(ovPlan.blocks.some((b) => b.title === "Olympic Contest"));
+		assert.equal(ovPlan.plannedStudyHours, 0);
 	});
 });
 
@@ -596,25 +623,40 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 			const res = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}/companion/planner-checkin`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ date: state.planner.date, hobbyDone: true, mealsOk: true }),
+				body: JSON.stringify({
+					date: state.planner.date,
+					hobbyDone: true,
+					mealsOk: true,
+					actualBedtime: "01:45",
+					energyScore: 4,
+				}),
 			});
 			assert.equal(res.status, 200);
-			const body = (await res.json()) as { ok: boolean; planner: { todayLog: { hobbyDone: boolean; mealsOk: boolean } } };
+			const body = (await res.json()) as {
+				ok: boolean;
+				planner: { todayLog: { hobbyDone: boolean; mealsOk: boolean; actualBedtime?: string; energyScore?: number } };
+			};
 			assert.equal(body.ok, true);
 			assert.equal(body.planner.todayLog.hobbyDone, true);
 			assert.equal(body.planner.todayLog.mealsOk, true);
+			assert.equal(body.planner.todayLog.actualBedtime, "01:45");
+			assert.equal(body.planner.todayLog.energyScore, 4);
 		} finally {
 			await closePhoneUploadSession();
 		}
 
-		// Verify mobile UI still parses cleanly as valid ES5 JS and has zero literal https://
+		// Verify mobile UI still parses cleanly as valid ES5 JS, exposes bedtime & energy controls, and has zero literal https://
 		const html = buildMobileHtml("http://127.0.0.1:4321/p/tok/upload");
 		assert.equal(html.includes("https://"), false);
+		assert.ok(html.includes('id="mob-bedtime"'));
+		assert.ok(html.includes('id="mob-energy-strip"'));
 		const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(html);
 		assert.ok(scriptMatch?.[1]);
 		assert.doesNotThrow(() => new vm.Script(scriptMatch![1]!));
 		const snapCheck = readPlannerSnapshot({ plannerFile, examPrepFile });
 		assert.equal(snapCheck.config.logs[state.planner.date]?.hobbyDone, true);
+		assert.equal(snapCheck.config.logs[state.planner.date]?.actualBedtime, "01:45");
+		assert.equal(snapCheck.config.logs[state.planner.date]?.energyScore, 4);
 
 		// Test 0-token local outline syllabus parser in researchExamSyllabus
 		const localSyllabus = await researchExamSyllabus({
@@ -626,5 +668,80 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		assert.equal(localSyllabus.modelLabel, "local:outline-parser");
 		assert.equal(localSyllabus.usedWebSearch, false);
 		assert.equal(localSyllabus.estimatedHours, 14);
+	});
+
+	it("auto-syncs Exam Prep profiles, pulls linked chat/tree/notes context, and extracts uploaded materials", async () => {
+		const dir = fs.mkdtempSync(path.join(TMP_DATA, "sync-"));
+		const plannerFile = path.join(dir, "planner.json");
+		const examPrepFile = path.join(dir, "exam-prep.json");
+		const chatsDir = path.join(dir, "chats");
+		fs.mkdirSync(chatsDir, { recursive: true });
+
+		const chatId = "chat_calc_olympic";
+		fs.writeFileSync(
+			path.join(chatsDir, `${chatId}.json`),
+			JSON.stringify({
+				id: chatId,
+				title: "Dạy giải tích olympic sinh viên",
+				createdAt: "2026-11-10T00:00:00Z",
+				updatedAt: "2026-11-16T08:00:00Z",
+				notes: "Trọng tâm: dãy truy hồi, tích phân suy rộng",
+				tree: {
+					version: 1,
+					nodes: [
+						{ id: "n1", title: "Giới hạn dãy số & Stolz-Cesaro" },
+						{ id: "n2", title: "Định lý giá trị trung bình Rolle/Lagrange" },
+					],
+					edges: [],
+				},
+				messages: [],
+			}),
+			"utf8",
+		);
+
+		writeExamPrepConfig(
+			{
+				upsertExam: {
+					id: "ex_olympic_1",
+					title: "Olympic sinh viên giải tích Vòng 1",
+					date: "2026-12-05",
+					pace: "efficient",
+					clusterIds: [chatId],
+				},
+			},
+			examPrepFile,
+		);
+
+		const snap = readPlannerSnapshot({ plannerFile, examPrepFile, chatsDir });
+		const synced = snap.config.milestones.find((m) => m.examProfileId === "ex_olympic_1");
+		assert.ok(synced, "Expected Exam Prep profile to sync automatically into milestones & calendar");
+		assert.equal(synced.dueDate, "2026-12-05");
+		assert.equal(synced.kind, "competition");
+
+		const ctx = buildLinkedClusterContext({ examProfileId: "ex_olympic_1", examPrepFile, chatsDir });
+		assert.ok(ctx.summaryText.includes("Stolz-Cesaro"));
+		assert.ok(ctx.summaryText.includes("dãy truy hồi"));
+		assert.equal(ctx.topicHints.length, 2);
+
+		const pulled = await researchExamSyllabus({
+			title: "",
+			kind: "competition",
+			examProfileId: "ex_olympic_1",
+			pullOnly: true,
+			examPrepFile,
+			chatsDir,
+		});
+		assert.equal(pulled.syllabusTopics.length, 2);
+		assert.ok(pulled.pulledContext?.includes("Rolle/Lagrange"));
+
+		// Dismissing synced milestone remembers dismissal until re-synced
+		const afterDismiss = patchPlannerConfig({ milestones: [] }, { plannerFile, examPrepFile, chatsDir });
+		assert.ok(afterDismiss.config.dismissedExamProfileIds?.includes("ex_olympic_1"));
+		const afterResync = patchPlannerConfig({ dismissedExamProfileIds: [] }, { plannerFile, examPrepFile, chatsDir });
+		assert.ok(afterResync.config.milestones.some((m) => m.examProfileId === "ex_olympic_1"));
+
+		// Material extractor handles Markdown text cleanly
+		const mdExtracted = await extractPlannerMaterialFile("syllabus.md", Buffer.from("# Chương 1\n- Tích phân"));
+		assert.ok(mdExtracted.text.includes("Chương 1"));
 	});
 });

@@ -6,6 +6,7 @@ import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { ModelRole } from "../../config.ts";
 import { PATHS } from "../../config.ts";
 import {
+	addDaysToDate,
 	applyHabitCheckIn,
 	applyLlmPlanOutput,
 	buildCompactPlannerDigest,
@@ -35,18 +36,24 @@ import {
 	type StudyMilestone,
 	type SyllabusTopic,
 } from "../core/planner.ts";
+import type { ChatRecord } from "../core/contracts/chat.ts";
+import type { PlanTree } from "../core/contracts/plan.ts";
+import { parseFilePaths } from "../core/file-paths.ts";
 import { computeGraphFsrsSummary, emptyGraphFsrsSummary } from "../core/fsrs-graph.ts";
 import { birthSessionPartition } from "../core/session-clusters.ts";
 import { resolveRoleSpec } from "../core/settings-resolution.ts";
 import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
 import { emit } from "../core/events.ts";
 import { runSubagent } from "../agent/subagents/pi-run.ts";
+import { convertPdf } from "../agent/subagents/pdf-ops.ts";
+import { joinPages } from "../agent/subagents/pdf-markdown.ts";
 import { healToolRecord } from "../agent/tools/heal.ts";
 import { invalidInputResult, toToolResult } from "../agent/tool-execute.ts";
 import { createWebTools } from "../agent/tools/web.ts";
 import { healEncodedArguments } from "../core/argument-heal.ts";
+import { buildOutlineDigestIfNeeded, extractEpubText } from "./epub-import.ts";
 import { providerKeyPresent } from "./keys.ts";
-import { readExamPrepStatus } from "./exam-prep.ts";
+import { readExamPrepConfig, readExamPrepStatus } from "./exam-prep.ts";
 import { graphView } from "./graph.ts";
 import { readFlashcardsSnapshot } from "./graph-fsrs.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
@@ -99,6 +106,8 @@ export interface PlannerPatch {
 	fixedEvents?: FixedWeeklyEvent[];
 	milestones?: StudyMilestone[];
 	lifestyle?: PlannerConfig["lifestyle"];
+	dayOverrides?: PlannerConfig["dayOverrides"];
+	dismissedExamProfileIds?: string[];
 }
 
 export interface PlannerReadOptions {
@@ -350,15 +359,87 @@ export function getPlannerAiAvailability() {
 	};
 }
 
+function syncExamPrepProfilesIntoConfig(
+	config: PlannerConfig,
+	signals: PlannerPersonalSignals,
+	date: string,
+): { config: PlannerConfig; changed: boolean } {
+	const exams = signals.examPrep.config.exams ?? [];
+	if (exams.length === 0) return { config, changed: false };
+	const dismissed = new Set(config.dismissedExamProfileIds ?? []);
+	let changed = false;
+	const milestones = config.milestones.map((m) => ({
+		...m,
+		clusterIds: [...m.clusterIds],
+		syllabusTopics: m.syllabusTopics.map((t) => ({ ...t })),
+	}));
+
+	for (const ex of exams) {
+		if (dismissed.has(ex.id)) continue;
+		const scopeLabels = signals.examPrep.availableScopes
+			.filter((s) => ex.clusterIds.includes(s.id))
+			.map((s) => s.label);
+		const dueDate = ex.date && isValidDateString(ex.date) ? ex.date : addDaysToDate(date, 21);
+		const existing = milestones.find((m) => m.examProfileId === ex.id || m.id === `ep_${ex.id}`);
+		if (!existing) {
+			milestones.push({
+				id: `ep_${ex.id}`,
+				kind: /olympic|olp|contest|competition|hsg/i.test(ex.title) ? "competition" : "exam",
+				title: ex.title,
+				subject: scopeLabels[0] || ex.title,
+				dueDate,
+				priority: ex.pace === "crash-course" ? 3 : 2,
+				cognitiveLoad: "heavy",
+				clusterIds: [...ex.clusterIds],
+				estimatedHours: ex.pace === "thorough" ? 24 : ex.pace === "efficient" ? 16 : 10,
+				completedHours: 0,
+				syllabusTopics: [],
+				notes: "",
+				sourceSummary: "Synced from Exam Prep profile",
+				examProfileId: ex.id,
+			});
+			changed = true;
+		} else {
+			if (existing.title !== ex.title) {
+				existing.title = ex.title;
+				changed = true;
+			}
+			if (ex.date && isValidDateString(ex.date) && existing.dueDate !== ex.date) {
+				existing.dueDate = ex.date;
+				changed = true;
+			}
+			const mergedClusters = [...new Set([...existing.clusterIds, ...ex.clusterIds])];
+			if (mergedClusters.length !== existing.clusterIds.length) {
+				existing.clusterIds = mergedClusters;
+				changed = true;
+			}
+			if (!existing.examProfileId) {
+				existing.examProfileId = ex.id;
+				changed = true;
+			}
+		}
+	}
+
+	if (!changed) return { config, changed: false };
+	return {
+		config: sanitizePlannerConfig({ ...config, milestones }),
+		changed: true,
+	};
+}
+
 export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: string; date?: string }): PlannerSnapshotResponse {
 	const now = opts?.now ?? Date.now();
 	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
 	const filePath = opts?.plannerFile ?? defaultPlannerPath();
 	let config = readPlannerConfig(filePath);
 	const signals = buildPlannerPersonalSignals(config, { ...opts, date, now });
+	const synced = syncExamPrepProfilesIntoConfig(config, signals, date);
+	if (synced.changed) {
+		config = synced.config;
+	}
 
 	// Use saved LLM/local plan for `date` if already generated, else compute fast 0-token local plan
-	let plan = config.plans[date];
+	let plan = synced.changed ? undefined : config.plans[date];
 	if (!plan) {
 		plan = computeLocalPlannerPlan(config, signals, now);
 		config = savePlannerConfig(
@@ -368,11 +449,16 @@ export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: str
 			},
 			filePath,
 		);
-	} else if (!plan.habitStrength) {
-		plan = {
-			...plan,
-			habitStrength: computeHabitStrengthSummary(config, date),
-		};
+	} else {
+		if (!plan.habitStrength) {
+			plan = {
+				...plan,
+				habitStrength: computeHabitStrengthSummary(config, date),
+			};
+		}
+		if (synced.changed) {
+			config = savePlannerConfig(config, filePath);
+		}
 	}
 
 	return {
@@ -393,6 +479,20 @@ export function patchPlannerConfig(
 	const filePath = opts?.plannerFile ?? defaultPlannerPath();
 	const current = readPlannerConfig(filePath);
 
+	let dismissedExamProfileIds = current.dismissedExamProfileIds ?? [];
+	if (patch.dismissedExamProfileIds !== undefined) {
+		dismissedExamProfileIds = patch.dismissedExamProfileIds;
+	} else if (patch.milestones !== undefined) {
+		const nextExamIds = new Set(patch.milestones.map((m) => m.examProfileId).filter((id): id is string => Boolean(id)));
+		const dropped = current.milestones
+			.map((m) => m.examProfileId)
+			.filter((id): id is string => Boolean(id))
+			.filter((id) => !nextExamIds.has(id));
+		if (dropped.length > 0) {
+			dismissedExamProfileIds = [...new Set([...dismissedExamProfileIds, ...dropped])];
+		}
+	}
+
 	const next: PlannerConfig = sanitizePlannerConfig({
 		...current,
 		...(patch.engineMode !== undefined ? { engineMode: patch.engineMode } : {}),
@@ -400,22 +500,31 @@ export function patchPlannerConfig(
 		...(patch.fixedEvents !== undefined ? { fixedEvents: patch.fixedEvents } : {}),
 		...(patch.milestones !== undefined ? { milestones: patch.milestones } : {}),
 		...(patch.lifestyle !== undefined ? { lifestyle: patch.lifestyle } : {}),
+		...(patch.dayOverrides !== undefined ? { dayOverrides: patch.dayOverrides } : {}),
+		dismissedExamProfileIds,
 		updatedAt: new Date(now).toISOString(),
 	});
 
 	const signals = buildPlannerPersonalSignals(next, { ...opts, date, now });
+	const synced = patch.dismissedExamProfileIds !== undefined
+		? syncExamPrepProfilesIntoConfig(next, signals, date)
+		: { config: next, changed: false };
+	const resolvedNext = synced.config;
+
 	const scheduleInputsChanged =
 		patch.intensity !== undefined ||
 		patch.fixedEvents !== undefined ||
 		patch.milestones !== undefined ||
-		patch.lifestyle !== undefined;
+		patch.lifestyle !== undefined ||
+		patch.dayOverrides !== undefined ||
+		synced.changed;
 
-	if (scheduleInputsChanged || !next.plans[date]) {
-		const freshLocal = computeLocalPlannerPlan(next, signals, now);
-		next.plans = { ...next.plans, [date]: freshLocal };
+	if (scheduleInputsChanged || !resolvedNext.plans[date]) {
+		const freshLocal = computeLocalPlannerPlan(resolvedNext, signals, now);
+		resolvedNext.plans = { ...resolvedNext.plans, [date]: freshLocal };
 	}
 
-	const saved = savePlannerConfig(next, filePath);
+	const saved = savePlannerConfig(resolvedNext, filePath);
 	const activePlan = saved.plans[date]!;
 	return {
 		config: saved,
@@ -737,6 +846,194 @@ Convert tiết học / period numbers to realistic clock times if needed (e.g. T
 
 // ─── 3. 1-Shot Exam / Competition Syllabus & Workload Researcher ──────────────
 
+const MAX_MATERIAL_BYTES = 25 * 1024 * 1024;
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d];
+
+/**
+ * Reuse ChronoHarness's native PDF/EPUB/Markdown extractors so Milestone materials
+ * accept `.pdf`, `.epub`, `.md`, `.txt`, `.tex`, and `.ics` directly inside `/planner`.
+ */
+export async function extractPlannerMaterialFile(
+	fileName: string,
+	bytes: Uint8Array,
+): Promise<{ text: string; notice?: string }> {
+	if (bytes.byteLength === 0) throw new Error("Empty file.");
+	if (bytes.byteLength > MAX_MATERIAL_BYTES) throw new Error("File exceeds 25 MB limit.");
+	const lower = fileName.toLowerCase();
+
+	if (lower.endsWith(".epub")) {
+		const epub = extractEpubText(bytes);
+		if (epub.kind === "unreadable") throw new Error(epub.error);
+		const digested = buildOutlineDigestIfNeeded(epub.text);
+		return {
+			text: digested.text.slice(0, 24_000),
+			notice: `Extracted EPUB (${epub.chapterCount} ${epub.chapterCount === 1 ? "section" : "sections"}).`,
+		};
+	}
+
+	const isPdf = lower.endsWith(".pdf") || PDF_MAGIC.every((b, i) => bytes[i] === b);
+	if (isPdf) {
+		const pdf = await convertPdf(bytes, 400);
+		if (pdf.kind === "unreadable") throw new Error("Could not read this PDF file.");
+		if (pdf.kind === "too-long") throw new Error("PDF exceeds 400 pages.");
+		const text = joinPages(pdf.pages);
+		if (!text.trim()) throw new Error("This PDF contains image-only scanned pages without selectable text.");
+		const digested = buildOutlineDigestIfNeeded(text);
+		return {
+			text: digested.text.slice(0, 24_000),
+			notice: `Extracted PDF (${pdf.pages.length} pages).`,
+		};
+	}
+
+	if (bytes.subarray(0, 8192).includes(0)) {
+		throw new Error("Unsupported binary file. Upload PDF, EPUB, MD, TXT, TEX, or ICS.");
+	}
+	const decoded = new TextDecoder().decode(bytes);
+	const digested = buildOutlineDigestIfNeeded(decoded);
+	return {
+		text: digested.text.slice(0, 24_000),
+		...(digested.outlined ? { notice: `Generated outline digest (${digested.sectionCount} sections).` } : {}),
+	};
+}
+
+function readChatSafe(chatId: string, chatsDir?: string): ChatRecord | null {
+	try {
+		if (chatsDir) {
+			const filePath = path.join(chatsDir, `${chatId}.json`);
+			if (!fs.existsSync(filePath)) return null;
+			return JSON.parse(fs.readFileSync(filePath, "utf8")) as ChatRecord;
+		}
+		return stores.chatStore.getChat(chatId) ?? null;
+	} catch {
+		return null;
+	}
+}
+
+export function buildLinkedClusterContext(opts: {
+	clusterIds?: readonly string[];
+	examProfileId?: string;
+	examPrepFile?: string;
+	flashcardsFile?: string;
+	chatsDir?: string;
+}): {
+	resolvedClusterIds: string[];
+	resolvedSubject: string;
+	summaryText: string;
+	topicHints: SyllabusTopic[];
+	linkedLabels: string[];
+} {
+	const resolvedSet = new Set(opts.clusterIds ?? []);
+	let resolvedSubject = "";
+
+	if (opts.examProfileId) {
+		const epCfg = readExamPrepConfig(opts.examPrepFile);
+		const profile = (epCfg.exams ?? []).find((e) => e.id === opts.examProfileId);
+		if (profile) {
+			if (!resolvedSubject) resolvedSubject = profile.title;
+			for (const cid of profile.clusterIds) resolvedSet.add(cid);
+		}
+	}
+
+	const resolvedClusterIds = [...resolvedSet];
+	if (resolvedClusterIds.length === 0) {
+		return { resolvedClusterIds: [], resolvedSubject, summaryText: "", topicHints: [], linkedLabels: [] };
+	}
+
+	const sections: string[] = [];
+	const topicHints: SyllabusTopic[] = [];
+	const seenTopics = new Set<string>();
+	const linkedLabels: string[] = [];
+
+	let graphPropositions: ReturnType<typeof graphView>["propositions"] = [];
+	let graphClusters: ReturnType<typeof graphView>["clusters"] = [];
+	let fileSources: Record<string, string> = {};
+	try {
+		const isolatedTest = Boolean((opts.chatsDir || opts.examPrepFile) && !opts.flashcardsFile);
+		if (!isolatedTest) {
+			const g = graphView();
+			graphPropositions = g.propositions;
+			graphClusters = g.clusters ?? [];
+			fileSources = g.fileSources ?? {};
+		}
+	} catch {
+		// Graph not initialized
+	}
+
+	const propById = new Map(graphPropositions.map((p) => [p.id, p]));
+	const birthMap = new Map(birthSessionPartition(graphPropositions).map((c) => [c.id, c.members]));
+	const explicitMap = new Map(graphClusters.map((c) => [c.id, c]));
+
+	for (const cid of resolvedClusterIds.slice(0, 10)) {
+		const chat = !cid.startsWith("src_") ? readChatSafe(cid, opts.chatsDir) : null;
+		const label = chat?.title || fileSources[cid] || explicitMap.get(cid)?.label || cid;
+		linkedLabels.push(label);
+		if (!resolvedSubject && label && label !== cid) resolvedSubject = label;
+
+		const memberIds = explicitMap.get(cid)?.members ?? birthMap.get(cid) ?? [];
+		const concepts = memberIds
+			.map((id) => propById.get(id))
+			.filter((n): n is NonNullable<typeof n> => Boolean(n))
+			.slice(0, 20);
+
+		const lines: string[] = [`[Session/Cluster: ${label}]`];
+		if (concepts.length > 0) {
+			lines.push(`Graph concepts (${concepts.length}): ${concepts.map((c) => c.name).join(", ")}`);
+		}
+
+		const tree: PlanTree | undefined = chat?.tree;
+		if (tree?.nodes && tree.nodes.length > 0) {
+			lines.push(`Lesson plan topics: ${tree.nodes.map((n) => n.title).join(" -> ")}`);
+			for (const node of tree.nodes.slice(0, 8)) {
+				const key = node.title.trim().toLowerCase();
+				if (key && !seenTopics.has(key) && topicHints.length < 12) {
+					seenTopics.add(key);
+					topicHints.push({ id: `lnk_${topicHints.length}`, title: node.title.trim().slice(0, 100), estHours: 2.5, done: false });
+				}
+			}
+		}
+
+		if (chat?.notes?.trim()) {
+			lines.push(`Learner notes:\n${chat.notes.trim().slice(0, 1000)}`);
+		}
+
+		if (chat?.messages && chat.messages.length > 0) {
+			const docRefs: string[] = [];
+			for (const msg of chat.messages) {
+				if (msg.role !== "user") continue;
+				const contentArr = Array.isArray(msg.content) ? msg.content : [];
+				for (const part of contentArr) {
+					if (part.type !== "text") continue;
+					for (const fp of parseFilePaths(part.text)) {
+						if (fp.kind === "path" && !docRefs.includes(fp.path)) docRefs.push(fp.path);
+					}
+				}
+			}
+			if (docRefs.length > 0) {
+				lines.push(`Referenced files: ${docRefs.slice(0, 6).join(", ")}`);
+			}
+		}
+
+		if (topicHints.length < 12 && concepts.length > 0) {
+			for (const concept of concepts.slice(0, 6)) {
+				const key = concept.name.trim().toLowerCase();
+				if (key && !seenTopics.has(key) && topicHints.length < 12) {
+					seenTopics.add(key);
+					topicHints.push({ id: `grp_${topicHints.length}`, title: concept.name.trim().slice(0, 100), estHours: 2, done: false });
+				}
+			}
+		}
+		sections.push(lines.join("\n"));
+	}
+
+	return {
+		resolvedClusterIds,
+		resolvedSubject,
+		summaryText: sections.join("\n\n").slice(0, 5000),
+		topicHints,
+		linkedLabels,
+	};
+}
+
 const examSyllabusSchema = Type.Object({
 	subject: Type.String({ description: "Clean subject/area name (e.g. 'Olympic Giải tích', 'Linear Algebra')." }),
 	cognitiveLoad: Type.Union([Type.Literal("heavy"), Type.Literal("medium"), Type.Literal("light")]),
@@ -756,7 +1053,13 @@ export async function researchExamSyllabus(opts: {
 	kind?: StudyMilestone["kind"];
 	dueDate?: string;
 	materialsText?: string;
+	clusterIds?: string[];
+	examProfileId?: string;
+	pullOnly?: boolean;
 	preferLocal?: boolean;
+	examPrepFile?: string;
+	flashcardsFile?: string;
+	chatsDir?: string;
 	engineOverride?: PiEngine;
 	signal?: AbortSignal;
 }): Promise<{
@@ -766,24 +1069,63 @@ export async function researchExamSyllabus(opts: {
 	estimatedHours: number;
 	syllabusTopics: SyllabusTopic[];
 	sourceSummary: string;
+	pulledContext?: string;
 	modelLabel: string;
 	usedWebSearch: boolean;
 }> {
-	const title = opts.title.trim();
-	if (!title) throw new Error("Exam or competition title is required.");
+	const linked = buildLinkedClusterContext({
+		clusterIds: opts.clusterIds,
+		examProfileId: opts.examProfileId,
+		examPrepFile: opts.examPrepFile,
+		flashcardsFile: opts.flashcardsFile,
+		chatsDir: opts.chatsDir,
+	});
+	const title = opts.title.trim() || linked.resolvedSubject || "Study Milestone";
 
+	if (opts.pullOnly) {
+		const manualParsed = opts.materialsText?.trim() ? parseLocalSyllabusOutline(opts.materialsText) : { syllabusTopics: [], estimatedHours: 0 };
+		const combinedTopics = [...linked.topicHints];
+		const seen = new Set(combinedTopics.map((t) => t.title.toLowerCase()));
+		for (const mt of manualParsed.syllabusTopics) {
+			if (!seen.has(mt.title.toLowerCase()) && combinedTopics.length < 20) {
+				seen.add(mt.title.toLowerCase());
+				combinedTopics.push(mt);
+			}
+		}
+		const sumH = Math.max(1, Math.round(combinedTopics.reduce((a, t) => a + t.estHours, 0) * 10) / 10);
+		return {
+			subject: (linked.resolvedSubject || title).slice(0, 80),
+			cognitiveLoad: opts.kind === "competition" ? "heavy" : "medium",
+			priority: opts.kind === "competition" ? 3 : 2,
+			estimatedHours: combinedTopics.length > 0 ? sumH : 12,
+			syllabusTopics: combinedTopics,
+			sourceSummary: linked.linkedLabels.length > 0
+				? `Pulled ${linked.linkedLabels.length} linked session/graph cluster(s): ${linked.linkedLabels.join(", ")}`
+				: "No linked sessions/graph clusters selected yet.",
+			pulledContext: linked.summaryText,
+			modelLabel: "local:linked-context",
+			usedWebSearch: false,
+		};
+	}
+
+	const combinedMaterial = [linked.summaryText, opts.materialsText?.trim()].filter(Boolean).join("\n\n");
 	const resolved = opts.engineOverride
 		? { role: "researcher" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
 		: resolvePlannerEngine("research");
-	if (opts.preferLocal || (!resolved && opts.materialsText?.trim())) {
+	if (opts.preferLocal || (!resolved && combinedMaterial)) {
 		const parsed = parseLocalSyllabusOutline(opts.materialsText?.trim() || title);
+		const topics = parsed.syllabusTopics.length > 0 && opts.materialsText?.trim() ? parsed.syllabusTopics : linked.topicHints;
+		const finalTopics = topics.length > 0 ? topics : parsed.syllabusTopics;
+		const sumH = Math.max(1, Math.round(finalTopics.reduce((a, t) => a + t.estHours, 0) * 10) / 10);
 		return {
-			subject: title.slice(0, 80),
+			subject: (linked.resolvedSubject || title).slice(0, 80),
 			cognitiveLoad: opts.kind === "competition" ? "heavy" : "medium",
 			priority: opts.kind === "competition" ? 3 : 2,
-			estimatedHours: parsed.estimatedHours,
-			syllabusTopics: parsed.syllabusTopics,
-			sourceSummary: "Parsed outline locally (0 tokens).",
+			estimatedHours: sumH,
+			syllabusTopics: finalTopics,
+			sourceSummary: linked.linkedLabels.length > 0
+				? `Parsed locally + linked (${linked.linkedLabels.join(", ")}).`
+				: "Parsed outline locally (0 tokens).",
 			modelLabel: "local:outline-parser",
 			usedWebSearch: false,
 		};
@@ -796,14 +1138,14 @@ export async function researchExamSyllabus(opts: {
 	const extraTools = canSearch ? createWebTools(() => searchProvider()) : undefined;
 
 	const systemPrompt = `You are an Academic Competition & Exam Syllabus Estimator.
-Given an exam/competition/project name (for example "Olympic Toán Giải tích Sinh viên", "ICPC Regional", "OS Midterm") and optional student notes/materials, produce a realistic structured study breakdown and hour estimate, then call submit_exam_syllabus ONCE.
-${canSearch ? "You have web_search and web_fetch tools: run 1-2 targeted queries ONLY if you want to verify the official syllabus/format of a specific competition or course, then submit." : "Web search is unavailable — rely on the user's provided material text and well-established canonical syllabus structure."}
+Given an exam/competition/project name (for example "Olympic Toán Giải tích Sinh viên", "ICPC Regional", "OS Midterm") and any linked Knowledge Graph / chat session context / uploaded PDF/notes, produce a realistic structured study breakdown and hour estimate, then call submit_exam_syllabus ONCE.
+${canSearch ? "You have web_search and web_fetch tools: run 1-2 targeted queries ONLY if you want to verify the official syllabus/format of a specific competition or course, then submit." : "Web search is unavailable — rely on the user's linked graph/sessions, uploaded materials, and canonical syllabus structure."}
 Break down into 5-10 concrete syllabus topics with realistic estHours whose sum matches estimatedHours.`;
 
 	const promptText = [
 		`Target (${opts.kind ?? "exam"}): ${title}`,
 		opts.dueDate ? `Target date: ${opts.dueDate}` : null,
-		opts.materialsText?.trim() ? `Student material / outline:\n${opts.materialsText.trim().slice(0, 4000)}` : null,
+		combinedMaterial ? `Linked Graph / Sessions / Uploaded Materials:\n${combinedMaterial.slice(0, 6000)}` : null,
 	]
 		.filter(Boolean)
 		.join("\n\n");

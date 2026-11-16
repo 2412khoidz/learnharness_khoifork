@@ -181,6 +181,22 @@ export interface DailyStudyPlan {
 	modelUsed?: string;
 }
 
+export interface DayOneOffEvent {
+	id: string;
+	startTime: string; // HH:MM
+	endTime: string; // HH:MM
+	title: string;
+	category: FixedEventCategory;
+}
+
+export interface DayOverride {
+	date: string; // YYYY-MM-DD
+	skipFixedEvents?: boolean;
+	extraBusyEvents?: DayOneOffEvent[];
+	note?: string;
+	studyTargetHoursOverride?: number;
+}
+
 export interface PlannerConfig {
 	version: 1;
 	engineMode: PlannerEngineMode;
@@ -190,6 +206,8 @@ export interface PlannerConfig {
 	lifestyle: LifestyleConfig;
 	logs: Record<string, DailyHabitLog>;
 	plans: Record<string, DailyStudyPlan>;
+	dayOverrides?: Record<string, DayOverride>;
+	dismissedExamProfileIds?: string[];
 	updatedAt: string;
 }
 
@@ -263,6 +281,8 @@ export const DEFAULT_PLANNER_CONFIG: PlannerConfig = {
 	lifestyle: DEFAULT_LIFESTYLE_CONFIG,
 	logs: {},
 	plans: {},
+	dayOverrides: {},
+	dismissedExamProfileIds: [],
 	updatedAt: "",
 };
 
@@ -557,6 +577,57 @@ function sanitizePlans(raw: unknown): Record<string, DailyStudyPlan> {
 	return out;
 }
 
+function sanitizeDayOverrides(raw: unknown): Record<string, DayOverride> {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+	const out: Record<string, DayOverride> = {};
+	const entries = Object.entries(raw as Record<string, unknown>)
+		.filter(([date]) => DATE_RE.test(date))
+		.sort(([a], [b]) => b.localeCompare(a))
+		.slice(0, 120);
+	for (const [date, val] of entries) {
+		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
+		const obj = val as Record<string, unknown>;
+		const extraBusyEvents: DayOneOffEvent[] = [];
+		if (Array.isArray(obj.extraBusyEvents)) {
+			for (let i = 0; i < obj.extraBusyEvents.length && extraBusyEvents.length < 24; i++) {
+				const rawEv = obj.extraBusyEvents[i] as Record<string, unknown> | undefined;
+				if (!rawEv || typeof rawEv !== "object") continue;
+				const s = parseClockMin(rawEv.startTime);
+				const e = parseClockMin(rawEv.endTime);
+				const title = typeof rawEv.title === "string" ? rawEv.title.trim().slice(0, 80) : "";
+				if (s === null || e === null || e <= s || !title) continue;
+				const cat = rawEv.category;
+				const category: FixedEventCategory =
+					cat === "class" || cat === "club" || cat === "work" || cat === "commute" || cat === "other"
+						? cat
+						: "other";
+				extraBusyEvents.push({
+					id: typeof rawEv.id === "string" && rawEv.id.trim() ? rawEv.id.trim().slice(0, 64) : `ov_${date}_${i}`,
+					startTime: formatClockMin(s),
+					endTime: formatClockMin(e),
+					title,
+					category,
+				});
+			}
+		}
+		const skipFixedEvents = Boolean(obj.skipFixedEvents);
+		const note = typeof obj.note === "string" && obj.note.trim() ? obj.note.trim().slice(0, 400) : undefined;
+		const hasTarget = typeof obj.studyTargetHoursOverride === "number" && Number.isFinite(obj.studyTargetHoursOverride);
+		const studyTargetHoursOverride = hasTarget
+			? clamp(Math.round(Number(obj.studyTargetHoursOverride) * 10) / 10, 0, 14)
+			: undefined;
+		if (!skipFixedEvents && extraBusyEvents.length === 0 && !note && studyTargetHoursOverride === undefined) continue;
+		out[date] = {
+			date,
+			...(skipFixedEvents ? { skipFixedEvents } : {}),
+			...(extraBusyEvents.length > 0 ? { extraBusyEvents } : {}),
+			...(note ? { note } : {}),
+			...(studyTargetHoursOverride !== undefined ? { studyTargetHoursOverride } : {}),
+		};
+	}
+	return out;
+}
+
 export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DEFAULT_PLANNER_CONFIG): PlannerConfig {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		return {
@@ -566,6 +637,8 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 			lifestyle: sanitizeLifestyle(fallback.lifestyle),
 			logs: {},
 			plans: {},
+			dayOverrides: {},
+			dismissedExamProfileIds: [],
 		};
 	}
 	const obj = raw as Record<string, unknown>;
@@ -583,6 +656,8 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		lifestyle: sanitizeLifestyle(obj.lifestyle, fallback.lifestyle),
 		logs: sanitizeLogs(obj.logs),
 		plans: sanitizePlans(obj.plans),
+		dayOverrides: sanitizeDayOverrides(obj.dayOverrides),
+		dismissedExamProfileIds: sanitizeStringArray(obj.dismissedExamProfileIds, 60, 64),
 		updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : fallback.updatedAt,
 	};
 }
@@ -888,9 +963,10 @@ function collectSubjectCandidates(
 
 	// Merge milestones + any active ExamPrep exam profiles not yet represented as milestones
 	const milestones: StudyMilestone[] = [...config.milestones];
-	const existingExamProfileIds = new Set(
-		milestones.map((m) => m.examProfileId).filter((id): id is string => Boolean(id)),
-	);
+	const existingExamProfileIds = new Set([
+		...milestones.map((m) => m.examProfileId).filter((id): id is string => Boolean(id)),
+		...(config.dismissedExamProfileIds ?? []),
+	]);
 	for (const ex of signals.examPrep.config.exams ?? []) {
 		if (existingExamProfileIds.has(ex.id)) continue;
 		const matchingScopeLabels = signals.examPrep.availableScopes
@@ -1124,6 +1200,37 @@ export function optimizeSlotAssignments<T extends AssignableSubject>(
 	return best;
 }
 
+function resolveBusyEventsForDate(
+	config: PlannerConfig,
+	date: string,
+): Array<{ id: string; startTime: string; endTime: string; title: string; reason: string }> {
+	const weekday = weekdayForDate(date);
+	const override = config.dayOverrides?.[date];
+	const out: Array<{ id: string; startTime: string; endTime: string; title: string; reason: string }> = [];
+	if (!override?.skipFixedEvents) {
+		for (const ev of config.fixedEvents) {
+			if (ev.dayOfWeek !== weekday) continue;
+			out.push({
+				id: `blk_fix_${ev.id}`,
+				startTime: ev.startTime,
+				endTime: ev.endTime,
+				title: ev.title,
+				reason: `Fixed ${ev.category}`,
+			});
+		}
+	}
+	for (const ev of override?.extraBusyEvents ?? []) {
+		out.push({
+			id: `blk_dayov_${ev.id}`,
+			startTime: ev.startTime,
+			endTime: ev.endTime,
+			title: ev.title,
+			reason: `Date ${ev.category}`,
+		});
+	}
+	return out.sort((a, b) => (parseClockMin(a.startTime) ?? 0) - (parseClockMin(b.startTime) ?? 0));
+}
+
 function computeWeeklyForecast(
 	config: PlannerConfig,
 	startDate: string,
@@ -1143,11 +1250,11 @@ function computeWeeklyForecast(
 	for (let offset = 0; offset < 7; offset++) {
 		const date = addDaysToDate(startDate, offset);
 		const weekday = weekdayForDate(date);
+		const dayOverride = config.dayOverrides?.[date];
 		const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, date, config.intensity);
 		let intervals: TimeInterval[] = [{ startMin: sleepCalc.todayWakeMin, endMin: sleepCalc.tonightBedMin - 25 }];
 
-		for (const ev of config.fixedEvents) {
-			if (ev.dayOfWeek !== weekday) continue;
+		for (const ev of resolveBusyEventsForDate(config, date)) {
 			const s = parseClockMin(ev.startTime);
 			const e = parseClockMin(ev.endTime);
 			if (s === null || e === null || e <= s) continue;
@@ -1164,13 +1271,16 @@ function computeWeeklyForecast(
 		const freeBeforeHobby = intervals.reduce((acc, iv) => acc + Math.max(0, iv.endMin - iv.startMin), 0);
 		const hobbyMin = Math.min(targetHobbyMin, Math.max(0, Math.floor(freeBeforeHobby * 0.25)));
 		const focusAvail = Math.max(0, freeBeforeHobby - hobbyMin);
-		const plannedMin = Math.min(
-			Math.round(focusAvail * 0.9),
-			Math.max(
-				Math.min(focusAvail * modeUtilization, totalUrgencyNeeded + 30),
-				Math.min(focusAvail, config.intensity === "intensive" ? 240 : 120),
-			),
-		);
+		const plannedMin =
+			dayOverride?.studyTargetHoursOverride !== undefined
+				? Math.min(focusAvail, Math.round(dayOverride.studyTargetHoursOverride * 60))
+				: Math.min(
+					Math.round(focusAvail * 0.9),
+					Math.max(
+						Math.min(focusAvail * modeUtilization, totalUrgencyNeeded + 30),
+						Math.min(focusAvail, config.intensity === "intensive" ? 240 : 120),
+					),
+				);
 		const plannedHours = Math.round((plannedMin / 60) * 10) / 10;
 		const milestoneTitles = config.milestones.filter((m) => m.dueDate === date).map((m) => m.title);
 		const loadLevel: WeeklyForecastDay["loadLevel"] =
@@ -1201,13 +1311,11 @@ export function computeLocalPlannerPlan(
 	now = Date.now(),
 ): DailyStudyPlan {
 	const date = signals.date;
-	const weekday = weekdayForDate(date);
+	const dayOverride = config.dayOverrides?.[date];
 	const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, date, config.intensity);
 
 	const fixedBlocks: PlannedBlock[] = [];
-	const dayEvents = config.fixedEvents
-		.filter((ev) => ev.dayOfWeek === weekday)
-		.sort((a, b) => (parseClockMin(a.startTime) ?? 0) - (parseClockMin(b.startTime) ?? 0));
+	const dayEvents = resolveBusyEventsForDate(config, date);
 
 	let awakeIntervals: TimeInterval[] = [{ startMin: sleepCalc.todayWakeMin, endMin: sleepCalc.tonightBedMin - 25 }];
 
@@ -1219,7 +1327,7 @@ export function computeLocalPlannerPlan(
 		if (iv.endMin > iv.startMin) {
 			awakeIntervals = subtractInterval(awakeIntervals, iv);
 			fixedBlocks.push({
-				id: `blk_fix_${ev.id}`,
+				id: ev.id,
 				date,
 				startTime: formatClockMin(iv.startMin),
 				endTime: formatClockMin(iv.endMin),
@@ -1228,7 +1336,7 @@ export function computeLocalPlannerPlan(
 				durationMin: iv.endMin - iv.startMin,
 				type: "fixed",
 				title: ev.title,
-				reason: `Fixed ${ev.category}`,
+				reason: ev.reason,
 			});
 		}
 	}
@@ -1305,13 +1413,16 @@ export function computeLocalPlannerPlan(
 		config.intensity === "healthy" ? 0.58 : config.intensity === "intensive" ? 0.86 : 0.72;
 	const candidates = collectSubjectCandidates(config, signals);
 	const totalUrgencyNeeded = candidates.reduce((acc, c) => acc + c.neededMinToday, 0);
-	const rawStudyBudget = Math.min(
-		Math.round(focusBudgetAvailable * 0.9),
-		Math.max(
-			Math.min(focusBudgetAvailable * modeUtilization, totalUrgencyNeeded + 30),
-			Math.min(focusBudgetAvailable, config.intensity === "intensive" ? 240 : 120),
-		),
-	);
+	const rawStudyBudget =
+		dayOverride?.studyTargetHoursOverride !== undefined
+			? Math.min(focusBudgetAvailable, Math.round(dayOverride.studyTargetHoursOverride * 60))
+			: Math.min(
+				Math.round(focusBudgetAvailable * 0.9),
+				Math.max(
+					Math.min(focusBudgetAvailable * modeUtilization, totalUrgencyNeeded + 30),
+					Math.min(focusBudgetAvailable, config.intensity === "intensive" ? 240 : 120),
+				),
+			);
 
 	// Minimum daily study hours needed across deadlines, clamped to safe limits
 	const deadlineMinNeed = candidates.reduce((acc, c) => {
@@ -1320,28 +1431,33 @@ export function computeLocalPlannerPlan(
 		const rem = Math.max(0, c.milestone.estimatedHours - c.milestone.completedHours);
 		return acc + (rem / d) * 60;
 	}, 0);
-	const minDailyMin = Math.min(
-		focusBudgetAvailable,
-		Math.max(60, Math.round(Math.max(deadlineMinNeed, rawStudyBudget * 0.75) / 15) * 15),
-	);
+	const minDailyMin =
+		dayOverride?.studyTargetHoursOverride !== undefined
+			? Math.min(focusBudgetAvailable, Math.round(dayOverride.studyTargetHoursOverride * 60))
+			: Math.min(
+				focusBudgetAvailable,
+				Math.max(60, Math.round(Math.max(deadlineMinNeed, rawStudyBudget * 0.75) / 15) * 15),
+			);
 	const minDailyStudyHours = Math.round((minDailyMin / 60) * 10) / 10;
 
 	// Allocate minutes across multiple subjects cleanly (anti-monopoly cap <= 55% when >= 2 subjects)
 	const quotasBySubject = new Map<string, number>();
-	const urgencySum = Math.max(1, candidates.reduce((acc, c) => acc + c.urgencyScore, 0));
-	const capFraction = candidates.length >= 2 && config.intensity !== "intensive" ? 0.55 : candidates.length >= 2 ? 0.65 : 1;
-	let allocatedSum = 0;
-	for (const c of candidates) {
-		const rawShare = Math.round((rawStudyBudget * c.urgencyScore) / urgencySum);
-		const capped = Math.min(rawShare, Math.round(rawStudyBudget * capFraction));
-		const rounded = Math.max(25, Math.round(capped / 15) * 15);
-		quotasBySubject.set(c.subject, rounded);
-		allocatedSum += rounded;
-	}
-	if (allocatedSum > focusBudgetAvailable && candidates.length > 0) {
-		const ratio = (focusBudgetAvailable * 0.85) / allocatedSum;
+	if (rawStudyBudget >= 20) {
+		const urgencySum = Math.max(1, candidates.reduce((acc, c) => acc + c.urgencyScore, 0));
+		const capFraction = candidates.length >= 2 && config.intensity !== "intensive" ? 0.55 : candidates.length >= 2 ? 0.65 : 1;
+		let allocatedSum = 0;
 		for (const c of candidates) {
-			quotasBySubject.set(c.subject, Math.max(20, Math.round(((quotasBySubject.get(c.subject) ?? 30) * ratio) / 5) * 5));
+			const rawShare = Math.round((rawStudyBudget * c.urgencyScore) / urgencySum);
+			const capped = Math.min(rawShare, Math.round(rawStudyBudget * capFraction));
+			const rounded = Math.max(Math.min(25, rawStudyBudget), Math.round(capped / 15) * 15);
+			quotasBySubject.set(c.subject, rounded);
+			allocatedSum += rounded;
+		}
+		if (allocatedSum > focusBudgetAvailable && candidates.length > 0) {
+			const ratio = (focusBudgetAvailable * 0.85) / allocatedSum;
+			for (const c of candidates) {
+				quotasBySubject.set(c.subject, Math.max(20, Math.round(((quotasBySubject.get(c.subject) ?? 30) * ratio) / 5) * 5));
+			}
 		}
 	}
 
@@ -2115,4 +2231,30 @@ export function parseSimpleWeeklyText(rawText: string): FixedWeeklyEvent[] {
 		});
 	});
 	return sanitizeFixedEvents(out);
+}
+
+export interface CalendarGridCell {
+	date: string;
+	dayNum: number;
+	inMonth: boolean;
+}
+
+/** Build a Mon–Sun aligned month grid (35 or 42 cells) for Month & Year calendar views. */
+export function buildMonthGridDates(year: number, monthIndex0: number): CalendarGridCell[] {
+	const firstDayUtc = new Date(Date.UTC(year, monthIndex0, 1));
+	const mondayOffset = (firstDayUtc.getUTCDay() + 6) % 7; // Mon=0..Sun=6
+	const daysInMonth = new Date(Date.UTC(year, monthIndex0 + 1, 0)).getUTCDate();
+	const totalCells = mondayOffset + daysInMonth > 35 ? 42 : 35;
+	const startDateStr = `${year}-${String(monthIndex0 + 1).padStart(2, "0")}-01`;
+	const out: CalendarGridCell[] = [];
+	for (let i = 0; i < totalCells; i++) {
+		const delta = i - mondayOffset;
+		const date = addDaysToDate(startDateStr, delta);
+		out.push({
+			date,
+			dayNum: Number(date.slice(8, 10)),
+			inMonth: delta >= 0 && delta < daysInMonth,
+		});
+	}
+	return out;
 }

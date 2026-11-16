@@ -282,9 +282,21 @@ export function buildMobileHtml(uploadEndpoint: string): string {
           </div>
           <div id="planner-sleep-line" class="muted mono" style="font-size:11px;margin:5px 0 8px"></div>
           <div id="planner-milestones" class="scope-strip" style="margin-top:0;margin-bottom:8px"></div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
             <button type="button" class="pill-btn" id="mob-meals-ok" style="border:1px solid var(--border)">Meals OK</button>
             <button type="button" class="pill-btn" id="mob-hobby-ok" style="border:1px solid var(--border)">Hobby Done</button>
+            <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)">
+              <span>Slept</span>
+              <input type="time" id="mob-bedtime" style="border:1px solid var(--border);background:var(--bg);color:var(--ink);border-radius:8px;padding:3px 6px;font-size:11px">
+            </label>
+          </div>
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:8px" id="mob-energy-strip">
+            <span class="muted mono" style="font-size:11px;margin-right:2px">Energy:</span>
+            <button type="button" class="pill-btn" data-energy="1" style="border:1px solid var(--border);padding:3px 8px">1</button>
+            <button type="button" class="pill-btn" data-energy="2" style="border:1px solid var(--border);padding:3px 8px">2</button>
+            <button type="button" class="pill-btn" data-energy="3" style="border:1px solid var(--border);padding:3px 8px">3</button>
+            <button type="button" class="pill-btn" data-energy="4" style="border:1px solid var(--border);padding:3px 8px">4</button>
+            <button type="button" class="pill-btn" data-energy="5" style="border:1px solid var(--border);padding:3px 8px">5</button>
           </div>
           <div id="planner-blocks" class="list" style="margin-top:4px"></div>
         </div>
@@ -801,6 +813,14 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     mealsBtn.textContent = log.mealsOk ? "Meals OK ✓" : "Meals OK";
     hobbyBtn.classList.toggle("active", Boolean(log.hobbyDone));
     hobbyBtn.textContent = log.hobbyDone ? "Hobby ✓" : "Hobby Done";
+    var bedInput = byId("mob-bedtime");
+    if (bedInput) {
+      bedInput.value = log.actualBedtime || pl.recommendedBedtime || "";
+    }
+    Array.prototype.slice.call(document.querySelectorAll("#mob-energy-strip [data-energy]")).forEach(function (btn) {
+      var val = Number(btn.getAttribute("data-energy"));
+      btn.classList.toggle("active", Number(log.energyScore) === val);
+    });
 
     var blocksEl = byId("planner-blocks");
     blocksEl.innerHTML = "";
@@ -1210,6 +1230,22 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     var pl = state.planner;
     if (!pl) return;
     checkInMobilePlanner({ date: pl.date, hobbyDone: !(pl.todayLog && pl.todayLog.hobbyDone) });
+  });
+  var mobBedtime = byId("mob-bedtime");
+  if (mobBedtime) {
+    mobBedtime.addEventListener("change", function () {
+      var pl = state.planner;
+      if (!pl || !mobBedtime.value) return;
+      checkInMobilePlanner({ date: pl.date, actualBedtime: mobBedtime.value });
+    });
+  }
+  Array.prototype.slice.call(document.querySelectorAll("#mob-energy-strip [data-energy]")).forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var pl = state.planner;
+      var score = Number(btn.getAttribute("data-energy"));
+      if (!pl || !score) return;
+      checkInMobilePlanner({ date: pl.date, energyScore: score });
+    });
   });
 
   var cam = byId("cam");
