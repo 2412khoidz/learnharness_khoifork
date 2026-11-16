@@ -102,25 +102,9 @@ export interface LifestyleConfig {
 	gameBudgetMin?: number; // bounded guilt-free gaming window (scheduled before bedtime cutoff)
 	gameCutoffBeforeBedMin?: number; // min minutes before bedtime when gaming/screens stop (default 90m)
 	wellnessGuardrail?: WellnessGuardrailConfig;
-	studyRules?: string[]; // personal work-style rules (e.g. 15-90m bouts, 80/20, multi-pass scan, post-hoc /checklist log)
-	boutMinRange?: [number, number]; // flexible session duration range in minutes, e.g. [15, 90]
 	blockDurationMin: number; // default 50
 	breakDurationMin: number; // default 10
 	strictSwitchWarning: boolean;
-}
-
-export type ChecklistOutcome = "done" | "partial" | "stuck";
-
-export interface DoneChecklistEntry {
-	id: string;
-	createdAt: string;
-	minutes: number;
-	subject?: string;
-	title: string;
-	outcome: ChecklistOutcome; // ✓ done | △ partial (needs follow-up) | × stuck
-	note?: string;
-	category: JournalActivityCategory;
-	counts?: { solved?: number; partial?: number; stuck?: number };
 }
 
 export type JournalActivityCategory =
@@ -168,12 +152,10 @@ export interface DailyHabitLog {
 	energyScore?: 1 | 2 | 3 | 4 | 5;
 	completedBlockIds: string[];
 	completedChecklistIds: string[];
-	doneEntries?: DoneChecklistEntry[]; // post-hoc Notion /checklist completed log entries
 	loggedStudyMinBySubject: Record<string, number>;
 	hobbyDone: boolean;
 	mealsOk: boolean;
 	sleepOnTarget?: boolean;
-	isRestDay?: boolean;
 	note?: string;
 	journalText?: string;
 	actualEntries?: JournalActivityEntry[];
@@ -438,14 +420,6 @@ export const INTENSITY_STUDY_BOUNDS: Record<PlannerIntensity, {
 	balanced: { utilization: 0.58, softCapMin: 300, minFloorMin: 120, hardCeilingMin: 345, minHobbyMin: 55, maxSubjects: 3 },
 	intensive: { utilization: 0.80, softCapMin: 465, minFloorMin: 210, hardCeilingMin: 540, minHobbyMin: 30, maxSubjects: 3 },
 };
-
-export const DEFAULT_PERSONAL_STUDY_RULES: string[] = [
-	"Post-hoc /checklist Done-Log: finish a bout first, then log actual minutes + outcome (✓ xong · △ có hướng · × chưa ra).",
-	"Flexible 15-90m bouts: adapt duration to fatigue & difficulty (5-min start rule when stuck procrastinating).",
-	"Multi-pass sweep: ~15m stuck on one problem -> mark △/×, move on to scan others, revisit later.",
-	"80/20 focus ratio: prioritize problem-solving & active proofs over passive textbook reading.",
-	"Protect midday recovery nap (>=25m) with phone away from bed.",
-];
 
 export const DEFAULT_LIFESTYLE_CONFIG: LifestyleConfig = {
 	sleep: {
@@ -989,14 +963,6 @@ function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIF
 			}
 			: undefined;
 
-	const boutRaw = Array.isArray(obj.boutMinRange) && obj.boutMinRange.length === 2
-		? ([
-			clamp(Math.round(Number(obj.boutMinRange[0]) || 15), 5, 60),
-			clamp(Math.round(Number(obj.boutMinRange[1]) || 90), 30, 180),
-		] as [number, number])
-		: undefined;
-	const studyRules = Array.isArray(obj.studyRules) ? sanitizeStringArray(obj.studyRules, 12, 220) : undefined;
-
 	return {
 		sleep,
 		meals,
@@ -1009,54 +975,10 @@ function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIF
 			? { gameCutoffBeforeBedMin: clamp(Math.round(obj.gameCutoffBeforeBedMin), 30, 240) }
 			: {}),
 		...(wellnessGuardrail ? { wellnessGuardrail } : {}),
-		...(studyRules && studyRules.length > 0 ? { studyRules } : {}),
-		...(boutRaw ? { boutMinRange: [Math.min(boutRaw[0], boutRaw[1]), Math.max(boutRaw[0], boutRaw[1])] as [number, number] } : {}),
 		blockDurationMin: clamp(Math.round(Number(obj.blockDurationMin ?? fallback.blockDurationMin)), 25, 120),
 		breakDurationMin: clamp(Math.round(Number(obj.breakDurationMin ?? fallback.breakDurationMin)), 5, 30),
 		strictSwitchWarning: typeof obj.strictSwitchWarning === "boolean" ? obj.strictSwitchWarning : fallback.strictSwitchWarning,
 	};
-}
-
-function sanitizeDoneEntries(raw: unknown): DoneChecklistEntry[] {
-	if (!Array.isArray(raw)) return [];
-	const out: DoneChecklistEntry[] = [];
-	for (let i = 0; i < raw.length && out.length < 120; i++) {
-		const item = raw[i] as Record<string, unknown> | undefined;
-		if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-		const title = typeof item.title === "string" ? item.title.trim().slice(0, 220) : "";
-		if (!title) continue;
-		const outcome: ChecklistOutcome =
-			item.outcome === "partial" || item.outcome === "stuck" || item.outcome === "done"
-				? item.outcome
-				: "done";
-		const cat = item.category;
-		const category: JournalActivityCategory =
-			cat === "study" || cat === "class" || cat === "sleep" || cat === "meal" || cat === "hobby" || cat === "rest" || cat === "distraction" || cat === "other"
-				? cat
-				: "study";
-		const rawCounts = item.counts && typeof item.counts === "object" && !Array.isArray(item.counts)
-			? (item.counts as Record<string, unknown>)
-			: undefined;
-		const counts = rawCounts
-			? {
-				...(typeof rawCounts.solved === "number" ? { solved: clamp(Math.round(rawCounts.solved), 0, 99) } : {}),
-				...(typeof rawCounts.partial === "number" ? { partial: clamp(Math.round(rawCounts.partial), 0, 99) } : {}),
-				...(typeof rawCounts.stuck === "number" ? { stuck: clamp(Math.round(rawCounts.stuck), 0, 99) } : {}),
-			}
-			: undefined;
-		out.push({
-			id: typeof item.id === "string" && item.id.trim() ? item.id.trim().slice(0, 64) : `dn_${i}`,
-			createdAt: typeof item.createdAt === "string" ? item.createdAt : "",
-			minutes: clamp(Math.round(Number(item.minutes) || 25), 1, 600),
-			...(typeof item.subject === "string" && item.subject.trim() ? { subject: item.subject.trim().slice(0, 80) } : {}),
-			title,
-			outcome,
-			...(typeof item.note === "string" && item.note.trim() ? { note: item.note.trim().slice(0, 400) } : {}),
-			category,
-			...(counts && Object.keys(counts).length > 0 ? { counts } : {}),
-		});
-	}
-	return out;
 }
 
 function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
@@ -1084,7 +1006,6 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			}
 		}
 		const actualEntries = sanitizeActualEntries(v.actualEntries, date);
-		const doneEntries = sanitizeDoneEntries(v.doneEntries);
 		const compliance = sanitizeComplianceReport(v.compliance, date);
 		out[date] = {
 			date,
@@ -1095,12 +1016,10 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			...(energy ? { energyScore: energy } : {}),
 			completedBlockIds: sanitizeStringArray(v.completedBlockIds, 60, 80),
 			completedChecklistIds: sanitizeStringArray(v.completedChecklistIds, 120, 80),
-			...(doneEntries.length > 0 ? { doneEntries } : {}),
 			loggedStudyMinBySubject,
 			hobbyDone: Boolean(v.hobbyDone),
 			mealsOk: typeof v.mealsOk === "boolean" ? v.mealsOk : false,
 			...(typeof v.sleepOnTarget === "boolean" ? { sleepOnTarget: v.sleepOnTarget } : {}),
-			...(typeof v.isRestDay === "boolean" ? { isRestDay: v.isRestDay } : {}),
 			...(typeof v.note === "string" && v.note.trim() ? { note: v.note.trim().slice(0, 400) } : {}),
 			...(typeof v.journalText === "string" && v.journalText.trim() ? { journalText: v.journalText.trim().slice(0, 4000) } : {}),
 			...(actualEntries.length > 0 ? { actualEntries } : {}),
@@ -1803,28 +1722,6 @@ function collectSubjectCandidates(
 		);
 
 		const checklist: QuotaChecklistItem[] = [];
-		// Surface unresolved △/× items recently logged via /checklist Done-Log
-		const recentUnresolved = Object.values(config.logs)
-			.filter((l) => l.date <= targetDate)
-			.sort((a, b) => b.date.localeCompare(a.date))
-			.slice(0, 5)
-			.flatMap((l) => l.doneEntries ?? [])
-			.filter(
-				(e) =>
-					e.outcome !== "done" &&
-					e.subject &&
-					(normalizeSubjectKey(e.subject) === normalizeSubjectKey(ms.subject) ||
-						normalizeSubjectKey(e.subject).includes(normalizeSubjectKey(ms.subject)) ||
-						normalizeSubjectKey(ms.subject).includes(normalizeSubjectKey(e.subject))),
-			)
-			.slice(0, 2);
-		for (const u of recentUnresolved) {
-			const tag = u.outcome === "partial" ? "△ có hướng" : "× chưa ra";
-			checklist.push({
-				id: `chk_revisit_${ms.id}_${u.id}`,
-				text: clipPreservingLatex(`Revisit (${tag}): ${u.title}${u.note ? ` — ${u.note}` : ""}`, 150),
-			});
-		}
 		const openTopics = ms.syllabusTopics.filter((t) => !t.done).slice(0, 2);
 		for (const t of openTopics) {
 			checklist.push({ id: `chk_${ms.id}_${t.id}`, text: clipPreservingLatex(`Topic: ${t.title} (~${t.estHours}h)`, 150) });
@@ -2291,15 +2188,6 @@ function computeRealisticStudyBudget(
 ): { rawStudyBudget: number; minDailyMin: number; realism: number; examDeficitWarning?: string } {
 	const band = INTENSITY_STUDY_BOUNDS[config.intensity];
 	const realism = resolveEffectiveRealism(config, signals);
-	const isRestDay = Boolean(config.logs[date]?.isRestDay);
-	if (isRestDay && dayOverride?.studyTargetHoursOverride === undefined) {
-		return {
-			rawStudyBudget: 0,
-			minDailyMin: 0,
-			realism,
-			examDeficitWarning: "Marked as explicit Restday — full recovery & hobby/sleep recharge today (log optional light bouts anytime via /checklist).",
-		};
-	}
 	const totalUrgencyNeeded = candidates.reduce((acc, c) => acc + c.neededMinToday, 0);
 
 	const deadlineMinNeed = candidates.reduce((acc, c) => {
@@ -2919,34 +2807,6 @@ export function buildCompactPlannerDigest(
 			}
 			: null,
 		habitTrend: signals.habitTrend,
-		studyStyle: {
-			workflow: "post-hoc /checklist Done-Log (user logs work & outcomes ✓/△/× right after finishing each bout, not rigid pre-planned chores)",
-			boutMinRange: config.lifestyle.boutMinRange ?? [15, 90],
-			rules: config.lifestyle.studyRules ?? DEFAULT_PERSONAL_STUDY_RULES,
-			isRestDayToday: Boolean(config.logs[signals.date]?.isRestDay),
-		},
-		doneLogToday: (config.logs[signals.date]?.doneEntries ?? []).slice(-12).map((e) => ({
-			minutes: e.minutes,
-			subject: e.subject,
-			title: e.title,
-			outcome: e.outcome,
-			...(e.note ? { note: e.note } : {}),
-			...(e.counts ? { counts: e.counts } : {}),
-		})),
-		recentDoneLogs: Object.values(config.logs)
-			.filter((l) => l.date < signals.date && (l.doneEntries?.length ?? 0) > 0)
-			.sort((a, b) => b.date.localeCompare(a.date))
-			.slice(0, 3)
-			.map((l) => ({
-				date: l.date,
-				items: (l.doneEntries ?? []).slice(0, 6).map((e) => ({
-					min: e.minutes,
-					subj: e.subject,
-					title: e.title.slice(0, 70),
-					outcome: e.outcome,
-					...(e.note ? { note: e.note.slice(0, 80) } : {}),
-				})),
-			})),
 		localBaseline: {
 			minDailyStudyHours: baselinePlan.minDailyStudyHours,
 			plannedStudyHours: baselinePlan.plannedStudyHours,
@@ -3153,151 +3013,11 @@ export function applyLlmPlanOutput(
 
 // ─── Habit Check-in & Active Block Helpers ───────────────────────────────────
 
-const SUBJECT_ALIAS_HINTS: Array<{ tokens: string[]; subjectNeedles: string[] }> = [
-	{ tokens: ["dstt", "đstt"], subjectNeedles: ["dai so tuyen tinh", "dai so", "olympic dai so"] },
-	{ tokens: ["gt1", "gt2", "gt", "giai tich"], subjectNeedles: ["giai tich", "olympic giai tich"] },
-	{ tokens: ["ltxldl"], subjectNeedles: ["lap trinh xu ly du lieu", "xu ly du lieu"] },
-	{ tokens: ["bdtt", "bđtt"], subjectNeedles: ["bieu dien tri thuc", "tim kiem"] },
-	{ tokens: ["csth", "cst"], subjectNeedles: ["co so toan"] },
-	{ tokens: ["xstk"], subjectNeedles: ["xac suat thong ke"] },
-	{ tokens: ["vldc", "vlđc"], subjectNeedles: ["vat ly dai cuong"] },
-	{ tokens: ["ktct"], subjectNeedles: ["kinh te chinh tri"] },
-	{ tokens: ["lsd", "lsđ"], subjectNeedles: ["lich su dang"] },
-	{ tokens: ["ppllt"], subjectNeedles: ["phuong phap lap luan", "oop", "lap trinh"] },
-];
-
-export function matchKnownSubjectForDoneLog(rawText: string, knownSubjects: readonly string[]): string | undefined {
-	const norm = normalizeSubjectKey(rawText);
-	if (!norm) return undefined;
-	let best: string | undefined;
-	let bestLen = 0;
-
-	for (const sub of knownSubjects) {
-		const nk = normalizeSubjectKey(sub);
-		if (!nk || nk.length < 2) continue;
-		if ((norm.includes(nk) || nk.split(" ").filter((w) => w.length >= 3).every((w) => norm.includes(w))) && nk.length > bestLen) {
-			best = sub;
-			bestLen = nk.length;
-		}
-	}
-	if (best) return best;
-
-	const words = norm.split(/\s+/).filter(Boolean);
-	for (const hint of SUBJECT_ALIAS_HINTS) {
-		if (!hint.tokens.some((t) => words.includes(t) || norm.includes(t))) continue;
-		for (const sub of knownSubjects) {
-			const nk = normalizeSubjectKey(sub);
-			if (hint.subjectNeedles.some((needle) => nk.includes(needle))) {
-				return sub;
-			}
-		}
-		// Fallback to uppercase short label if no known subject matched yet
-		if (words.some((w) => hint.tokens.includes(w))) {
-			return hint.tokens[0]!.toUpperCase();
-		}
-	}
-	return undefined;
-}
-
-/**
- * Parse a Notion-style post-hoc `/checklist` done-log entry such as:
- *   "45p DSTT Giải nốt bài 12.6 · △ - NOTE: cần xem lại định thức"
- *   "90p GT1 (Ross 1.1.24) ✓2 △1 ×0"
- * Zero tokens, 100% deterministic.
- */
-export function parseDoneChecklistInput(
-	rawText: string,
-	knownSubjects: readonly string[] = [],
-	now = Date.now(),
-): DoneChecklistEntry {
-	const cleaned = rawText.replace(/^[-*•\s]*(\[[x✓\s]?\]\s*)?/i, "").replace(/^\/checklist\s+/i, "").trim();
-	let body = cleaned;
-	let note: string | undefined;
-
-	// Extract optional trailing reflection after " - NOTE:" / "note:" / "|"
-	const noteMatch = body.match(/(?:\s*[-–|]\s*(?:note|ghi chú|ý tưởng)\s*:?\s*)(.+)$/i);
-	if (noteMatch && noteMatch.index !== undefined) {
-		note = noteMatch[1]!.trim().slice(0, 360);
-		body = body.slice(0, noteMatch.index).trim();
-	}
-
-	// Parse counts like "✓2 △1 ×0"
-	const solvedMatch = body.match(/✓\s*(\d+)/);
-	const partialMatch = body.match(/(?:△|Δ)\s*(\d+)/);
-	const stuckMatch = body.match(/[×✕]\s*(\d+)/);
-	const counts =
-		solvedMatch || partialMatch || stuckMatch
-			? {
-				...(solvedMatch ? { solved: clamp(Number(solvedMatch[1]), 0, 99) } : {}),
-				...(partialMatch ? { partial: clamp(Number(partialMatch[1]), 0, 99) } : {}),
-				...(stuckMatch ? { stuck: clamp(Number(stuckMatch[1]), 0, 99) } : {}),
-			}
-			: undefined;
-
-	let outcome: ChecklistOutcome = "done";
-	if (/(?:^|\s)[×✕](?:\s|$)|chưa ra|bó tay|stuck/i.test(body)) outcome = "stuck";
-	else if (/(?:^|\s)(?:△|Δ)(?:\s|$)|có hướng|cần làm lại|dở/i.test(body)) outcome = "partial";
-
-	let minutes = 30;
-	const rangeMatch = body.match(/(\d{1,2})\s*(?::|h)\s*(\d{2})?\s*(?:-|–|—|đến|to)\s*(\d{1,2})\s*(?::|h)\s*(\d{2})?/i);
-	if (rangeMatch) {
-		const s = parseFlexibleTimeToken(rangeMatch[1]!, rangeMatch[2]);
-		const e = parseFlexibleTimeToken(rangeMatch[3]!, rangeMatch[4]);
-		if (s !== null && e !== null) {
-			minutes = clamp(e > s ? e - s : e + 1440 - s, 5, 600);
-		}
-	} else {
-		const hmMatch = body.match(/(\d+(?:[.,]\d+)?)\s*(?:h|giờ|gio|hours?)\s*(?:(\d{1,2})\s*(?:p|m|phút|phut))?/i);
-		const minMatch = body.match(/(\d+)\s*(?:p|m|phut|phút|mins?)\b/i);
-		if (hmMatch) {
-			const h = Number(hmMatch[1]!.replace(",", "."));
-			const m = hmMatch[2] ? Number(hmMatch[2]) : 0;
-			minutes = clamp(Math.round(h * 60 + m), 5, 600);
-		} else if (minMatch) {
-			minutes = clamp(Math.round(Number(minMatch[1]!)), 5, 600);
-		}
-	}
-
-	const matchedSubject = matchKnownSubjectForDoneLog(body, knownSubjects);
-	const { category } = classifyJournalLine(body, knownSubjects);
-	const finalCategory: JournalActivityCategory =
-		matchedSubject && category !== "hobby" && category !== "rest" && category !== "distraction"
-			? "study"
-			: category === "other" && matchedSubject
-				? "study"
-				: category;
-
-	const title = body.slice(0, 200) || cleaned.slice(0, 200) || "Completed session";
-	return {
-		id: `dn_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-		createdAt: new Date(now).toISOString(),
-		minutes,
-		...(matchedSubject ? { subject: matchedSubject } : {}),
-		title,
-		outcome,
-		...(note ? { note } : {}),
-		category: finalCategory,
-		...(counts ? { counts } : {}),
-	};
-}
-
 export interface HabitCheckInPatch {
 	date?: string;
 	toggleBlockId?: string;
 	toggleChecklistId?: string;
 	addStudyMin?: { subject: string; minutes: number; milestoneId?: string };
-	addDoneEntry?: {
-		text?: string;
-		title?: string;
-		subject?: string;
-		minutes?: number;
-		outcome?: ChecklistOutcome;
-		note?: string;
-		category?: JournalActivityCategory;
-	};
-	removeDoneEntryId?: string;
-	cycleDoneOutcomeId?: string;
-	isRestDay?: boolean;
 	actualBedtime?: string;
 	actualWakeTime?: string;
 	sleepQuality?: 1 | 2 | 3 | 4 | 5;
@@ -3329,8 +3049,6 @@ export function applyHabitCheckIn(
 	const completedBlockIds = new Set(existing.completedBlockIds);
 	const completedChecklistIds = new Set(existing.completedChecklistIds);
 	const loggedStudyMinBySubject = { ...existing.loggedStudyMinBySubject };
-	let doneEntries = [...(existing.doneEntries ?? [])];
-	let actualEntries = patch.actualEntries !== undefined ? [...patch.actualEntries] : [...(existing.actualEntries ?? [])];
 	let hobbyDone = existing.hobbyDone;
 	let milestones = config.milestones;
 
@@ -3391,93 +3109,6 @@ export function applyHabitCheckIn(
 		);
 	}
 
-	if (patch.addDoneEntry) {
-		const knownSubjects = [
-			...new Set([
-				...milestones.map((m) => m.subject),
-				...(config.plans[date]?.quotas.map((q) => q.subject) ?? []),
-			]),
-		];
-		const rawText = (patch.addDoneEntry.text ?? patch.addDoneEntry.title ?? "").trim();
-		if (rawText) {
-			const parsed = parseDoneChecklistInput(rawText, knownSubjects, now);
-			const entry: DoneChecklistEntry = {
-				...parsed,
-				...(patch.addDoneEntry.title?.trim() ? { title: patch.addDoneEntry.title.trim().slice(0, 200) } : {}),
-				...(patch.addDoneEntry.subject?.trim() ? { subject: patch.addDoneEntry.subject.trim().slice(0, 80) } : {}),
-				...(patch.addDoneEntry.minutes !== undefined && patch.addDoneEntry.minutes > 0
-					? { minutes: clamp(Math.round(patch.addDoneEntry.minutes), 1, 600) }
-					: {}),
-				...(patch.addDoneEntry.outcome ? { outcome: patch.addDoneEntry.outcome } : {}),
-				...(patch.addDoneEntry.note?.trim() ? { note: patch.addDoneEntry.note.trim().slice(0, 360) } : {}),
-				...(patch.addDoneEntry.category ? { category: patch.addDoneEntry.category } : {}),
-			};
-			doneEntries = [...doneEntries, entry].slice(-120);
-			if (entry.category === "study" && entry.subject) {
-				loggedStudyMinBySubject[entry.subject] = (loggedStudyMinBySubject[entry.subject] ?? 0) + entry.minutes;
-				const subjLower = entry.subject.toLowerCase();
-				milestones = milestones.map((m) =>
-					m.subject.toLowerCase() === subjLower
-						? {
-							...m,
-							completedHours: Math.min(m.estimatedHours, Math.round((m.completedHours + entry.minutes / 60) * 100) / 100),
-						}
-						: m,
-				);
-			} else if (entry.category === "hobby" && entry.minutes >= 15) {
-				hobbyDone = true;
-			}
-			const dNow = new Date(now);
-			const endMinNow = dNow.getHours() * 60 + dNow.getMinutes();
-			const startMinNow = Math.max(0, endMinNow - entry.minutes);
-			actualEntries = [
-				...actualEntries,
-				{
-					id: `j_${entry.id}`,
-					startTime: formatClockMin(startMinNow),
-					endTime: formatClockMin(endMinNow > startMinNow ? endMinNow : startMinNow + entry.minutes),
-					category: entry.category,
-					...(entry.subject ? { subject: entry.subject } : {}),
-					title: entry.title.slice(0, 140),
-					minutes: entry.minutes,
-					source: "manual" as const,
-				},
-			];
-		}
-	}
-
-	if (patch.cycleDoneOutcomeId) {
-		doneEntries = doneEntries.map((item) => {
-			if (item.id !== patch.cycleDoneOutcomeId) return item;
-			const nextOutcome: ChecklistOutcome =
-				item.outcome === "done" ? "partial" : item.outcome === "partial" ? "stuck" : "done";
-			return { ...item, outcome: nextOutcome };
-		});
-	}
-
-	if (patch.removeDoneEntryId) {
-		const target = doneEntries.find((item) => item.id === patch.removeDoneEntryId);
-		if (target) {
-			doneEntries = doneEntries.filter((item) => item.id !== patch.removeDoneEntryId);
-			actualEntries = actualEntries.filter((a) => a.id !== `j_${target.id}`);
-			if (target.category === "study" && target.subject) {
-				loggedStudyMinBySubject[target.subject] = Math.max(
-					0,
-					(loggedStudyMinBySubject[target.subject] ?? 0) - target.minutes,
-				);
-				const subjLower = target.subject.toLowerCase();
-				milestones = milestones.map((m) =>
-					m.subject.toLowerCase() === subjLower
-						? {
-							...m,
-							completedHours: Math.max(0, Math.round((m.completedHours - target.minutes / 60) * 100) / 100),
-						}
-						: m,
-				);
-			}
-		}
-	}
-
 	const nextLog: DailyHabitLog = {
 		...existing,
 		...(patch.actualBedtime !== undefined && parseClockMin(patch.actualBedtime) !== null
@@ -3492,11 +3123,9 @@ export function applyHabitCheckIn(
 		...(patch.hobbyDone !== undefined ? { hobbyDone: patch.hobbyDone } : { hobbyDone }),
 		...(patch.mealsOk !== undefined ? { mealsOk: patch.mealsOk } : {}),
 		...(patch.sleepOnTarget !== undefined ? { sleepOnTarget: patch.sleepOnTarget } : {}),
-		...(patch.isRestDay !== undefined ? { isRestDay: patch.isRestDay } : {}),
 		...(patch.note !== undefined ? { note: patch.note.trim().slice(0, 400) } : {}),
 		...(patch.journalText !== undefined ? { journalText: patch.journalText.trim().slice(0, 4000) } : {}),
-		...(actualEntries.length > 0 || patch.actualEntries !== undefined ? { actualEntries: sanitizeActualEntries(actualEntries, date) } : {}),
-		...(doneEntries.length > 0 ? { doneEntries } : { doneEntries: undefined }),
+		...(patch.actualEntries !== undefined ? { actualEntries: sanitizeActualEntries(patch.actualEntries, date) } : {}),
 		completedBlockIds: [...completedBlockIds],
 		completedChecklistIds: [...completedChecklistIds],
 		loggedStudyMinBySubject,
