@@ -275,6 +275,20 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       <div id="companion-error" class="hidden"></div>
 
       <div id="exam-home">
+        <div class="subcard" id="planner-mobile-card">
+          <div class="row-between">
+            <span class="serif" style="font-size:16px;font-weight:700">Today&apos;s Study Plan</span>
+            <span class="status-pill" id="planner-target-pill">--h min</span>
+          </div>
+          <div id="planner-sleep-line" class="muted mono" style="font-size:11px;margin:5px 0 8px"></div>
+          <div id="planner-milestones" class="scope-strip" style="margin-top:0;margin-bottom:8px"></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+            <button type="button" class="pill-btn" id="mob-meals-ok" style="border:1px solid var(--border)">Meals OK</button>
+            <button type="button" class="pill-btn" id="mob-hobby-ok" style="border:1px solid var(--border)">Hobby Done</button>
+          </div>
+          <div id="planner-blocks" class="list" style="margin-top:4px"></div>
+        </div>
+
         <div class="subcard">
           <div class="row-between">
             <span class="serif" style="font-size:16px;font-weight:700" id="exam-title-heading">Study Focus</span>
@@ -546,6 +560,7 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     cardIndex: 0,
     revealed: false,
     examPrep: null,
+    planner: null,
     recentSessions: [],
     activeSession: null,
     selectedOptions: [],
@@ -709,6 +724,8 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       byId("exam-weak-summary").textContent = weakParts.join(" · ");
     }
 
+    renderMobilePlanner();
+
     var list = byId("recent-sessions");
     if (!state.recentSessions.length) {
       list.innerHTML = "<div class='item muted'>No active desktop sessions found yet. Start one above!</div>";
@@ -739,6 +756,7 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         state.totalDue = data.totalDue || 0;
         state.totalTracked = data.totalTracked || 0;
         state.examPrep = data.examPrep || null;
+        state.planner = data.planner || null;
         state.recentSessions = data.recentSessions || [];
         renderCards();
         renderExamAndSessions();
@@ -751,6 +769,79 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         byId("recent-sessions").innerHTML = "<div class='item err'>" + escapeHtml(msg) + "</div>";
         showErrorBox("companion-error", msg, loadCompanionState);
         showErrorBox("cards-error", msg, loadCompanionState);
+      });
+  }
+
+  function renderMobilePlanner() {
+    var pl = state.planner;
+    var card = byId("planner-mobile-card");
+    if (!card) return;
+    if (!pl) {
+      card.classList.add("hidden");
+      return;
+    }
+    card.classList.remove("hidden");
+    byId("planner-target-pill").textContent = (pl.minDailyStudyHours || 0) + "h min · " + (pl.plannedStudyHours || 0) + "h";
+    byId("planner-sleep-line").textContent = "Sleep target: " + (pl.recommendedBedtime || "--:--") + (pl.sleepShiftAdvice ? " · " + pl.sleepShiftAdvice : "");
+
+    var msEl = byId("planner-milestones");
+    msEl.innerHTML = "";
+    (pl.upcomingMilestones || []).slice(0, 4).forEach(function (m) {
+      var chip = document.createElement("span");
+      chip.className = "scope-chip";
+      chip.textContent = m.title + " (" + (m.daysLeft >= 0 ? "D-" + m.daysLeft : "+" + Math.abs(m.daysLeft) + "d") + ")";
+      msEl.appendChild(chip);
+    });
+
+    var log = pl.todayLog || {};
+    var doneIds = log.completedBlockIds || [];
+    var mealsBtn = byId("mob-meals-ok");
+    var hobbyBtn = byId("mob-hobby-ok");
+    mealsBtn.classList.toggle("active", Boolean(log.mealsOk));
+    mealsBtn.textContent = log.mealsOk ? "Meals OK ✓" : "Meals OK";
+    hobbyBtn.classList.toggle("active", Boolean(log.hobbyDone));
+    hobbyBtn.textContent = log.hobbyDone ? "Hobby ✓" : "Hobby Done";
+
+    var blocksEl = byId("planner-blocks");
+    blocksEl.innerHTML = "";
+    var shown = (pl.blocks || []).filter(function (b) {
+      return b.type === "study" || b.type === "hobby" || b.type === "sleep";
+    }).slice(0, 8);
+    if (!shown.length) {
+      blocksEl.innerHTML = "<div class='item muted'>No scheduled study blocks yet.</div>";
+      return;
+    }
+    shown.forEach(function (b) {
+      var isDone = doneIds.indexOf(b.id) >= 0;
+      var row = document.createElement("button");
+      row.type = "button";
+      row.className = "session-item";
+      row.style.opacity = isDone ? "0.55" : "1";
+      row.innerHTML =
+        "<div class='row-between'><strong style='font-size:12px'>" + escapeHtml(b.startTime + "–" + b.endTime + " · " + b.title) + "</strong>" +
+        "<span class='mono' style='font-size:11px'>" + (isDone ? "✓ Done" : "Tap ✓") + "</span></div>" +
+        (b.reason ? "<div class='muted' style='font-size:11px;margin-top:2px'>" + escapeHtml(b.reason) + "</div>" : "");
+      row.addEventListener("click", function () {
+        checkInMobilePlanner({ date: pl.date, toggleBlockId: b.id });
+      });
+      blocksEl.appendChild(row);
+    });
+  }
+
+  function checkInMobilePlanner(patch) {
+    return fetchJson(COMPANION_URL + "/planner-checkin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    }, 12000)
+      .then(function (res) {
+        if (res && res.planner) {
+          state.planner = res.planner;
+          renderMobilePlanner();
+        }
+      })
+      .catch(function (err) {
+        showErrorBox("companion-error", "Habit check-in failed: " + err.message, function () { checkInMobilePlanner(patch); });
       });
   }
 
@@ -1110,6 +1201,16 @@ export function buildMobileHtml(uploadEndpoint: string): string {
 
   byId("cards-refresh").addEventListener("click", loadCompanionState);
   byId("exam-refresh").addEventListener("click", loadCompanionState);
+  byId("mob-meals-ok").addEventListener("click", function () {
+    var pl = state.planner;
+    if (!pl) return;
+    checkInMobilePlanner({ date: pl.date, mealsOk: !(pl.todayLog && pl.todayLog.mealsOk) });
+  });
+  byId("mob-hobby-ok").addEventListener("click", function () {
+    var pl = state.planner;
+    if (!pl) return;
+    checkInMobilePlanner({ date: pl.date, hobbyDone: !(pl.todayLog && pl.todayLog.hobbyDone) });
+  });
 
   var cam = byId("cam");
   var lib = byId("lib");

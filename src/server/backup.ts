@@ -31,6 +31,7 @@ export class BackupError extends Error {
 const ALLOWED_SINGLE_FILES = new Set([
 	"exam-prep.json",
 	"mistakes.json",
+	"planner.json",
 	"settings.json",
 	"live-models-cache.json",
 	"core-plugin-data/flashcards/flashcards.json",

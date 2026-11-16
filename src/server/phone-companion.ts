@@ -31,6 +31,8 @@ import {
 } from "../core/question-core.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
 import { readExamPrepStatus, writeExamPrepConfig } from "./exam-prep.ts";
+import { checkInPlannerHabit, readPlannerSnapshot } from "./planner.ts";
+import { daysBetweenDates, type DailyHabitLog, type DailyStudyPlan, type HabitCheckInPatch } from "../core/planner.ts";
 import { graphView } from "./graph.ts";
 import { defaultFlashcardsStorePath, loadFlashcardsScheduler, readFlashcardsSnapshot } from "./graph-fsrs.ts";
 import { effectiveSettings, stores } from "./stores.ts";
@@ -88,17 +90,33 @@ export interface MobileCompanionSessionDetail {
 	messages: MobileCompanionMessageItem[];
 }
 
+export interface MobileCompanionPlannerView {
+	date: string;
+	engineUsed: "local" | "llm";
+	intensity: string;
+	minDailyStudyHours: number;
+	plannedStudyHours: number;
+	recommendedBedtime: string;
+	sleepShiftAdvice: string;
+	todayLog: DailyHabitLog | null;
+	quotas: DailyStudyPlan["quotas"];
+	blocks: DailyStudyPlan["blocks"];
+	upcomingMilestones: Array<{ id: string; kind: string; title: string; dueDate: string; daysLeft: number }>;
+}
+
 export interface MobileCompanionState {
 	dueCards: MobileCompanionDueCard[];
 	totalDue: number;
 	totalTracked: number;
 	examPrep: ExamPrepStatus;
+	planner: MobileCompanionPlannerView;
 	recentSessions: MobileCompanionSessionItem[];
 }
 
 export interface MobileCompanionOptions {
 	flashcardsFile?: string;
 	examPrepFile?: string;
+	plannerFile?: string;
 	chatsDir?: string;
 	attachmentsDir?: string;
 	graphStore?: GraphStore;
@@ -256,6 +274,61 @@ function readRecentSessions(chatsDir = PATHS.chats, limit = 10): MobileCompanion
 	}
 }
 
+export function buildMobileCompanionPlannerView(opts: MobileCompanionOptions = {}): MobileCompanionPlannerView {
+	const now = opts.now ?? Date.now();
+	const resolvedPlannerFile =
+		opts.plannerFile ??
+		(opts.examPrepFile ? path.join(path.dirname(opts.examPrepFile), "planner.json") : undefined);
+	const snap = readPlannerSnapshot({
+		plannerFile: resolvedPlannerFile,
+		examPrepFile: opts.examPrepFile,
+		flashcardsFile: opts.flashcardsFile,
+		chatsDir: opts.chatsDir,
+		now,
+	});
+	const todayLog = snap.config.logs[snap.plan.date] ?? null;
+	const upcomingMilestones = [...snap.config.milestones]
+		.sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+		.slice(0, 6)
+		.map((m) => ({
+			id: m.id,
+			kind: m.kind,
+			title: m.title,
+			dueDate: m.dueDate,
+			daysLeft: daysBetweenDates(snap.plan.date, m.dueDate),
+		}));
+	return {
+		date: snap.plan.date,
+		engineUsed: snap.plan.engineUsed,
+		intensity: snap.plan.intensity,
+		minDailyStudyHours: snap.plan.minDailyStudyHours,
+		plannedStudyHours: snap.plan.plannedStudyHours,
+		recommendedBedtime: snap.plan.recommendedBedtime,
+		sleepShiftAdvice: snap.plan.sleepShiftAdvice,
+		todayLog,
+		quotas: snap.plan.quotas,
+		blocks: snap.plan.blocks,
+		upcomingMilestones,
+	};
+}
+
+export function updateMobileCompanionPlannerCheckIn(
+	patch: HabitCheckInPatch,
+	opts: MobileCompanionOptions = {},
+): { ok: boolean; planner: MobileCompanionPlannerView } {
+	const resolvedPlannerFile =
+		opts.plannerFile ??
+		(opts.examPrepFile ? path.join(path.dirname(opts.examPrepFile), "planner.json") : undefined);
+	checkInPlannerHabit(patch, {
+		plannerFile: resolvedPlannerFile,
+		examPrepFile: opts.examPrepFile,
+		flashcardsFile: opts.flashcardsFile,
+		chatsDir: opts.chatsDir,
+		now: opts.now,
+	});
+	return { ok: true, planner: buildMobileCompanionPlannerView(opts) };
+}
+
 export function getMobileCompanionState(opts: MobileCompanionOptions = {}): MobileCompanionState {
 	const now = opts.now ?? Date.now();
 	const flashcardsFile = opts.flashcardsFile ?? defaultFlashcardsStorePath();
@@ -274,6 +347,7 @@ export function getMobileCompanionState(opts: MobileCompanionOptions = {}): Mobi
 			},
 	);
 	const recentSessions = readRecentSessions(opts.chatsDir ?? PATHS.chats);
+	const planner = buildMobileCompanionPlannerView(opts);
 
 	const store = readFlashcardsStore(flashcardsFile);
 	if (!store || !store.propositions || typeof store.propositions !== "object") {
@@ -282,6 +356,7 @@ export function getMobileCompanionState(opts: MobileCompanionOptions = {}): Mobi
 			totalDue: 0,
 			totalTracked: 0,
 			examPrep,
+			planner,
 			recentSessions,
 		};
 	}
@@ -375,6 +450,7 @@ export function getMobileCompanionState(opts: MobileCompanionOptions = {}): Mobi
 		totalDue,
 		totalTracked,
 		examPrep,
+		planner,
 		recentSessions,
 	};
 }
@@ -458,6 +534,7 @@ export function rateMobileCompanionCard(input: {
 	const state = getMobileCompanionState({
 		flashcardsFile,
 		examPrepFile: input.examPrepFile,
+		plannerFile: input.plannerFile,
 		chatsDir: input.chatsDir,
 		graphStore: input.graphStore,
 		now: nowMs,

@@ -6,7 +6,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { MenuShell } from "@/components/menu-shell";
 import { DeleteSessionDialog } from "@/components/delete-session-dialog";
 import type { ChatDeleteMode, ThemeMode } from "@/src/core";
-import { ArchiveIcon, ArchiveRestoreIcon, CircleAlertIcon, DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PinIcon, PinOffIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveRestoreIcon, CalendarClockIcon, CircleAlertIcon, DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PinIcon, PinOffIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import { PlannerSwitchPill } from "@/components/planner-switch-pill";
 import { ActivitySection } from "@/components/activity-dock";
 import { CoverageMenuBlock } from "@/components/extraction-coverage";
 import { LhMark } from "@/components/lh-mark";
@@ -916,29 +917,40 @@ function SessionsSidebar() {
 					    learner opted out (no ambient signal, user decision). */}
 					<ActivitySection />
 
-					{/* Bottom utility row: Settings + Mistakes sit side-by-side so the
-					    session list keeps its full vertical space. */}
-					<div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1">
+					{/* Bottom utility row: Settings + Planner + Mistakes sit side-by-side so
+					    the session list keeps its full vertical space. */}
+					<div className="flex items-center justify-between gap-1 px-2.5 pb-3 pt-1">
 						<Hint label="Settings" action="open-settings" side="right">
 							<button
 								type="button"
 								onClick={() => openSettings()}
 								data-testid="settings-entry"
-								className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+								className="flex items-center gap-1 rounded-md px-1.5 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 							>
-								<SettingsIcon className="size-3" />
+								<SettingsIcon className="size-3 shrink-0" />
 								Settings
 							</button>
 						</Hint>
 						<Link
+							href="/planner"
+							data-testid="nav-planner"
+							className={cn(
+								"flex items-center gap-1 rounded-md px-1.5 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+								pathname?.startsWith("/planner") && "bg-accent text-foreground",
+							)}
+						>
+							<CalendarClockIcon className="size-3 shrink-0" />
+							Planner
+						</Link>
+						<Link
 							href="/mistakes"
 							data-testid="nav-mistakes"
 							className={cn(
-								"flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+								"flex items-center gap-1 rounded-md px-1.5 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
 								pathname?.startsWith("/mistakes") && "bg-accent text-foreground",
 							)}
 						>
-							<CircleAlertIcon className="size-3" />
+							<CircleAlertIcon className="size-3 shrink-0" />
 							Mistakes
 						</Link>
 					</div>
@@ -1073,6 +1085,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 				    matters for the events it dispatches, never for DOM priority. */}
 				<KeyboardShortcuts />
 				<PluginWidgets />
+				<PlannerSwitchPill />
 			</SettingsDialogProvider></InteractionLayersProvider>
 		</HostContentRootContext.Provider>
 		</HostRouteLifetimeProvider>

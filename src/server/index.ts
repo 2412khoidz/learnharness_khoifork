@@ -11,6 +11,7 @@ export * from "./graph.ts";
 export * from "./graph-fsrs.ts";
 export * from "./exam-prep.ts";
 export * from "./mistakes.ts";
+export * from "./planner.ts";
 export { readMistakes, writeMistakes, updateMistakes } from "../store/mistakes.ts";
 export { AnalysisUnavailable } from "./mistake-analysis.ts";
 export * from "./backup.ts";

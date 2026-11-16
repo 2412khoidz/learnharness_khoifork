@@ -11,6 +11,7 @@ import type {
 	PhoneUploadSessionInfo,
 } from "../core/attachments.ts";
 import type { ExamPrepPatch } from "../core/exam-prep.ts";
+import type { HabitCheckInPatch } from "../core/planner.ts";
 import { quoteFilePath } from "../core/file-paths.ts";
 import {
 	AttachmentError,
@@ -27,6 +28,7 @@ import {
 	rateMobileCompanionCard,
 	startMobileCompanionSession,
 	updateMobileCompanionExamPrep,
+	updateMobileCompanionPlannerCheckIn,
 } from "./phone-companion.ts";
 import { buildMobileHtml, resolveMobileAsset } from "./phone-mobile-ui.ts";
 import { ensureCloudflaredBinary, waitForTunnelReadiness } from "./tunnel-binary.ts";
@@ -388,6 +390,7 @@ interface InternalPhoneSession {
 	attachmentsDir?: string;
 	flashcardsFile?: string;
 	examPrepFile?: string;
+	plannerFile?: string;
 	chatsDir?: string;
 	server: http.Server;
 	timer: ReturnType<typeof setTimeout> | null;
@@ -820,6 +823,7 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 			const state = getMobileCompanionState({
 				flashcardsFile: session.flashcardsFile,
 				examPrepFile: session.examPrepFile,
+				plannerFile: session.plannerFile,
 				chatsDir: session.chatsDir,
 			});
 			sendJson(res, 200, state);
@@ -844,6 +848,7 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 					rating: body.rating as 1 | 2 | 3 | 4,
 					flashcardsFile: session.flashcardsFile,
 					examPrepFile: session.examPrepFile,
+					plannerFile: session.plannerFile,
 					chatsDir: session.chatsDir,
 				});
 				touchExpiry(session);
@@ -1021,6 +1026,7 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 				const result = updateMobileCompanionExamPrep(body, {
 					flashcardsFile: session.flashcardsFile,
 					examPrepFile: session.examPrepFile,
+					plannerFile: session.plannerFile,
 					chatsDir: session.chatsDir,
 				});
 				touchExpiry(session);
@@ -1031,6 +1037,30 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 					return;
 				}
 				sendJson(res, 400, { error: "Invalid exam prep payload" });
+			}
+		})();
+		return;
+	}
+
+	if (req.method === "POST" && segments.length === 4 && segments[2] === "companion" && segments[3] === "planner-checkin") {
+		void (async () => {
+			try {
+				const bytes = await readRequestBytes(req, 64 * 1024);
+				const body = JSON.parse(bytes.toString("utf8")) as HabitCheckInPatch;
+				const result = updateMobileCompanionPlannerCheckIn(body, {
+					flashcardsFile: session.flashcardsFile,
+					examPrepFile: session.examPrepFile,
+					plannerFile: session.plannerFile,
+					chatsDir: session.chatsDir,
+				});
+				touchExpiry(session);
+				sendJson(res, 200, result);
+			} catch (err) {
+				if (err instanceof AttachmentError) {
+					sendJson(res, err.status, { error: err.message });
+					return;
+				}
+				sendJson(res, 400, { error: "Invalid planner check-in payload" });
 			}
 		})();
 		return;
@@ -1077,6 +1107,7 @@ export interface CreatePhoneSessionOptions {
 	attachmentsDir?: string;
 	flashcardsFile?: string;
 	examPrepFile?: string;
+	plannerFile?: string;
 	chatsDir?: string;
 	interfaces?: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
 	/** Open a public HTTPS reverse tunnel (`trycloudflare.com` / `localhost.run`) so phones work off-Wi-Fi. */
@@ -1166,6 +1197,7 @@ export async function createPhoneUploadSession(options: CreatePhoneSessionOption
 		attachmentsDir: options.attachmentsDir,
 		flashcardsFile: options.flashcardsFile,
 		examPrepFile: options.examPrepFile,
+		plannerFile: options.plannerFile,
 		chatsDir: options.chatsDir,
 		server: null as unknown as http.Server,
 		timer: null,

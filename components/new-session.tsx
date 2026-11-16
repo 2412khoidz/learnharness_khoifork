@@ -243,18 +243,20 @@ export function NewSession({
 	initialConfigured,
 	mode = "teach",
 	drill = false,
+	initialTopic,
 }: {
 	initialConfigured: boolean;
 	mode?: "teach" | "practice";
 	drill?: boolean;
+	initialTopic?: string;
 }) {
 	const router = useRouter();
-	const [text, setText] = useState("");
+	const [text, setText] = useState(initialTopic ?? "");
 	/* The draft MIRROR ("nothing gets lost" round, 2026-10-01): the shell's
 	 * finish-first send calls THIS send after the dictation flush — which
 	 * landed via setState and may not have re-rendered yet. The send reads
 	 * the mirror; every write keeps it current. */
-	const textRef = useRef("");
+	const textRef = useRef(initialTopic ?? "");
 	const applyText = (v: string) => {
 		textRef.current = v;
 		setText(v);

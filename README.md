@@ -38,6 +38,7 @@ Bảng đối chiếu nhanh giữa **LearnHarness `v0.6.1` gốc** và **ChronoH
 | **Chế độ học & Nhịp dạy** | Một chế độ dạy mặc định duy nhất | **`Long-Term` / `Exam Prep`** + **3 nhịp dạy (`Thorough` / `Efficient` / `Crash`)** + **lọc theo môn (`Subject Scope`)** + **lưu tối đa 30 hồ sơ kỳ thi (`Saved Exams`)** |
 | **Liên kết Graph ↔ FSRS-6 ↔ Practice** | Graph chỉ lưu khái niệm; Practice độc lập với Flashcards | **Bản đồ nhiệt FSRS-6 trên Graph**, `Readiness %` có trọng số, nút **`Practice weak`** & **`Drill`**, tự **chấm ngược FSRS** khi `conclude` Practice + **1-day recheck**, **FSRS-6 Optimizer** & **Fuzz** |
 | **Sổ tay lỗi sai & Phân tích AI** | Chỉ hiển thị đúng/sai & giải thích tĩnh trong phiên chat | **Trang `/mistakes`** gom mọi câu sai (kể cả **Free recall** `explain`/`recall` qua AI `flag_mistake` hoặc nút **`Save to mistakes`**) / `"I don't know"` / bài Practice chưa giải gọn, **phân loại 9 nhóm lỗi**, tự động phân tích ngắn nguyên nhân + **"Next time" rule** ngay dưới nút **`Why`**, tool `mistakes` cho AI và tự nhắc trong **Exam Prep** |
+| **Lập lịch học tập & Thói quen** | Không có | **Trang `/planner` (Student Study OS):** chọn **`Local · 0 tokens`** (2-opt constraint solver, DueCue pace adaptation, dự báo 7 ngày) hoặc **`AI Coach` (BYOK digest gọn)**, nhập TKB bằng **Lưới 7 ngày / file `.ics` / Text / Ảnh TKB (AI)**, **AI Research đề cương & ước lượng giờ ôn** (hoặc parser `.md/.txt` 0 token), kéo giờ ngủ lệch theo bước + chu kỳ 90 phút, **Loop Habit Score mượt**, nhắc chuyển môn mềm **`PlannerSwitchPill`** + idle-to-break, đồng bộ **Mobile Companion** |
 | **Nhận biết khoảng nghỉ học** | Không theo dõi thời gian gián đoạn giữa các lượt | **Temporal Gap Hints** tự gắn ghi chú tạm sau `>= 4 giờ` / `>= 24 giờ` nghỉ trên payload gửi model |
 | **Học trên điện thoại (QR)** | Không có | **Mobile Study Companion v2** qua `Same Wi-Fi (LAN)` hoặc `Any network (HTTPS)` (Cloudflare Quick Tunnel pre-warm, chạy nền 60m): tab **`Photo`**, **`FSRS Cards`**, **`Exam & Chat`** (kèm **`📷 Camera`** & **`📎 Attach File`** trong chat) |
 | **Ghi chú, Toán & Sửa tin nhắn** | Chỉ trích dẫn vào câu hỏi hoặc chat phụ | **Sổ tay từng bài (`Notes`)** kéo rộng `280–560px`, bôi đen **`Note`** để trích dẫn, **click công thức toán copy LaTeX**, **`Edit Last`** tua ngược lượt cuối, **Pin/Archive** session, **dán ảnh Ctrl+V** |
@@ -116,7 +117,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
   - Mục **`Extraction language`** trong Settings (`src/core/output-language.ts`, mặc định `Auto (match session/notes)`, hỗ trợ `Tiếng Việt`, `English`, `日本語`, `中文`, `한국어`, `Français`, `Deutsch`, `Español`) giúp Graph & Flashcards không bị tự dịch sang tiếng Anh khi bạn học bằng tiếng Việt.
   - Sửa lỗi delimiter toán (`src/core/math-delims.ts`), phục hồi bare LaTeX cho node Graph cũ (`src/core/bare-math.ts`) & Flashcards (`plain-math.js`), và đóng gói đầy đủ font/CSS KaTeX trong `scripts/build-server.mjs`.
 - **Sao lưu & Khôi phục 1-Click (`Settings → General → Backup & Restore`, `src/server/backup.ts`):**
-  - `Export snapshot` tải file `kronoharness-backup-YYYY-MM-DD.json` (`kronoharness-backup-v1`) chứa Knowledge Graph, toàn bộ Chats, Flashcards FSRS-6 + sources, `mistakes.json`, `exam-prep.json`, `settings.json`, `live-models-cache.json` (**không** bao gồm `auth.json` / API keys).
+  - `Export snapshot` tải file `kronoharness-backup-YYYY-MM-DD.json` (`kronoharness-backup-v1`) chứa Knowledge Graph, toàn bộ Chats, Flashcards FSRS-6 + sources, `mistakes.json`, `planner.json`, `exam-prep.json`, `settings.json`, `live-models-cache.json` (**không** bao gồm `auth.json` / API keys).
   - `Restore snapshot` khôi phục toàn bộ dữ liệu học tập từ file JSON đó khi cài lại Windows hoặc chuyển máy.
 
 ### 6. Sổ tay Lỗi sai & Phân tích Nguyên nhân AI (`/mistakes` — port từ `vvcdev/learnharness` via `amoghu1s1/twig`)
@@ -143,6 +144,18 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
   - `.github/workflows/custom-windows.yml`: Build trình cài đặt Windows x64 (`ChronoHarness-0.6.1-x64-setup.exe`), có thêm tùy chọn input `copilot_student` để áp dụng thử nghiệm [PR #223](https://github.com/amosblomqvist/learnharness/pull/223) cho GitHub Copilot Student khi chạy workflow.
   - `.github/workflows/terra-minimal-windows.yml`: Workflow riêng để kiểm thử và đóng gói bản backport tối giản chỉ thêm fallback `gpt-6.1-terra` trên nền v0.6.1 gốc.
 
+### 8. Study Planner & Habit Tracker (`/planner` — Student Study OS)
+- **Giao diện tối giản & nút nhắc chuyển môn mềm (`components/sidebar.tsx`, `components/planner-page.tsx`, `components/planner-switch-pill.tsx`):**
+  - Nút **`Planner`** nằm gọn dưới chân Sidebar trái cùng hàng với **`Settings`** và **`Mistakes`**, không làm chật danh sách `Sessions`.
+  - **`PlannerSwitchPill`** tự ẩn khi chưa đặt lịch hoặc khi đang ở `/planner`: nhắc trước **2 phút** sắp hết block (`+5m` / `Switch`), đề xuất chuyển môn mềm khi hết giờ (`Switch` / `+5m` / `+15m`), và phát hiện lúc rời máy (`>= 8 phút`) để hỏi ghi nhận giờ nghỉ/sở thích — không bao giờ khóa quyền thao tác.
+- **2 Engine lập lịch & Dự báo 7 ngày (`src/core/planner.ts`, `src/server/planner.ts`):**
+  - **`Local · 0 tokens`:** Trừ quỹ thời gian cố định + ngủ + bữa ăn + sở thích, áp dụng cường độ **`Healthy` / `Balanced` / `Intensive`**, dùng **2-opt constraint solver** xếp xen kẽ đa môn (giới hạn chống cày lệch 1 môn, đưa môn `heavy` vào khung giờ tỉnh táo, tránh 2 block nặng liền kề), tự điều chỉnh quota theo tốc độ thực tế từ log cũ (**DueCue Pace Multiplier**), gắn gợi ý Graph/FSRS/Mistakes và lập **dự báo tải 7 ngày (`WeeklyForecastDay`)**.
+  - **`AI Coach` (BYOK):** Gom 1 bản digest JSON gọn (~400–800 tokens, không gửi transcript dài) cho model của chính bạn tinh chỉnh, sau đó qua lớp kiểm duyệt chống đè lịch cố định trên lớp.
+- **TKB tuần 3 cách, Đề cương kỳ thi & Nhịp sinh học:**
+  - Nhập TKB qua **Lưới 7 ngày**, dán text hoặc nạp file **`.ics` 0 token**, hoặc trích xuất từ **ảnh chụp TKB** qua model Vision.
+  - Quản lý **Exam / Competition / Project / Deadline** trên lịch **28 ngày** tới; bóc tách đề cương **`.md`/`.txt`/`.ics` (0 token)** hoặc **Auto-Research Syllabus (AI)** ước lượng tổng giờ ôn.
+  - Điều chỉnh lịch ngủ lệch (ví dụ `03:30` → `23:30` lùi dần theo bước ngày), gợi ý giờ thức dậy theo **chu kỳ 90 phút**, theo dõi **Circadian Drift**, tính **Loop Smooth Habit Score** (lỡ 1 ngày chỉ tụt nhẹ điểm, không reset streak về 0), đồng bộ hoạt động học trong ngày + check-in lên **Mobile Companion**.
+
 ---
 
 ## Hướng dẫn sử dụng nhanh
@@ -150,6 +163,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
 | Tác vụ | Thao tác trên ChronoHarness |
 |---|---|
 | **Cài model / API key** | Mở **Settings (`Ctrl+,`) → `Providers`** nhập API key (hoặc kết nối ChatGPT / GitHub Copilot / Grok / Claude Code), rồi chọn **`Strong`**, **`Cheap`**, **`Vision`** trong tab **`Agent`**. |
+| **Lập lịch học & Thói quen** | Bấm **`Planner`** dưới chân Sidebar trái → thêm **TKB** (Lưới / `.ics` / Text / Ảnh), thêm **Kỳ thi / Cuộc thi / Deadline**, chọn **`Local · 0 tokens`** hoặc **`AI Coach`** + **`Healthy / Balanced / Intensive`**. Check-in nhanh đồng bộ cả trên **Mobile Companion**. |
 | **Thêm model mới / Ẩn provider** | Mở menu chọn model dưới ô chat → **`+ Add model ID`** để thêm tay; hoặc nhấn **`Pause <provider>`** để ẩn tạm. |
 | **Ôn thi theo từng môn** | Ở thẻ **`ChronoHarness`** bên Sidebar: chuyển sang **`Exam Prep`** → **`+ New`** → bấm **`Choose subject`** tích chọn môn học → điền tên kỳ thi & ngày thi → **`Save`**. Bấm **`▴`/`▾`** để thu gọn thẻ xuống 1 dòng. |
 | **Luyện ngay kiến thức yếu** | Bấm **`Drill`** trên thẻ Sidebar, hoặc vào **Graph → bật `FSRS` → `Practice weak`**. |

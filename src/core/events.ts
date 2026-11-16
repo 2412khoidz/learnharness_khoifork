@@ -42,6 +42,8 @@ export interface ServerEvents {
 	"plugin-message": { pluginId: string; topic: string; data?: unknown };
 	/** Mistake-log mutation (mistakes fork): any record added, analyzed, retried or deleted. */
 	"mistakes-changed": Record<string, never>;
+	/** Study planner mutation: schedule, milestones, lifestyle, or daily check-in updated. */
+	"planner-changed": Record<string, never>;
 }
 
 export type ServerEventType = keyof ServerEvents;
@@ -63,6 +65,7 @@ export const SERVER_EVENT_TYPES = [
 	"plugins-changed",
 	"plugin-message",
 	"mistakes-changed",
+	"planner-changed",
 ] as const satisfies readonly ServerEventType[];
 
 /** One notification: distribute over the vocabulary so narrowing `type`
