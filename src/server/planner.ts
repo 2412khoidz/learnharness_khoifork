@@ -1067,6 +1067,11 @@ function syncExamPrepProfilesIntoConfig(
 	};
 }
 
+function localClockLabel(ms: number): string {
+	const d = new Date(ms);
+	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: string; date?: string }): PlannerSnapshotResponse {
 	const now = opts?.now ?? Date.now();
 	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
@@ -1081,7 +1086,7 @@ export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: str
 	// Use saved LLM/local plan for `date` if already generated, else compute fast 0-token local plan
 	let plan = synced.changed ? undefined : config.plans[date];
 	if (!plan) {
-		plan = computeLocalPlannerPlan(config, signals, now);
+		plan = computeLocalPlannerPlan(config, signals, now, { trimPastToNow: true });
 		config = savePlannerConfig(
 			{
 				...config,
@@ -1168,7 +1173,7 @@ export function patchPlannerConfig(
 		synced.changed;
 
 	if (scheduleInputsChanged || !resolvedNext.plans[date]) {
-		const freshLocal = computeLocalPlannerPlan(resolvedNext, signals, now);
+		const freshLocal = computeLocalPlannerPlan(resolvedNext, signals, now, { trimPastToNow: true });
 		resolvedNext.plans = { ...resolvedNext.plans, [date]: freshLocal };
 	}
 
@@ -1299,7 +1304,7 @@ export async function generatePlannerSchedule(opts: {
 	const filePath = opts.plannerFile ?? defaultPlannerPath();
 	let config = readPlannerConfig(filePath);
 	const signals = buildPlannerPersonalSignals(config, { ...opts, date, now });
-	const baseline = computeLocalPlannerPlan(config, signals, now);
+	const baseline = computeLocalPlannerPlan(config, signals, now, { trimPastToNow: true });
 
 	const effectiveMode = opts.mode ?? config.engineMode;
 	if (effectiveMode === "local") {
@@ -1353,6 +1358,7 @@ STRICT RULES:
 6. Match the user's language (Vietnamese if subjects/milestones are Vietnamese). Max 11 dynamic blocks.`;
 
 	const promptText = [
+		`CURRENT LOCAL TIME: ${localClockLabel(now)} on ${date}. Only schedule blocks that START AT OR AFTER the current time (round up to the next 5 minutes). Anything earlier today has already passed — never place or list it.`,
 		"Compact student state digest:",
 		JSON.stringify(digest),
 		opts.focusNote?.trim() ? `Extra request for today: ${opts.focusNote.trim()}` : null,
@@ -2955,6 +2961,8 @@ export async function chatWithPlannerCoachServer(
 	const coachContext = {
 		focusArea: opts.focusArea ?? "general",
 		todayDate: date,
+		currentLocalTime: localClockLabel(now),
+		scaleNotes: "energyScore and sleepQuality use a 1-5 scale (always quote as X/5, never /10). All times are local 24h.",
 		activePlanSummary: {
 			intensity: todayPlan.intensity,
 			intensityBounds: {
@@ -3022,6 +3030,7 @@ You have the student's real Schedule, Lifestyle, FSRS-6/Knowledge Graph signals,
 Respond naturally, calmly, non-judgmentally, and collaboratively in the student's language (Vietnamese if they write Vietnamese), and call \`submit_coach_response\` ONCE.
 
 OPERATING RULES:
+0. TIME AWARENESS (CRITICAL): \`currentLocalTime\` in the context is the REAL current time. Never schedule, mention as upcoming, or "fix" blocks that start before it; the server drops anything already in the past. If the student gives a time ("giờ là 16h"), trust it. energyScore / sleepQuality are 1-5 scales — always say "X/5", never "/10". After applying changes, describe only blocks that begin at or after currentLocalTime.
 1. Direct Action When Requested: If the student describes their state today ("mệt", "dậy 4h sáng", "food coma", "buồn ngủ sau ăn tối", "lên cơn sau ngủ trưa", "bỏ bớt môn X hôm nay", "chỉnh giờ ăn", "đặt giờ ngủ 22:30", "thêm gym", "giảm game") OR asks you to tailor their routine/schedule/sleep/habits, set \`shouldApplyChanges: true\` and emit exact patches in \`todayOverridePatch\`, \`todayLogPatch\`, and/or \`lifestylePatch\`.
    - For today's wake/sleep/meals/focus/blocks: put them in \`todayOverridePatch\` and set \`regenerateTodaySchedule: true\`. Only emit \`todayOverridePatch.blocks\` when they specifically want exact block placements; otherwise omit \`blocks\` so the constraint optimizer lays out a non-overlapping schedule around TKB & meals.
    - If the student reports today's actual energy, bedtime, wake time, unintended 4-5 AM awakening, food coma hit, or surfed urge windows: also update \`todayLogPatch\`.
@@ -3136,7 +3145,9 @@ OPERATING RULES:
 		if (payload.todayOverridePatch) {
 			const op = payload.todayOverridePatch;
 			const curOv: DayOverride = nextConfig.dayOverrides?.[date] ?? { date };
-			const parsedBlocks = op.blocks ? buildCustomBlocksFromCoach(op.blocks, date) : [];
+			const nowObjForBlocks = new Date(now);
+			const nowMinForBlocks = date === localDateString(now) ? Math.ceil((nowObjForBlocks.getHours() * 60 + nowObjForBlocks.getMinutes()) / 5) * 5 : 0;
+			const parsedBlocks = (op.blocks ? buildCustomBlocksFromCoach(op.blocks, date) : []).filter((b) => b.endMin > nowMinForBlocks);
 			const clearsAutoCustom =
 				parsedBlocks.length === 0 &&
 				(op.wakeTime !== undefined ||
@@ -3182,7 +3193,7 @@ OPERATING RULES:
 				lastCoachUndo: undoSnapshot,
 			});
 			const freshSignals = buildPlannerPersonalSignals(nextConfig, { ...opts, date, now });
-			const rebuiltPlan = computeLocalPlannerPlan(nextConfig, freshSignals, now);
+			const rebuiltPlan = computeLocalPlannerPlan(nextConfig, freshSignals, now, { trimPastToNow: true });
 			rebuiltPlan.coachSummary = clipPreservingLatex(payload.reply, 340);
 			rebuiltPlan.modelUsed = resolved.modelLabel;
 			nextConfig = {
@@ -3282,7 +3293,7 @@ export function undoPlannerCoachChangeServer(
 	});
 
 	const signals = buildPlannerPersonalSignals(restored, { ...opts, date, now });
-	const rebuilt = computeLocalPlannerPlan(restored, signals, now);
+	const rebuilt = computeLocalPlannerPlan(restored, signals, now, { trimPastToNow: true });
 	savePlannerConfig(
 		{
 			...restored,

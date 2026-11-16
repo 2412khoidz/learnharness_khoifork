@@ -2416,6 +2416,7 @@ export function computeLocalPlannerPlan(
 	config: PlannerConfig,
 	signals: PlannerPersonalSignals,
 	now = Date.now(),
+	options: { trimPastToNow?: boolean } = {},
 ): DailyStudyPlan {
 	const date = signals.date;
 	const dayOverride = config.dayOverrides?.[date];
@@ -2426,8 +2427,18 @@ export function computeLocalPlannerPlan(
 			? `Adaptive carryover: +${carryover.amortizedTodayMin}m redistributed gently from recent missed blocks.`
 			: undefined;
 
+	// "Now-aware" scheduling: when planning TODAY, never place anything before the current wall-clock time.
+	let fromNowMin = 0;
+	if (options.trimPastToNow && date === localDateString(now)) {
+		const nowObj = new Date(now);
+		fromNowMin = Math.ceil((nowObj.getHours() * 60 + nowObj.getMinutes()) / 5) * 5;
+	}
+
 	const baseCarve = carveAwakeScheduleBaseline(config, date, dayOverride, sleepCalc);
 	let awakeIntervals = baseCarve.awakeIntervals;
+	if (fromNowMin > 0) {
+		awakeIntervals = subtractInterval(awakeIntervals, { startMin: 0, endMin: fromNowMin });
+	}
 	const fixedBlocks = baseCarve.fixedBlocks;
 	const freeHoursTotal = Math.round((baseCarve.freeBeforeHobby / 60) * 10) / 10;
 	const band = INTENSITY_STUDY_BOUNDS[config.intensity];
@@ -2615,8 +2626,9 @@ export function computeLocalPlannerPlan(
 	// If user manually edited today's timeline directly, honor customBlocks verbatim while keeping habit metrics + 7-day forecast intact
 	const topMistakeRuleRaw = signals.mistakeHints?.recentRules[0];
 	const topMistakeRule = topMistakeRuleRaw ? clipPreservingLatex(topMistakeRuleRaw, 180) : undefined;
-	if (dayOverride?.customBlocks && dayOverride.customBlocks.length > 0) {
-		const customBlocks = dayOverride.customBlocks;
+	const activeCustomBlocks = (dayOverride?.customBlocks ?? []).filter((b) => b.endMin > fromNowMin);
+	if (activeCustomBlocks.length > 0) {
+		const customBlocks = activeCustomBlocks;
 		const studyCustom = customBlocks.filter((b) => b.type === "study");
 		const customMinutesBySubj = new Map<string, number>();
 		for (const b of studyCustom) {
@@ -2660,7 +2672,7 @@ export function computeLocalPlannerPlan(
 			weeklyForecast: computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin),
 			...(carryoverNote ? { carryoverNote } : {}),
 			realismApplied: realism,
-			...(dayOverride.focusSubjects && dayOverride.focusSubjects.length > 0 ? { activeFocusSubjects: dayOverride.focusSubjects } : {}),
+			...(dayOverride?.focusSubjects && dayOverride.focusSubjects.length > 0 ? { activeFocusSubjects: dayOverride.focusSubjects } : {}),
 			isCustomEdited: true,
 		};
 	}
@@ -2808,9 +2820,9 @@ export function computeLocalPlannerPlan(
 		reason: sleepCalc.advice,
 	};
 
-	const allBlocks = [...fixedBlocks, ...hobbyBlocks, ...studyAndBreakBlocks, windDownBlock].sort(
-		(a, b) => a.startMin - b.startMin,
-	);
+	const allBlocks = [...fixedBlocks, ...hobbyBlocks, ...studyAndBreakBlocks, windDownBlock]
+		.filter((b) => fromNowMin === 0 || b.endMin > fromNowMin)
+		.sort((a, b) => a.startMin - b.startMin);
 	const plannedMin = [...actualAssignedBySubject.values()].reduce((a, b) => a + b, 0);
 
 	const quotas: DailyQuotaItem[] = candidates

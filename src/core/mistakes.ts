@@ -7,7 +7,7 @@
 
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import type { LhMessage } from "./native-messages.ts";
-import { PRACTICE_CONCLUDE_TOOL, problemInputForConclude } from "./native-messages.ts";
+import { PRACTICE_CONCLUDE_TOOL, practiceProblemForCall, problemInputForConclude } from "./native-messages.ts";
 import type { QuestionAnswerData } from "./question-core.ts";
 
 // ─── taxonomy ────────────────────────────────────────────────────────────────
@@ -111,13 +111,16 @@ export interface MistakeRecord extends MistakeDraft {
 }
 
 export const FLAG_MISTAKE_TOOL = "flag_mistake";
-export const FLAG_MISTAKE_VERDICTS = ["wrong", "partial", "dont_know"] as const;
+export const FLAG_MISTAKE_VERDICTS = ["wrong", "partial", "dont_know", "correct", "uncertain"] as const;
 export type FlagMistakeVerdict = (typeof FLAG_MISTAKE_VERDICTS)[number];
 
 export interface FlagMistakeDetails {
 	targetToolCallId?: string;
 	verdict?: FlagMistakeVerdict;
 	summary?: string;
+	strengths?: string;
+	missing?: string;
+	correction?: string;
 }
 
 const QUIZ_TOOLS = new Set(["quiz", "probe", "explain", "recall", "mcq", "mcq_batch"]);
@@ -129,6 +132,45 @@ const OUTCOME_TEXT: Record<string, string> = {
 	movedOn: "Moved on without solving",
 	surrendered: "Gave up",
 };
+
+function practiceThinkingForProblemCall(messages: readonly LhMessage[], problemCallId: string): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i]!;
+		if ((m as { role?: string }).role !== "custom") continue;
+		const marker = m as { customType?: string; content?: string; details?: { problemCallId?: unknown; text?: unknown } };
+		if (marker.customType !== "practice-thinking") continue;
+		const details = marker.details ?? {};
+		if (details.problemCallId !== problemCallId) continue;
+		const fromDetails = typeof details.text === "string" ? details.text.trim() : "";
+		if (fromDetails) return fromDetails;
+		const fromContent = typeof marker.content === "string" ? marker.content.replace(/^Your thinking:\s*\r?\n?/i, "").trim() : "";
+		if (fromContent) return fromContent;
+	}
+	return undefined;
+}
+
+function problemCallIdForConclude(messages: readonly LhMessage[], concludeCallId: string): string | undefined {
+	const concludeIndex = messages.findIndex((m) => (m as { role?: string }).role === "assistant" && Array.isArray((m as { content?: unknown }).content) && (m as { content: Array<{ type?: string; id?: string; name?: string }> }).content.some((block) => block.type === "toolCall" && block.id === concludeCallId));
+	if (concludeIndex < 0) return undefined;
+	const clean = new Set<string>();
+	for (const m of messages) {
+		if ((m as { role?: string }).role !== "toolResult") continue;
+		const result = m as ToolResultMessage;
+		if (!result.isError) clean.add(result.toolCallId);
+	}
+	for (let i = concludeIndex; i >= 0; i--) {
+		const message = messages[i]!;
+		if ((message as { role?: string }).role !== "assistant") continue;
+		const assistant = message as { content?: Array<{ type?: string; id?: string; name?: string }> };
+		for (let bi = (assistant.content?.length ?? 0) - 1; bi >= 0; bi--) {
+			const block = assistant.content?.[bi];
+			if (!block || block.type !== "toolCall" || !clean.has(block.id ?? "") || block.name === PRACTICE_CONCLUDE_TOOL) continue;
+			const occurrence = { messageId: message.id, contentIndex: bi, toolCallId: block.id!, toolName: block.name! };
+			if (practiceProblemForCall(messages, occurrence)) return block.id;
+		}
+	}
+	return undefined;
+}
 
 function parseFlagVerdict(raw: unknown): FlagMistakeVerdict | undefined {
 	return typeof raw === "string" && (FLAG_MISTAKE_VERDICTS as readonly string[]).includes(raw)
@@ -327,13 +369,15 @@ export function findMistakes(chatId: string, messages: readonly LhMessage[]): Mi
 			const problem = problemInputForConclude(messages, result.toolCallId);
 			const statement = typeof problem?.statement === "string" ? problem.statement.trim() : "";
 			if (!statement) continue;
+			const problemCallId = problemCallIdForConclude(messages, result.toolCallId);
+			const userAnswer = problemCallId ? practiceThinkingForProblemCall(messages, problemCallId) : undefined;
 			pushDraft({
 				id: `${chatId}:${result.toolCallId}`,
 				chatId,
 				kind: "problem",
 				origin: result.toolName,
 				question: statement,
-				yourAnswer: OUTCOME_TEXT[outcome] ?? outcome,
+				yourAnswer: userAnswer ?? OUTCOME_TEXT[outcome] ?? "(no answer)",
 				correctAnswer: typeof problem?.modelSolution === "string" ? problem.modelSolution : "(not recorded)",
 				outcome,
 				...(typeof args?.verdict === "string" ? { verdict: args.verdict } : {}),

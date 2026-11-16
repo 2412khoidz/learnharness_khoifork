@@ -17,10 +17,11 @@ import { code } from "@streamdown/code";
 import { createMathPlugin } from "@streamdown/math";
 
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
+import type { ComponentProps, HTMLAttributes, ReactElement, ReactNode } from "react";
 import type { LhViewMessage } from "@/src/core";
 import {
   createContext,
+  isValidElement,
   memo,
   useCallback,
   useContext,
@@ -327,7 +328,9 @@ export const MessageBranchPage = ({
   );
 };
 
-export type MessageResponseProps = ComponentProps<typeof Streamdown>;
+export type MessageResponseProps = Omit<ComponentProps<typeof Streamdown>, "children"> & {
+  children?: ReactNode;
+};
 
 // Type-only version skew: @streamdown/code bundles shiki@3 types while
 // streamdown@2.5 expects shiki@4 types. Both work at runtime (each ships its
@@ -376,15 +379,26 @@ export const streamdownRehypePlugins = Object.values({
   harden: [hardenPlugin, { ...hardenOptions, allowedImagePrefixes: [] }],
 }) as NonNullable<StreamdownProps["rehypePlugins"]>;
 
+function normalizeMarkdownText(children: unknown): string {
+  if (typeof children === "string" || typeof children === "number") {
+    return String(children);
+  }
+  if (Array.isArray(children)) {
+    return children.map((child) => normalizeMarkdownText(child)).join("");
+  }
+  if (isValidElement(children)) {
+    const props = children.props as { children?: unknown };
+    return normalizeMarkdownText(props.children);
+  }
+  return "";
+}
+
 export const MessageResponse = memo(
   ({ className, children, ...props }: MessageResponseProps) => {
     // Legacy backslash delimiters are converted in a single linear scan;
     // native dollar math passes through to Streamdown unchanged. Incomplete
     // legacy spans are left for a later render when their closer arrives.
-    const content =
-      typeof children === "string"
-        ? transformMathDelimiters(children)
-        : children;
+    const content = transformMathDelimiters(normalizeMarkdownText(children));
 
     return (
       <Streamdown
@@ -416,7 +430,7 @@ MessageResponse.displayName = "MessageResponse";
 export function ToolContentResponse({ children, ...props }: MessageResponseProps) {
   return (
     <MessageResponse {...props}>
-      {typeof children === "string" ? repairMathForDisplay(children) : children}
+      {repairMathForDisplay(normalizeMarkdownText(children))}
     </MessageResponse>
   );
 }

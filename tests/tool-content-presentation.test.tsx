@@ -21,7 +21,7 @@ const brokenB = b.replace(String.raw`\\r`, String.raw`\r`);
 const doubled = String.raw`$\\nabla f$`;
 const input = { question: a, options: [{ label: a, value: "a" }, { label: b, value: "b" }], correctAnswer: "a", explanation: a };
 const dom = (html: string) => parseHTML(`<html><body>${html}</body></html>`).document;
-const render = (text: string, recovered = true) => renderToStaticMarkup(
+const render = (text: React.ReactNode, recovered = true) => renderToStaticMarkup(
 	recovered ? <ToolContentResponse mode="static">{text}</ToolContentResponse> : <MessageResponse mode="static">{text}</MessageResponse>);
 const tex = (html: string) => [...dom(html).querySelectorAll('annotation[encoding="application/x-tex"]')].map(n => n.textContent);
 
