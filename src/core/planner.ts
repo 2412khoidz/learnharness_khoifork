@@ -273,6 +273,37 @@ export interface DayOverride {
 	customBlocks?: PlannedBlock[];
 }
 
+export interface CoachChatAppliedChange {
+	id: string;
+	summary: string;
+	patchLabels: string[];
+	reverted?: boolean;
+}
+
+export interface CoachChatMessage {
+	id: string;
+	role: "user" | "assistant";
+	text: string;
+	timestamp: string;
+	focusArea?: "schedule" | "lifestyle" | "general";
+	modelLabel?: string;
+	appliedChange?: CoachChatAppliedChange;
+	error?: string;
+}
+
+export interface CoachUndoSnapshot {
+	messageId: string;
+	date: string;
+	prevDayOverride?: DayOverride;
+	hadDayOverride: boolean;
+	prevLifestyle: LifestyleConfig;
+	prevIntensity: PlannerIntensity;
+	prevLog?: DailyHabitLog;
+	hadLog: boolean;
+	prevMutedSubjects?: string[];
+	prevPinnedSubjects?: string[];
+}
+
 export interface PlannerConfig {
 	version: 1;
 	engineMode: PlannerEngineMode;
@@ -288,6 +319,8 @@ export interface PlannerConfig {
 	pinnedSubjects?: string[];
 	dailyMaxSubjects?: number;
 	realismFactor?: number;
+	coachChat?: CoachChatMessage[];
+	lastCoachUndo?: CoachUndoSnapshot;
 	updatedAt: string;
 }
 
@@ -1086,6 +1119,72 @@ function sanitizeDayOverrides(raw: unknown): Record<string, DayOverride> {
 	return out;
 }
 
+function sanitizeCoachChat(raw: unknown): CoachChatMessage[] {
+	if (!Array.isArray(raw)) return [];
+	const out: CoachChatMessage[] = [];
+	for (let i = 0; i < raw.length && out.length < 30; i++) {
+		const item = raw[i] as Record<string, unknown> | undefined;
+		if (!item || typeof item !== "object") continue;
+		const role = item.role === "user" || item.role === "assistant" ? item.role : null;
+		const text = typeof item.text === "string" ? item.text.trim().slice(0, 4000) : "";
+		if (!role || !text) continue;
+		const focusArea =
+			item.focusArea === "schedule" || item.focusArea === "lifestyle" || item.focusArea === "general"
+				? item.focusArea
+				: undefined;
+		let appliedChange: CoachChatAppliedChange | undefined;
+		if (item.appliedChange && typeof item.appliedChange === "object" && !Array.isArray(item.appliedChange)) {
+			const ac = item.appliedChange as Record<string, unknown>;
+			const summary = typeof ac.summary === "string" ? ac.summary.trim().slice(0, 400) : "";
+			if (summary) {
+				appliedChange = {
+					id: typeof ac.id === "string" && ac.id.trim() ? ac.id.trim().slice(0, 64) : `chg_${i}`,
+					summary,
+					patchLabels: sanitizeStringArray(ac.patchLabels, 12, 80),
+					...(ac.reverted ? { reverted: true } : {}),
+				};
+			}
+		}
+		out.push({
+			id: typeof item.id === "string" && item.id.trim() ? item.id.trim().slice(0, 64) : `cm_${i}`,
+			role,
+			text,
+			timestamp: typeof item.timestamp === "string" ? item.timestamp : "",
+			...(focusArea ? { focusArea } : {}),
+			...(typeof item.modelLabel === "string" && item.modelLabel.trim() ? { modelLabel: item.modelLabel.trim().slice(0, 80) } : {}),
+			...(appliedChange ? { appliedChange } : {}),
+			...(typeof item.error === "string" && item.error.trim() ? { error: item.error.trim().slice(0, 240) } : {}),
+		});
+	}
+	return out.slice(-30);
+}
+
+function sanitizeCoachUndo(raw: unknown): CoachUndoSnapshot | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const obj = raw as Record<string, unknown>;
+	const messageId = typeof obj.messageId === "string" ? obj.messageId.trim().slice(0, 64) : "";
+	const date = typeof obj.date === "string" && DATE_RE.test(obj.date) ? obj.date : "";
+	if (!messageId || !date) return undefined;
+	const prevIntensity: PlannerIntensity =
+		obj.prevIntensity === "healthy" || obj.prevIntensity === "intensive" || obj.prevIntensity === "balanced"
+			? obj.prevIntensity
+			: "balanced";
+	const dayMap = obj.prevDayOverride ? sanitizeDayOverrides({ [date]: obj.prevDayOverride }) : {};
+	const logMap = obj.prevLog ? sanitizeLogs({ [date]: obj.prevLog }) : {};
+	return {
+		messageId,
+		date,
+		...(dayMap[date] ? { prevDayOverride: dayMap[date] } : {}),
+		hadDayOverride: Boolean(obj.hadDayOverride),
+		prevLifestyle: sanitizeLifestyle(obj.prevLifestyle),
+		prevIntensity,
+		...(logMap[date] ? { prevLog: logMap[date] } : {}),
+		hadLog: Boolean(obj.hadLog),
+		...(Array.isArray(obj.prevMutedSubjects) ? { prevMutedSubjects: sanitizeStringArray(obj.prevMutedSubjects, 40, 80) } : {}),
+		...(Array.isArray(obj.prevPinnedSubjects) ? { prevPinnedSubjects: sanitizeStringArray(obj.prevPinnedSubjects, 40, 80) } : {}),
+	};
+}
+
 export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DEFAULT_PLANNER_CONFIG): PlannerConfig {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		return {
@@ -1099,6 +1198,7 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 			dismissedExamProfileIds: [],
 			mutedSubjects: [],
 			pinnedSubjects: [],
+			coachChat: [],
 		};
 	}
 	const obj = raw as Record<string, unknown>;
@@ -1115,6 +1215,8 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		typeof obj.realismFactor === "number" && Number.isFinite(obj.realismFactor)
 			? clamp(Math.round(Number(obj.realismFactor) * 100) / 100, 0.65, 1.25)
 			: undefined;
+	const coachChat = sanitizeCoachChat(obj.coachChat);
+	const lastCoachUndo = sanitizeCoachUndo(obj.lastCoachUndo);
 	return {
 		version: 1,
 		engineMode,
@@ -1130,6 +1232,8 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		pinnedSubjects: sanitizeStringArray(obj.pinnedSubjects, 40, 80),
 		...(dailyMaxSubjects !== undefined ? { dailyMaxSubjects } : {}),
 		...(realismFactor !== undefined ? { realismFactor } : {}),
+		...(coachChat.length > 0 ? { coachChat } : {}),
+		...(lastCoachUndo ? { lastCoachUndo } : {}),
 		updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : fallback.updatedAt,
 	};
 }

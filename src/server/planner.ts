@@ -17,11 +17,13 @@ import {
 	computePersonalizedMilestoneEstimate,
 	DEFAULT_PLANNER_CONFIG,
 	evaluatePlanVsActualLocal,
+	formatClockMin,
 	formatPlainMathPreview,
 	INTENSITY_STUDY_BOUNDS,
 	isValidDateString,
 	localDateString,
 	normalizeSubjectKey,
+	parseClockMin,
 	parseIcsWeeklyEvents,
 	parseJournalTextLocal,
 	parseLocalSyllabusOutline,
@@ -30,14 +32,22 @@ import {
 	sanitizePlannerConfig,
 	WEEKDAYS,
 	type ActiveBlockStatus,
+	type CoachChatAppliedChange,
+	type CoachChatMessage,
+	type CoachUndoSnapshot,
 	type CognitiveLoad,
 	type DailyStudyPlan,
+	type DayOverride,
 	type FixedWeeklyEvent,
 	type HabitCheckInPatch,
 	type JournalActivityEntry,
+	type LifestyleConfig,
 	type LlmCoachPlanPayload,
+	type MealSlot,
+	type PeakFocusWindow,
 	type PersonalizedWorkloadEstimate,
 	type PlanComplianceReport,
+	type PlannedBlock,
 	type PlannerConfig,
 	type PlannerEngineMode,
 	type PlannerIntensity,
@@ -49,10 +59,17 @@ import {
 	type SubjectLearningMetrics,
 	type SyllabusTopic,
 } from "../core/planner.ts";
+import {
+	computeLearningCapacityReport,
+	type LearningCapacityReport,
+	type PracticeOutcomeSample,
+	type QuizConfidenceSample,
+} from "../core/learning-capacity.ts";
 import type { ChatRecord } from "../core/contracts/chat.ts";
 import type { PlanTree } from "../core/contracts/plan.ts";
 import { parseFilePaths } from "../core/file-paths.ts";
-import { computeGraphFsrsSummary, emptyGraphFsrsSummary } from "../core/fsrs-graph.ts";
+import { computeGraphFsrsSummary, emptyGraphFsrsSummary, type GraphFsrsSummary } from "../core/fsrs-graph.ts";
+import type { MistakeRecord } from "../core/mistakes.ts";
 import { birthSessionPartition } from "../core/session-clusters.ts";
 import { resolveRoleSpec } from "../core/settings-resolution.ts";
 import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
@@ -64,6 +81,7 @@ import { healToolRecord } from "../agent/tools/heal.ts";
 import { invalidInputResult, toToolResult } from "../agent/tool-execute.ts";
 import { createWebTools } from "../agent/tools/web.ts";
 import { healEncodedArguments } from "../core/argument-heal.ts";
+import { readMistakes } from "../store/mistakes.ts";
 import { buildOutlineDigestIfNeeded, extractEpubText } from "./epub-import.ts";
 import { providerKeyPresent } from "./keys.ts";
 import { readExamPrepConfig, readExamPrepStatus } from "./exam-prep.ts";
@@ -135,10 +153,10 @@ export interface PlannerReadOptions {
 	now?: number;
 }
 
-function resolveChatsFallback(chatsDir?: string): PlannerSessionSummary[] {
+function resolveChatsFallback(chatsDir?: string, limit = 14): PlannerSessionSummary[] {
 	try {
 		if (!chatsDir) {
-			return stores.chatStore.listChats().slice(0, 14).map((c) => ({
+			return stores.chatStore.listChats().slice(0, limit).map((c) => ({
 				id: c.id,
 				title: c.title,
 				kind: c.kind,
@@ -159,7 +177,7 @@ function resolveChatsFallback(chatsDir?: string): PlannerSessionSummary[] {
 				// ignore malformed file
 			}
 		}
-		return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 14);
+		return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
 	} catch {
 		return [];
 	}
@@ -2165,4 +2183,873 @@ export async function suggestLifestyleBalanceServer(
 		tips: res.tips.slice(0, 5).map((t) => String(t).trim()).filter(Boolean),
 		modelLabel: resolved.modelLabel,
 	};
+}
+
+// ─── 7. Scientific Cognitive & Learning Capacity Diagnostics ─────────────────
+
+const QUIZ_RESULT_TOOLS = new Set(["quiz", "probe", "mcq", "mcq_batch", "explain", "recall"]);
+
+function matchKnownSubject(title: string, knownSubjects: readonly string[]): string | undefined {
+	const normTitle = normalizeSubjectKey(title);
+	if (!normTitle) return undefined;
+	let best: string | undefined;
+	let bestLen = 0;
+	for (const sub of knownSubjects) {
+		const nk = normalizeSubjectKey(sub);
+		if (nk.length >= 2 && (normTitle.includes(nk) || nk.includes(normTitle)) && nk.length > bestLen) {
+			best = sub;
+			bestLen = nk.length;
+		}
+	}
+	return best;
+}
+
+function collectQuizAndPracticeSamples(opts: {
+	sessions: readonly PlannerSessionSummary[];
+	knownSubjects: readonly string[];
+	chatsDir?: string;
+}): {
+	quizSamples: QuizConfidenceSample[];
+	practiceSamples: PracticeOutcomeSample[];
+} {
+	const quizSamples: QuizConfidenceSample[] = [];
+	const practiceSamples: PracticeOutcomeSample[] = [];
+
+	const pushQuizDetail = (detail: Record<string, unknown>, origin: string, subject: string | undefined, sessionTitle: string) => {
+		if (detail.dismissed || detail.byVoice) return;
+		const dontKnow = Boolean(detail.dontKnow);
+		const isGraded = detail.correct === true || detail.correct === false || dontKnow;
+		if (!isGraded) return;
+		const conf =
+			!dontKnow && typeof detail.confidence === "number" && Number.isFinite(detail.confidence)
+				? Math.max(0, Math.min(100, Math.round(detail.confidence)))
+				: null;
+		quizSamples.push({
+			...(subject ? { subject } : {}),
+			sessionTitle,
+			confidencePct: conf,
+			correct: detail.correct === true,
+			dontKnow,
+			origin,
+		});
+	};
+
+	for (const s of opts.sessions) {
+		const chat = readChatSafe(s.id, opts.chatsDir);
+		if (!chat) continue;
+		const sessionTitle = chat.title || s.title;
+		const subject = matchKnownSubject(sessionTitle, opts.knownSubjects);
+		const msgs = Array.isArray(chat.messages) ? chat.messages : [];
+		let lastProblemTs: number | null = null;
+
+		for (const m of msgs as Array<Record<string, unknown>>) {
+			const ts = typeof m.timestamp === "number" && Number.isFinite(m.timestamp) ? m.timestamp : null;
+			const content = Array.isArray(m.content) ? m.content : [];
+			for (const blk of content as Array<Record<string, unknown>>) {
+				if (blk.type === "toolCall" && blk.name === "problem" && ts !== null) {
+					lastProblemTs = ts;
+				}
+			}
+
+			if (m.role !== "toolResult") continue;
+			const toolName = typeof m.toolName === "string" ? m.toolName : "";
+			if (m.isError) continue;
+			const details = m.details as Record<string, unknown> | undefined;
+			if (!details || typeof details !== "object") continue;
+
+			if (QUIZ_RESULT_TOOLS.has(toolName)) {
+				if (Array.isArray(details.batch)) {
+					for (const item of details.batch as Array<Record<string, unknown>>) {
+						if (item && typeof item === "object") pushQuizDetail(item, toolName, subject, sessionTitle);
+					}
+				} else {
+					pushQuizDetail(details, toolName, subject, sessionTitle);
+				}
+			} else if (toolName === "conclude") {
+				const outcome = typeof details.outcome === "string" ? details.outcome : "";
+				if (outcome === "solved" || outcome === "solvedWithHints" || outcome === "movedOn" || outcome === "surrendered") {
+					const durMin =
+						ts !== null && lastProblemTs !== null && ts > lastProblemTs
+							? Math.round(Math.min(ts - lastProblemTs, 90 * 60_000) / 60_000)
+							: null;
+					practiceSamples.push({
+						...(subject ? { subject } : {}),
+						sessionTitle,
+						outcome,
+						rung: typeof details.rung === "string" ? details.rung : null,
+						missClass: typeof details.missClass === "string" ? details.missClass : null,
+						durationMin: durMin && durMin >= 2 ? durMin : null,
+					});
+					lastProblemTs = null;
+				}
+			}
+		}
+	}
+
+	return { quizSamples, practiceSamples };
+}
+
+export function readPlannerLearningCapacityServer(
+	opts?: PlannerReadOptions & { chatsDir?: string; date?: string },
+): {
+	report: LearningCapacityReport;
+	signals: PlannerPersonalSignals;
+	config: PlannerConfig;
+	aiAvailability: ReturnType<typeof getPlannerAiAvailability>;
+} {
+	const now = opts?.now ?? Date.now();
+	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
+	const config = readPlannerConfig(opts?.plannerFile);
+	const signals = buildPlannerPersonalSignals(config, { ...opts, date, now });
+
+	const isolatedTestMode = Boolean(opts?.plannerFile && !opts.flashcardsFile);
+	let graphNodeCount = 0;
+	let graphChainCount = 0;
+	let graphFsrs: GraphFsrsSummary = emptyGraphFsrsSummary();
+	let fsrsWeights: number[] | undefined;
+	let fsrsReviewRatings: number[] = [];
+
+	try {
+		const flashcards = isolatedTestMode ? null : readFlashcardsSnapshot(opts?.flashcardsFile);
+		if (flashcards) {
+			if (Array.isArray(flashcards.settings?.weights)) {
+				fsrsWeights = flashcards.settings.weights.filter((n): n is number => typeof n === "number" && Number.isFinite(n));
+			}
+			if (Array.isArray(flashcards.reviews)) {
+				fsrsReviewRatings = (flashcards.reviews as Array<Record<string, unknown>>)
+					.map((r) => Number(r?.rating))
+					.filter((n) => Number.isFinite(n) && n >= 1 && n <= 4);
+			}
+		}
+		if (!isolatedTestMode) {
+			const g = graphView();
+			graphNodeCount = g.propositions.length;
+			graphChainCount = g.chains.length;
+			if (flashcards && graphNodeCount > 0) {
+				graphFsrs = computeGraphFsrsSummary({ nodes: g.propositions, chains: g.chains }, flashcards, now);
+			}
+		}
+	} catch {
+		// ignore uninitialized graph/flashcards
+	}
+
+	const sessions = opts?.plannerFile && !opts.chatsDir ? [] : resolveChatsFallback(opts?.chatsDir, 40);
+	const knownSubjects = [
+		...signals.subjectSignals.map((s) => s.label),
+		...config.milestones.map((m) => m.subject),
+	];
+	const { quizSamples, practiceSamples } = collectQuizAndPracticeSamples({
+		sessions,
+		knownSubjects,
+		chatsDir: opts?.chatsDir,
+	});
+	const mistakes: MistakeRecord[] = opts?.mistakesFile
+		? readMistakes(opts.mistakesFile)
+		: isolatedTestMode
+			? []
+			: readMistakes();
+
+	const report = computeLearningCapacityReport({
+		config,
+		signals,
+		graphFsrs,
+		fsrsWeights,
+		fsrsReviewRatings,
+		graphNodeCount,
+		graphChainCount,
+		quizSamples,
+		practiceSamples,
+		mistakes,
+		now,
+	});
+
+	return {
+		report,
+		signals,
+		config,
+		aiAvailability: getPlannerAiAvailability(),
+	};
+}
+
+export function calibratePlannerFromCapacityServer(
+	opts?: PlannerReadOptions & { chatsDir?: string; date?: string },
+): { snapshot: PlannerSnapshotResponse; report: LearningCapacityReport } {
+	const now = opts?.now ?? Date.now();
+	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
+	const { report } = readPlannerLearningCapacityServer({ ...opts, date, now });
+	const snapshot = patchPlannerConfig({ realismFactor: report.recommendedRealismFactor }, { ...opts, now });
+	return { snapshot, report };
+}
+
+export interface CapacityAiDiagnosis {
+	summary: string;
+	strengths: string[];
+	bottlenecks: string[];
+	neuroProtocols: string[];
+	suggestedPaceNote: string;
+	modelLabel: string;
+}
+
+const capacityDiagnosisSchema = Type.Object({
+	summary: Type.String(),
+	strengths: Type.Array(Type.String()),
+	bottlenecks: Type.Array(Type.String()),
+	neuroProtocols: Type.Array(Type.String()),
+	suggestedPaceNote: Type.String(),
+});
+
+export async function diagnoseLearningCapacityWithAiServer(
+	opts?: PlannerReadOptions & {
+		chatsDir?: string;
+		date?: string;
+		preferredRole?: ModelRole;
+		engineOverride?: PiEngine;
+		signal?: AbortSignal;
+	},
+): Promise<{ report: LearningCapacityReport; diagnosis: CapacityAiDiagnosis }> {
+	const now = opts?.now ?? Date.now();
+	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
+	const { report, signals } = readPlannerLearningCapacityServer({ ...opts, date, now });
+
+	const resolved = opts?.engineOverride
+		? { role: "prober" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
+		: resolvePlannerEngine("coach", opts?.preferredRole);
+	if (!resolved) {
+		throw new PlannerAiUnavailable("No AI Coach model is configured (open Settings -> Models).");
+	}
+
+	interface RawCapDiag {
+		summary: string;
+		strengths: string[];
+		bottlenecks: string[];
+		neuroProtocols: string[];
+		suggestedPaceNote: string;
+	}
+
+	const res = await runPlannerSubmit<RawCapDiag>({
+		role: resolved.role,
+		engine: resolved.engine,
+		systemPrompt: `You are a Cognitive Science & Learning Analytics Coach inside ChronoHarness.
+Interpret the student's quantitative Learning Capacity telemetry (FSRS-6 Stability/Difficulty/Retention, Brier Metacognitive Calibration & Confidence Bias, Problem-Solving Velocity, Graph Foundation Risk, Error Taxonomy, Circadian Adherence) and call submit_capacity_diagnosis ONCE.
+Be strictly honest about sample counts: never invent data. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
+		promptText: JSON.stringify({
+			learningCapacityReport: report,
+			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 5) ?? [],
+			subjectSignals: signals.subjectSignals.slice(0, 8).map((s) => ({
+				label: s.label,
+				readinessPct: s.readinessPct,
+				dueCount: s.dueCount,
+				weakCount: s.weakCount,
+				untrackedCount: s.untrackedCount,
+			})),
+		}),
+		toolName: "submit_capacity_diagnosis",
+		toolDescription: "Submit cognitive science interpretation and neuro-study protocols.",
+		parameters: capacityDiagnosisSchema,
+		signal: opts?.signal,
+		fill: (raw) => raw as RawCapDiag,
+		validate: (v) => (v.summary?.trim() ? null : "Provide cognitive diagnosis summary."),
+	});
+
+	return {
+		report,
+		diagnosis: {
+			summary: res.summary.trim().slice(0, 700),
+			strengths: (res.strengths ?? []).slice(0, 4).map((s) => String(s).trim()).filter(Boolean),
+			bottlenecks: (res.bottlenecks ?? []).slice(0, 4).map((s) => String(s).trim()).filter(Boolean),
+			neuroProtocols: (res.neuroProtocols ?? []).slice(0, 4).map((s) => String(s).trim()).filter(Boolean),
+			suggestedPaceNote: String(res.suggestedPaceNote ?? "").trim().slice(0, 260),
+			modelLabel: resolved.modelLabel,
+		},
+	};
+}
+
+// ─── 8. Conversational AI Coach Side Chat (Auto-Patch Schedule & Routine) ────
+
+const coachTurnSchema = Type.Object({
+	reply: Type.String({ description: "Warm, concrete coaching reply citing actual user metrics, files, sleep or graph state." }),
+	shouldApplyChanges: Type.Boolean({ description: "True if applying edits to today's schedule/routine, today check-in log, or persistent lifestyle/habits." }),
+	changesSummary: Type.Optional(Type.String({ description: "Concise summary of applied updates." })),
+	regenerateTodaySchedule: Type.Optional(Type.Boolean({ description: "Recompute today's blocks smoothly with updated settings/focus/hours." })),
+	todayOverridePatch: Type.Optional(
+		Type.Object({
+			wakeTime: Type.Optional(Type.String({ description: "HH:MM" })),
+			sleepTime: Type.Optional(Type.String({ description: "HH:MM" })),
+			meals: Type.Optional(
+				Type.Array(
+					Type.Object({
+						label: Type.String(),
+						startTime: Type.String(),
+						durationMin: Type.Number(),
+					}),
+				),
+			),
+			focusSubjects: Type.Optional(Type.Array(Type.String())),
+			studyTargetHoursOverride: Type.Optional(Type.Number()),
+			note: Type.Optional(Type.String()),
+			blocks: Type.Optional(
+				Type.Array(
+					Type.Object({
+						startTime: Type.String({ description: "HH:MM" }),
+						endTime: Type.String({ description: "HH:MM" }),
+						type: Type.Union([
+							Type.Literal("study"),
+							Type.Literal("hobby"),
+							Type.Literal("break"),
+							Type.Literal("meal"),
+							Type.Literal("fixed"),
+							Type.Literal("sleep"),
+						]),
+						subject: Type.Optional(Type.String()),
+						title: Type.String(),
+						cognitiveLoad: Type.Optional(Type.Union([Type.Literal("heavy"), Type.Literal("medium"), Type.Literal("light")])),
+						reason: Type.Optional(Type.String()),
+						actionTopic: Type.Optional(Type.String()),
+					}),
+				),
+			),
+		}),
+	),
+	todayLogPatch: Type.Optional(
+		Type.Object({
+			energyScore: Type.Optional(Type.Number()),
+			actualBedtime: Type.Optional(Type.String()),
+			actualWakeTime: Type.Optional(Type.String()),
+			wokeEarlyUnintended: Type.Optional(Type.Boolean()),
+		}),
+	),
+	lifestylePatch: Type.Optional(
+		Type.Object({
+			intensity: Type.Optional(Type.Union([Type.Literal("healthy"), Type.Literal("balanced"), Type.Literal("intensive")])),
+			sleep: Type.Optional(
+				Type.Object({
+					currentBedtime: Type.Optional(Type.String()),
+					targetBedtime: Type.Optional(Type.String()),
+					targetSleepHours: Type.Optional(Type.Number()),
+					shiftStepMinPerDay: Type.Optional(Type.Number()),
+					peakFocusWindow: Type.Optional(
+						Type.Union([Type.Literal("auto"), Type.Literal("morning"), Type.Literal("afternoon"), Type.Literal("evening")]),
+					),
+					earlyWakingIssue: Type.Optional(Type.Boolean()),
+					preferredWakeTime: Type.Optional(Type.String()),
+					windDownBufferMin: Type.Optional(Type.Number()),
+					allowMiddayRecoveryNap: Type.Optional(Type.Boolean()),
+				}),
+			),
+			meals: Type.Optional(
+				Type.Array(
+					Type.Object({
+						label: Type.String(),
+						startTime: Type.String(),
+						durationMin: Type.Number(),
+					}),
+				),
+			),
+			hobbies: Type.Optional(Type.Array(Type.String())),
+			dailyHobbyMin: Type.Optional(Type.Number()),
+			gameBudgetMin: Type.Optional(Type.Number()),
+			gameCutoffBeforeBedMin: Type.Optional(Type.Number()),
+			wellnessGuardrail: Type.Optional(
+				Type.Object({
+					enabled: Type.Optional(Type.Boolean()),
+					riskWindows: Type.Optional(Type.Array(Type.String())),
+					replacementProtocol: Type.Optional(Type.String()),
+					targetWeeklyFreq: Type.Optional(Type.Number()),
+				}),
+			),
+			mutedSubjects: Type.Optional(Type.Array(Type.String())),
+			pinnedSubjects: Type.Optional(Type.Array(Type.String())),
+		}),
+	),
+});
+
+interface CoachTurnOut {
+	reply: string;
+	shouldApplyChanges: boolean;
+	changesSummary?: string;
+	regenerateTodaySchedule?: boolean;
+	todayOverridePatch?: {
+		wakeTime?: string;
+		sleepTime?: string;
+		meals?: Array<{ label: string; startTime: string; durationMin: number }>;
+		focusSubjects?: string[];
+		studyTargetHoursOverride?: number;
+		note?: string;
+		blocks?: Array<{
+			startTime: string;
+			endTime: string;
+			type: PlannedBlock["type"];
+			subject?: string;
+			title: string;
+			cognitiveLoad?: CognitiveLoad;
+			reason?: string;
+			actionTopic?: string;
+		}>;
+	};
+	todayLogPatch?: {
+		energyScore?: number;
+		actualBedtime?: string;
+		actualWakeTime?: string;
+		wokeEarlyUnintended?: boolean;
+	};
+	lifestylePatch?: {
+		intensity?: PlannerIntensity;
+		sleep?: Partial<LifestyleConfig["sleep"]>;
+		meals?: Array<{ label: string; startTime: string; durationMin: number }>;
+		hobbies?: string[];
+		dailyHobbyMin?: number;
+		gameBudgetMin?: number;
+		gameCutoffBeforeBedMin?: number;
+		wellnessGuardrail?: {
+			enabled?: boolean;
+			riskWindows?: string[];
+			replacementProtocol?: string;
+			targetWeeklyFreq?: number;
+		};
+		mutedSubjects?: string[];
+		pinnedSubjects?: string[];
+	};
+}
+
+function buildMealsFromCoachPatch(raw: Array<{ label: string; startTime: string; durationMin: number }>): MealSlot[] {
+	const out: MealSlot[] = [];
+	for (let i = 0; i < raw.length && out.length < 6; i++) {
+		const m = raw[i];
+		if (!m || parseClockMin(m.startTime) === null) continue;
+		out.push({
+			id: `meal_coach_${i}_${Date.now().toString(36).slice(-4)}`,
+			label: String(m.label || `Meal ${i + 1}`).trim().slice(0, 50),
+			startTime: formatClockMin(parseClockMin(m.startTime)!),
+			durationMin: Math.max(15, Math.min(120, Math.round(Number(m.durationMin) || 35))),
+		});
+	}
+	return out;
+}
+
+function buildCustomBlocksFromCoach(
+	raw: NonNullable<CoachTurnOut["todayOverridePatch"]>["blocks"],
+	date: string,
+): PlannedBlock[] {
+	if (!raw || !Array.isArray(raw)) return [];
+	const out: PlannedBlock[] = [];
+	for (let i = 0; i < raw.length && out.length < 28; i++) {
+		const b = raw[i];
+		if (!b) continue;
+		const s = parseClockMin(b.startTime);
+		const eRaw = parseClockMin(b.endTime);
+		if (s === null || eRaw === null) continue;
+		const endMin = eRaw <= s ? eRaw + 1440 : eRaw;
+		if (endMin - s < 5) continue;
+		out.push({
+			id: `coach_${date}_${i}`,
+			date,
+			startTime: formatClockMin(s),
+			endTime: formatClockMin(endMin),
+			startMin: s,
+			endMin,
+			durationMin: endMin - s,
+			type: b.type,
+			title: String(b.title || "Coach Block").trim().slice(0, 120),
+			...(b.subject?.trim() ? { subject: b.subject.trim().slice(0, 80) } : {}),
+			...(b.cognitiveLoad ? { cognitiveLoad: b.cognitiveLoad } : {}),
+			...(b.reason?.trim() ? { reason: b.reason.trim().slice(0, 180) } : {}),
+			...(b.actionTopic?.trim() ? { actionTopic: b.actionTopic.trim().slice(0, 120) } : {}),
+			...(b.type === "study" ? { strictSwitch: true } : {}),
+		});
+	}
+	return out.sort((a, b) => a.startMin - b.startMin);
+}
+
+export async function chatWithPlannerCoachServer(
+	opts: PlannerReadOptions & {
+		message: string;
+		focusArea?: "schedule" | "lifestyle" | "general";
+		preferredRole?: ModelRole;
+		chatsDir?: string;
+		date?: string;
+		engineOverride?: PiEngine;
+		signal?: AbortSignal;
+	},
+): Promise<{
+	snapshot: PlannerSnapshotResponse;
+	assistantMessage: CoachChatMessage;
+	appliedChange?: CoachChatAppliedChange;
+}> {
+	const userText = opts.message.trim().slice(0, 2000);
+	if (!userText) throw new Error("Message cannot be empty.");
+
+	const now = opts.now ?? Date.now();
+	const date = isValidDateString(opts.date) ? opts.date : localDateString(now);
+	const filePath = opts.plannerFile ?? defaultPlannerPath();
+
+	let current = readPlannerConfig(filePath);
+	const { report: capacity, signals } = readPlannerLearningCapacityServer({ ...opts, date, now });
+	const todayPlan = current.plans[date] ?? computeLocalPlannerPlan(current, signals, now);
+
+	const resolved = opts.engineOverride
+		? { role: "prober" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
+		: resolvePlannerEngine("coach", opts.preferredRole);
+	if (!resolved) {
+		throw new PlannerAiUnavailable("No model is configured for Coach Chat (open Settings -> Models).");
+	}
+
+	const band = INTENSITY_STUDY_BOUNDS[current.intensity];
+	const existingOverride = current.dayOverrides?.[date];
+	const existingLog = current.logs[date];
+	const history = (current.coachChat ?? []).slice(-10).map((m) => ({
+		role: m.role,
+		text: m.text.slice(0, 600),
+		applied: m.appliedChange?.summary,
+	}));
+
+	const digest = buildCompactPlannerDigest(current, signals, todayPlan);
+	const coachContext = {
+		focusArea: opts.focusArea ?? "general",
+		todayDate: date,
+		activePlanSummary: {
+			intensity: todayPlan.intensity,
+			intensityBounds: {
+				minStudyHours: Number((band.minFloorMin / 60).toFixed(1)),
+				softCapHours: Number((band.softCapMin / 60).toFixed(1)),
+				hardCeilingHours: Number((band.hardCeilingMin / 60).toFixed(1)),
+			},
+			todayWakeTime: todayPlan.todayWakeTime,
+			recommendedBedtime: todayPlan.recommendedBedtime,
+			plannedStudyHours: todayPlan.plannedStudyHours,
+			blocks: todayPlan.blocks.map((b) => ({
+				startTime: b.startTime,
+				endTime: b.endTime,
+				type: b.type,
+				subject: b.subject,
+				title: b.title,
+				done: existingLog?.completedBlockIds.includes(b.id) ?? false,
+			})),
+		},
+		todayOverride: existingOverride ?? null,
+		todayLog: existingLog ?? null,
+		lifestyle: current.lifestyle,
+		learningCapacity: {
+			compositeScore: capacity.compositeScore,
+			tierLabel: capacity.tierLabel,
+			confidenceLevel: capacity.confidenceLevel,
+			recommendedPaceFactor: capacity.recommendedPaceFactor,
+			recommendedRealismFactor: capacity.recommendedRealismFactor,
+			sustainableDailyHours: capacity.recommendedDailyHours,
+			metacognition: capacity.metacognition,
+			errorProfile: capacity.errorProfile,
+			dimensions: capacity.dimensions.map((d) => ({
+				title: d.title,
+				score: d.score,
+				metric: `${d.primaryMetric.value} ${d.primaryMetric.unit}`,
+				insight: d.insight,
+			})),
+			subjectBreakdown: capacity.subjectBreakdown.slice(0, 8),
+		},
+		knowledgeAndSessionsDigest: {
+			milestones: digest.milestones,
+			knowledgeSignals: digest.knowledgeSignals,
+			recentSessions: signals.recentSessions.slice(0, 8).map((s) => ({ title: s.title, kind: s.kind })),
+			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 4) ?? [],
+		},
+		recentSleepLogs: Object.values(current.logs)
+			.sort((a, b) => b.date.localeCompare(a.date))
+			.slice(0, 5)
+			.map((l) => ({
+				date: l.date,
+				slept: l.actualBedtime,
+				woke: l.actualWakeTime,
+				earlyWake: l.wokeEarlyUnintended,
+				energy: l.energyScore,
+				adherencePct: l.compliance?.adherencePct,
+			})),
+		recentCoachConversation: history,
+	};
+
+	const systemPrompt = `You are a deeply informed, supportive personal Study, Sleep & Habit Coach inside ChronoHarness.
+You have the student's real Schedule, Lifestyle, FSRS-6/Knowledge Graph signals, Past Chat Sessions, Mistake rules, and Scientific Learning Capacity telemetry.
+Respond naturally and collaboratively in the student's language (Vietnamese if they write Vietnamese), and call \`submit_coach_response\` ONCE.
+
+OPERATING RULES:
+1. Direct Action When Requested: If the student describes their state today ("mệt", "dậy 4h sáng", "bỏ bớt môn X hôm nay", "chỉnh giờ ăn", "đặt giờ ngủ 22:30", "thêm gym", "giảm game") OR asks you to modify their routine/schedule/sleep/habits, set \`shouldApplyChanges: true\` and emit exact patches in \`todayOverridePatch\`, \`todayLogPatch\`, and/or \`lifestylePatch\`.
+   - For today's wake/sleep/meals/focus/blocks: put them in \`todayOverridePatch\` and set \`regenerateTodaySchedule: true\`. Only emit \`todayOverridePatch.blocks\` when they specifically want exact block placements; otherwise omit \`blocks\` so the constraint optimizer lays out a non-overlapping schedule around TKB & meals.
+   - If the student reports today's actual energy, bedtime, wake time, or unintended 4-5 AM awakening: also update \`todayLogPatch\`.
+   - If they want persistent habit changes (target bedtime, early waking care, midday nap preference, default meal times, hobbies, game budget/cutoff, discreet guardrails, muted/pinned subjects, intensity): update \`lifestylePatch\`.
+2. Strictly Grounded & Discreet: Cite the student's real subjects, attached files, open chapters, FSRS/Graph metrics, or mistake rules. Never invent nonexistent metrics. If adjusting \`wellnessGuardrail\`, keep visible block titles 100% neutral and discreet.
+3. Pure Questions: If they only ask a question or ask for feedback without wanting edits, set \`shouldApplyChanges: false\`.`;
+
+	const payload = await runPlannerSubmit<CoachTurnOut>({
+		role: resolved.role,
+		engine: resolved.engine,
+		systemPrompt,
+		promptText: `Student context:\n${JSON.stringify(coachContext)}\n\nStudent's new message:\n${userText}`,
+		toolName: "submit_coach_response",
+		toolDescription: "Submit the conversational coaching reply and any structured schedule/routine/lifestyle edits.",
+		parameters: coachTurnSchema,
+		signal: opts.signal,
+		fill: (raw) => raw as CoachTurnOut,
+		validate: (val) => (val.reply?.trim() ? null : "Provide a non-empty reply."),
+	});
+
+	const userMsgId = `cm_u_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+	const aiMsgId = `cm_a_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+	const nowIso = new Date(now).toISOString();
+
+	const patchLabels: string[] = [];
+	let appliedChange: CoachChatAppliedChange | undefined;
+	let nextConfig = current;
+
+	if (payload.shouldApplyChanges) {
+		const undoSnapshot: CoachUndoSnapshot = {
+			messageId: aiMsgId,
+			date,
+			...(existingOverride ? { prevDayOverride: structuredClone(existingOverride) } : {}),
+			hadDayOverride: Boolean(existingOverride),
+			prevLifestyle: structuredClone(current.lifestyle),
+			prevIntensity: current.intensity,
+			...(existingLog ? { prevLog: structuredClone(existingLog) } : {}),
+			hadLog: Boolean(existingLog),
+			...(current.mutedSubjects ? { prevMutedSubjects: [...current.mutedSubjects] } : {}),
+			...(current.pinnedSubjects ? { prevPinnedSubjects: [...current.pinnedSubjects] } : {}),
+		};
+
+		// 1. Today Log Check-In Patch
+		if (payload.todayLogPatch) {
+			const lp = payload.todayLogPatch;
+			const energy = lp.energyScore && lp.energyScore >= 1 && lp.energyScore <= 5
+				? (Math.round(lp.energyScore) as 1 | 2 | 3 | 4 | 5)
+				: undefined;
+			const checkPatch: HabitCheckInPatch = {
+				date,
+				...(energy ? { energyScore: energy } : {}),
+				...(lp.actualBedtime && parseClockMin(lp.actualBedtime) !== null ? { actualBedtime: lp.actualBedtime } : {}),
+				...(lp.actualWakeTime && parseClockMin(lp.actualWakeTime) !== null ? { actualWakeTime: lp.actualWakeTime } : {}),
+				...(typeof lp.wokeEarlyUnintended === "boolean" ? { wokeEarlyUnintended: lp.wokeEarlyUnintended } : {}),
+			};
+			if (Object.keys(checkPatch).length > 1) {
+				nextConfig = applyHabitCheckIn(nextConfig, checkPatch, now);
+				patchLabels.push("Today check-in log");
+			}
+		}
+
+		// 2. Persistent Lifestyle & Subject Focus Patch
+		if (payload.lifestylePatch) {
+			const lp = payload.lifestylePatch;
+			const nextLifestyle: LifestyleConfig = {
+				...nextConfig.lifestyle,
+				sleep: {
+					...nextConfig.lifestyle.sleep,
+					...(lp.sleep ?? {}),
+				},
+				...(lp.meals && lp.meals.length > 0 ? { meals: buildMealsFromCoachPatch(lp.meals) } : {}),
+				...(lp.hobbies ? { hobbies: lp.hobbies.slice(0, 10).map((h) => String(h).trim()).filter(Boolean) } : {}),
+				...(lp.dailyHobbyMin !== undefined ? { dailyHobbyMin: lp.dailyHobbyMin } : {}),
+				...(lp.gameBudgetMin !== undefined ? { gameBudgetMin: lp.gameBudgetMin } : {}),
+				...(lp.gameCutoffBeforeBedMin !== undefined ? { gameCutoffBeforeBedMin: lp.gameCutoffBeforeBedMin } : {}),
+				...(lp.wellnessGuardrail
+					? {
+						wellnessGuardrail: {
+							enabled: lp.wellnessGuardrail.enabled ?? nextConfig.lifestyle.wellnessGuardrail?.enabled ?? false,
+							riskWindows: lp.wellnessGuardrail.riskWindows ?? nextConfig.lifestyle.wellnessGuardrail?.riskWindows,
+							replacementProtocol: lp.wellnessGuardrail.replacementProtocol ?? nextConfig.lifestyle.wellnessGuardrail?.replacementProtocol,
+							targetWeeklyFreq: lp.wellnessGuardrail.targetWeeklyFreq ?? nextConfig.lifestyle.wellnessGuardrail?.targetWeeklyFreq,
+						},
+					}
+					: {}),
+			};
+			nextConfig = {
+				...nextConfig,
+				...(lp.intensity ? { intensity: lp.intensity } : {}),
+				...(lp.mutedSubjects !== undefined ? { mutedSubjects: lp.mutedSubjects } : {}),
+				...(lp.pinnedSubjects !== undefined ? { pinnedSubjects: lp.pinnedSubjects } : {}),
+				lifestyle: nextLifestyle,
+			};
+			if (lp.intensity) patchLabels.push(`Intensity: ${lp.intensity}`);
+			if (lp.sleep) patchLabels.push("Sleep habit profile");
+			if (lp.meals && lp.meals.length > 0) patchLabels.push("Default meal windows");
+			if (lp.hobbies || lp.dailyHobbyMin !== undefined || lp.gameBudgetMin !== undefined) patchLabels.push("Hobbies/Gaming balance");
+			if (lp.wellnessGuardrail) patchLabels.push("Habit guardrails");
+			if (lp.mutedSubjects !== undefined || lp.pinnedSubjects !== undefined) patchLabels.push("Subject filters");
+		}
+
+		// 3. Today DayOverride Patch
+		if (payload.todayOverridePatch) {
+			const op = payload.todayOverridePatch;
+			const curOv: DayOverride = nextConfig.dayOverrides?.[date] ?? { date };
+			const parsedBlocks = op.blocks ? buildCustomBlocksFromCoach(op.blocks, date) : [];
+			const clearsAutoCustom =
+				parsedBlocks.length === 0 &&
+				(op.wakeTime !== undefined ||
+					op.sleepTime !== undefined ||
+					op.meals !== undefined ||
+					op.focusSubjects !== undefined ||
+					op.studyTargetHoursOverride !== undefined ||
+					payload.regenerateTodaySchedule);
+
+			const updatedOv: DayOverride = {
+				...curOv,
+				date,
+				...(op.wakeTime && parseClockMin(op.wakeTime) !== null ? { wakeTime: formatClockMin(parseClockMin(op.wakeTime)!) } : {}),
+				...(op.sleepTime && parseClockMin(op.sleepTime) !== null ? { bedTime: formatClockMin(parseClockMin(op.sleepTime)!) } : {}),
+				...(op.meals && op.meals.length > 0 ? { meals: buildMealsFromCoachPatch(op.meals) } : {}),
+				...(op.focusSubjects !== undefined ? { focusSubjects: op.focusSubjects } : {}),
+				...(op.studyTargetHoursOverride !== undefined ? { studyTargetHoursOverride: op.studyTargetHoursOverride } : {}),
+				...(op.note !== undefined ? { note: op.note } : {}),
+				...(parsedBlocks.length > 0
+					? { customBlocks: parsedBlocks }
+					: clearsAutoCustom
+						? { customBlocks: undefined }
+						: {}),
+			};
+			nextConfig = {
+				...nextConfig,
+				dayOverrides: {
+					...(nextConfig.dayOverrides ?? {}),
+					[date]: updatedOv,
+				},
+			};
+			if (op.wakeTime) patchLabels.push(`Wake ${op.wakeTime}`);
+			if (op.sleepTime) patchLabels.push(`Sleep ${op.sleepTime}`);
+			if (op.meals && op.meals.length > 0) patchLabels.push("Today meals");
+			if (op.focusSubjects !== undefined) patchLabels.push(op.focusSubjects.length > 0 ? `Focus: ${op.focusSubjects.join(", ")}` : "Cleared focus filter");
+			if (op.studyTargetHoursOverride !== undefined) patchLabels.push(`Target ${op.studyTargetHoursOverride}h`);
+			if (parsedBlocks.length > 0) patchLabels.push(`${parsedBlocks.length} tailored blocks`);
+		}
+
+		if (patchLabels.length > 0 || payload.regenerateTodaySchedule) {
+			nextConfig = sanitizePlannerConfig({
+				...nextConfig,
+				lastCoachUndo: undoSnapshot,
+			});
+			const freshSignals = buildPlannerPersonalSignals(nextConfig, { ...opts, date, now });
+			const rebuiltPlan = computeLocalPlannerPlan(nextConfig, freshSignals, now);
+			rebuiltPlan.coachSummary = clipPreservingLatex(payload.reply, 340);
+			rebuiltPlan.modelUsed = resolved.modelLabel;
+			nextConfig = {
+				...nextConfig,
+				plans: {
+					...nextConfig.plans,
+					[date]: rebuiltPlan,
+				},
+			};
+			const summaryText =
+				payload.changesSummary?.trim() ||
+				(patchLabels.length > 0 ? patchLabels.join(" · ") : "Updated today's schedule");
+			appliedChange = {
+				id: `chg_${now.toString(36)}`,
+				summary: summaryText.slice(0, 320),
+				patchLabels: patchLabels.slice(0, 8),
+			};
+		}
+	}
+
+	const userMsg: CoachChatMessage = {
+		id: userMsgId,
+		role: "user",
+		text: userText,
+		timestamp: nowIso,
+		...(opts.focusArea ? { focusArea: opts.focusArea } : {}),
+	};
+	const assistantMsg: CoachChatMessage = {
+		id: aiMsgId,
+		role: "assistant",
+		text: payload.reply.trim().slice(0, 3800),
+		timestamp: nowIso,
+		...(opts.focusArea ? { focusArea: opts.focusArea } : {}),
+		modelLabel: resolved.modelLabel,
+		...(appliedChange ? { appliedChange } : {}),
+	};
+
+	const saved = savePlannerConfig(
+		{
+			...nextConfig,
+			coachChat: [...(nextConfig.coachChat ?? []), userMsg, assistantMsg].slice(-30),
+			updatedAt: nowIso,
+		},
+		filePath,
+	);
+
+	return {
+		snapshot: readPlannerSnapshot({ ...opts, date, now }),
+		assistantMessage: saved.coachChat?.at(-1) ?? assistantMsg,
+		...(appliedChange ? { appliedChange } : {}),
+	};
+}
+
+export function undoPlannerCoachChangeServer(
+	opts?: PlannerReadOptions & { messageId?: string; chatsDir?: string; date?: string },
+): { snapshot: PlannerSnapshotResponse; undone: boolean } {
+	const now = opts?.now ?? Date.now();
+	const filePath = opts?.plannerFile ?? defaultPlannerPath();
+	const current = readPlannerConfig(filePath);
+	const undo = current.lastCoachUndo;
+	if (!undo || (opts?.messageId && undo.messageId !== opts.messageId)) {
+		return { snapshot: readPlannerSnapshot({ ...opts, now }), undone: false };
+	}
+
+	const date = undo.date;
+	const nextOverrides = { ...(current.dayOverrides ?? {}) };
+	if (undo.hadDayOverride && undo.prevDayOverride) {
+		nextOverrides[date] = undo.prevDayOverride;
+	} else {
+		delete nextOverrides[date];
+	}
+
+	const nextLogs = { ...current.logs };
+	if (undo.hadLog && undo.prevLog) {
+		nextLogs[date] = undo.prevLog;
+	} else {
+		delete nextLogs[date];
+	}
+
+	const nextChat = (current.coachChat ?? []).map((m) =>
+		m.id === undo.messageId && m.appliedChange
+			? { ...m, appliedChange: { ...m.appliedChange, reverted: true } }
+			: m,
+	);
+
+	const restored: PlannerConfig = sanitizePlannerConfig({
+		...current,
+		intensity: undo.prevIntensity,
+		lifestyle: undo.prevLifestyle,
+		dayOverrides: nextOverrides,
+		logs: nextLogs,
+		...(undo.prevMutedSubjects !== undefined ? { mutedSubjects: undo.prevMutedSubjects } : {}),
+		...(undo.prevPinnedSubjects !== undefined ? { pinnedSubjects: undo.prevPinnedSubjects } : {}),
+		coachChat: nextChat,
+		lastCoachUndo: undefined,
+		updatedAt: new Date(now).toISOString(),
+	});
+
+	const signals = buildPlannerPersonalSignals(restored, { ...opts, date, now });
+	const rebuilt = computeLocalPlannerPlan(restored, signals, now);
+	savePlannerConfig(
+		{
+			...restored,
+			plans: { ...restored.plans, [date]: rebuilt },
+		},
+		filePath,
+	);
+
+	return {
+		snapshot: readPlannerSnapshot({ ...opts, date, now }),
+		undone: true,
+	};
+}
+
+export function clearPlannerCoachChatServer(
+	opts?: PlannerReadOptions & { chatsDir?: string; date?: string },
+): PlannerSnapshotResponse {
+	const now = opts?.now ?? Date.now();
+	const filePath = opts?.plannerFile ?? defaultPlannerPath();
+	const current = readPlannerConfig(filePath);
+	savePlannerConfig(
+		{
+			...current,
+			coachChat: [],
+			lastCoachUndo: undefined,
+			updatedAt: new Date(now).toISOString(),
+		},
+		filePath,
+	);
+	return readPlannerSnapshot({ ...opts, now });
 }

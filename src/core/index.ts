@@ -116,3 +116,4 @@ export * from "./fsrs-graph.ts";
 export * from "./exam-prep.ts";
 export * from "./mistakes.ts";
 export * from "./planner.ts";
+export * from "./learning-capacity.ts";

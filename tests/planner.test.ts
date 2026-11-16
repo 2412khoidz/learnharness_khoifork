@@ -18,6 +18,7 @@ import {
 	clipPreservingLatex,
 	computeExamPrepStatus,
 	computeHabitStrengthSummary,
+	computeLearningCapacityReport,
 	computeLocalPlannerPlan,
 	computeLoopHabitStep,
 	computePersonalizedMilestoneEstimate,
@@ -43,9 +44,13 @@ import { buildMobileHtml } from "../src/server/phone-mobile-ui.ts";
 import {
 	buildLinkedClusterContext,
 	buildPlannerPersonalSignals,
+	calibratePlannerFromCapacityServer,
+	chatWithPlannerCoachServer,
 	checkInPlannerHabit,
+	clearPlannerCoachChatServer,
 	closePhoneUploadSession,
 	createPhoneUploadSession,
+	diagnoseLearningCapacityWithAiServer,
 	estimateMilestoneWorkloadServer,
 	evaluateDailyJournalServer,
 	extractPlannerMaterialFile,
@@ -53,9 +58,11 @@ import {
 	getMobileCompanionState,
 	patchPlannerConfig,
 	parseWeeklyScheduleInput,
+	readPlannerLearningCapacityServer,
 	readPlannerSnapshot,
 	researchExamSyllabus,
 	suggestLifestyleBalanceServer,
+	undoPlannerCoachChangeServer,
 	writeExamPrepConfig,
 } from "../src/server/index.ts";
 
@@ -1259,5 +1266,274 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 			}),
 		});
 		assert.equal(aiOpt.gameCutoffBeforeBedMin, 120);
+	});
+
+	it("computes scientific 6-axis Learning Capacity diagnostics & powers conversational Coach Side Chat with Undo", async () => {
+		const report = computeLearningCapacityReport({
+			config: {
+				...DEFAULT_PLANNER_CONFIG,
+				realismFactor: 0.9,
+				logs: {
+					"2026-11-15": {
+						date: "2026-11-15",
+						actualBedtime: "23:30",
+						actualWakeTime: "04:45",
+						wokeEarlyUnintended: true,
+						energyScore: 2,
+						completedBlockIds: [],
+						completedChecklistIds: [],
+						loggedStudyMinBySubject: { "Olympic Giải tích": 180 },
+						hobbyDone: true,
+						mealsOk: true,
+						compliance: {
+							date: "2026-11-15",
+							evaluatedAt: "2026-11-15T22:00:00Z",
+							evaluatedBy: "local",
+							adherencePct: 76,
+							plannedStudyMin: 240,
+							actualStudyMin: 180,
+							realismRatio: 0.75,
+							summary: "76%",
+							strengths: [],
+							frictionPoints: [],
+							nextDayAdvice: "Pace down morning",
+						},
+					},
+				},
+			},
+			signals: {
+				...sampleSignals("2026-11-16"),
+				learningProfile: {
+					sufficientData: true,
+					sufficiencyReason: "Calibrated",
+					totalFsrsReviews: 24,
+					totalPracticeSessions: 4,
+					totalTeachSessions: 2,
+					loggedStudyDays: 2,
+					overallRetentionPct: 83,
+					overallSolveRatePct: 67,
+					avgMinutesPerProblem: 22,
+					avgMinutesPerTopic: 45,
+					sustainableDailyHours: 4.5,
+					realismFactor: 0.9,
+					bySubject: {
+						"Olympic Giải tích": {
+							subject: "Olympic Giải tích",
+							fsrsReviews: 24,
+							fsrsTrackedNodes: 6,
+							retentionRatePct: 83,
+							lapseRatePct: 12,
+							avgDifficulty: 6.1,
+							avgStabilityDays: 11.4,
+							practiceSessions: 4,
+							practiceSolvedCount: 4,
+							practiceHintsCount: 1,
+							practiceUnsolvedCount: 1,
+							practiceSolveRatePct: 67,
+							avgMinutesPerProblem: 22,
+							avgMinutesPerSession: 48,
+							teachSessions: 2,
+							loggedPlannerMinutes: 180,
+							paceFactor: 1.12,
+						},
+					},
+				},
+			},
+			fsrsWeights: new Array<number>(21).fill(0.25),
+			fsrsReviewRatings: [3, 4, 3, 1, 3, 4, 2, 3],
+			graphNodeCount: 20,
+			graphChainCount: 12,
+			quizSamples: [
+				{ subject: "Olympic Giải tích", sessionTitle: "Olympic Giải tích", confidencePct: 95, correct: false, dontKnow: false, origin: "quiz" },
+				{ subject: "Olympic Giải tích", sessionTitle: "Olympic Giải tích", confidencePct: 90, correct: true, dontKnow: false, origin: "quiz" },
+				{ subject: "Olympic Giải tích", sessionTitle: "Olympic Giải tích", confidencePct: 85, correct: false, dontKnow: false, origin: "quiz" },
+			],
+			practiceSamples: [
+				{ subject: "Olympic Giải tích", sessionTitle: "Olympic Giải tích", outcome: "solved", rung: null, missClass: null, durationMin: 20 },
+				{ subject: "Olympic Giải tích", sessionTitle: "Olympic Giải tích", outcome: "solvedWithHints", rung: "R1", missClass: "careless", durationMin: 24 },
+			],
+			mistakes: [
+				{
+					id: "c1:tc1",
+					chatId: "c1",
+					kind: "missed",
+					origin: "quiz",
+					question: "Limit question",
+					yourAnswer: "A",
+					correctAnswer: "B",
+					answeredAt: "2026-11-15T10:00:00Z",
+					sessionTitle: "Olympic Giải tích",
+					sessionKind: "teach",
+					sources: [],
+					createdAt: "2026-11-15T10:00:00Z",
+					status: "ready",
+					analysis: {
+						errorType: "calculation-slip",
+						topic: "Recurrence",
+						whatYouDid: "Wrong sign",
+						correct: "Invert sequence",
+						rule: "Dùng nghịch đảo $\\frac{1}{x_n}$",
+					},
+				},
+			],
+			now: new Date("2026-11-16T08:00:00Z").getTime(),
+		});
+
+		assert.equal(report.dimensions.length, 6);
+		assert.ok(report.compositeScore !== null && report.compositeScore > 0);
+		assert.equal(report.dataCoverage.hasCustomFsrsWeights, true);
+		assert.equal(report.metacognition.biasDirection, "overconfident");
+		assert.ok((report.metacognition.brierScore ?? 0) > 0.3);
+		assert.equal(report.errorProfile.slipRatePct, 100);
+		assert.ok(report.subjectBreakdown.some((s) => s.subject === "Olympic Giải tích" && s.quizBiasPct !== null));
+
+		// End-to-end isolated storage tests for Capacity + Coach Side Chat + Undo
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-coach-"));
+		const plannerFile = path.join(dir, "planner.json");
+		const chatsDir = path.join(dir, "chats");
+		const flashcardsFile = path.join(dir, "flashcards.json");
+		const mistakesFile = path.join(dir, "mistakes.json");
+		fs.mkdirSync(chatsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(chatsDir, "c1.json"),
+			JSON.stringify({
+				id: "c1",
+				title: "Dạy Olympic Giải tích",
+				kind: "practice",
+				createdAt: "2026-11-15T09:00:00Z",
+				updatedAt: "2026-11-15T11:00:00Z",
+				messages: [
+					{ role: "assistant", content: [{ type: "toolCall", id: "p1", name: "problem", arguments: {} }], timestamp: 1000 },
+					{
+						role: "toolResult",
+						toolCallId: "q1",
+						toolName: "quiz",
+						details: { kind: "quiz", questionText: "Cauchy?", dontKnow: false, answers: [{ label: "A" }], correct: true, confidence: 85, answeredAt: "2026-11-15T09:10:00Z" },
+						isError: false,
+						timestamp: 601_000,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "p1",
+						toolName: "conclude",
+						details: { outcome: "solved", rung: null, missClass: null },
+						isError: false,
+						timestamp: 960_000,
+					},
+				],
+			}),
+		);
+		fs.writeFileSync(
+			flashcardsFile,
+			JSON.stringify({
+				settings: { weights: new Array<number>(21).fill(0.22) },
+				reviews: [{ rating: 3 }, { rating: 4 }, { rating: 3 }, { rating: 3 }],
+				propositions: {},
+			}),
+		);
+		fs.writeFileSync(mistakesFile, "[]");
+		patchPlannerConfig(
+			{
+				milestones: [
+					{
+						id: "m_olp",
+						kind: "competition",
+						title: "Olympic Giải tích",
+						subject: "Olympic Giải tích",
+						dueDate: "2026-11-26",
+						priority: 3,
+						cognitiveLoad: "heavy",
+						clusterIds: [],
+						estimatedHours: 25,
+						completedHours: 0,
+						syllabusTopics: [],
+						notes: "",
+					},
+				],
+			},
+			{ plannerFile },
+		);
+
+		const capRead = readPlannerLearningCapacityServer({ plannerFile, chatsDir, flashcardsFile, mistakesFile, date: "2026-11-16" });
+		assert.equal(capRead.report.dataCoverage.quizConfidenceSamples, 1);
+		assert.equal(capRead.report.dataCoverage.practiceProblems, 1);
+		assert.equal(capRead.report.dataCoverage.hasCustomFsrsWeights, true);
+
+		const diagRes = await diagnoseLearningCapacityWithAiServer({
+			plannerFile,
+			chatsDir,
+			flashcardsFile,
+			mistakesFile,
+			date: "2026-11-16",
+			engineOverride: fakeSubmitEngine("submit_capacity_diagnosis", {
+				summary: "Strong problem speed with balanced calibration.",
+				strengths: ["Solved problem cleanly in 16m"],
+				bottlenecks: ["Need more FSRS reviews"],
+				neuroProtocols: ["Keep 50m deep focus blocks", "Add spaced recall after problems"],
+				suggestedPaceNote: "1.0x pace fits cleanly.",
+			}),
+		});
+		assert.equal(diagRes.diagnosis.neuroProtocols.length, 2);
+
+		const calibrated = calibratePlannerFromCapacityServer({ plannerFile, chatsDir, flashcardsFile, mistakesFile, date: "2026-11-16" });
+		assert.ok(calibrated.snapshot.config.realismFactor !== undefined);
+
+		// Turn 1: Ask coach side chat to soften today & set early wake + focus subject
+		const turn1 = await chatWithPlannerCoachServer({
+			plannerFile,
+			chatsDir,
+			flashcardsFile,
+			mistakesFile,
+			date: "2026-11-16",
+			focusArea: "schedule",
+			message: "Hôm nay anh dậy 4h sáng hơi mệt, tập trung Olympic Giải tích và tối ngủ 22:30",
+			engineOverride: fakeSubmitEngine("submit_coach_response", {
+				reply: "Đã cập nhật wake 04:00, ngủ 22:30 và thêm giấc ngủ trưa ngắn phục hồi cho bạn.",
+				shouldApplyChanges: true,
+				changesSummary: "Wake 04:00 · Sleep 22:30 · Focus Olympic Giải tích",
+				regenerateTodaySchedule: true,
+				todayLogPatch: { energyScore: 2, actualWakeTime: "04:00", wokeEarlyUnintended: true },
+				todayOverridePatch: { wakeTime: "04:00", sleepTime: "22:30", focusSubjects: ["Olympic Giải tích"] },
+			}),
+		});
+		assert.equal(turn1.snapshot.config.dayOverrides?.["2026-11-16"]?.wakeTime, "04:00");
+		assert.equal(turn1.snapshot.config.dayOverrides?.["2026-11-16"]?.bedTime, "22:30");
+		assert.equal(turn1.snapshot.config.logs["2026-11-16"]?.wokeEarlyUnintended, true);
+		assert.equal(turn1.snapshot.config.coachChat?.length, 2);
+
+		// Turn 2: Ask coach to change lifestyle hobbies & game budget, then Undo Turn 2!
+		const turn2 = await chatWithPlannerCoachServer({
+			plannerFile,
+			chatsDir,
+			flashcardsFile,
+			mistakesFile,
+			date: "2026-11-16",
+			focusArea: "lifestyle",
+			message: "Chỉnh Hobby 75p và Game 30p cutoff 120p",
+			engineOverride: fakeSubmitEngine("submit_coach_response", {
+				reply: "Đã tăng hobby lên 75 phút và đặt giới hạn game 30 phút trước ngủ 120 phút.",
+				shouldApplyChanges: true,
+				changesSummary: "Hobby 75m · Game 30m before 120m",
+				regenerateTodaySchedule: true,
+				lifestylePatch: { dailyHobbyMin: 75, gameBudgetMin: 30, gameCutoffBeforeBedMin: 120 },
+			}),
+		});
+		assert.equal(turn2.snapshot.config.lifestyle.dailyHobbyMin, 75);
+		assert.equal(turn2.snapshot.config.lifestyle.gameBudgetMin, 30);
+
+		const undone = undoPlannerCoachChangeServer({
+			plannerFile,
+			chatsDir,
+			flashcardsFile,
+			mistakesFile,
+			date: "2026-11-16",
+			messageId: turn2.assistantMessage.id,
+		});
+		assert.equal(undone.undone, true);
+		assert.equal(undone.snapshot.config.lifestyle.dailyHobbyMin, DEFAULT_PLANNER_CONFIG.lifestyle.dailyHobbyMin);
+		assert.equal(undone.snapshot.config.coachChat?.find((m) => m.id === turn2.assistantMessage.id)?.appliedChange?.reverted, true);
+
+		const cleared = clearPlannerCoachChatServer({ plannerFile, chatsDir, flashcardsFile, mistakesFile, date: "2026-11-16" });
+		assert.equal(cleared.config.coachChat?.length ?? 0, 0);
 	});
 });

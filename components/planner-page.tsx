@@ -42,11 +42,14 @@ import {
 import { TopBar } from "@/components/top-bar";
 import { HostMarkdown } from "@/components/host-markdown";
 import { BrailleSpinner } from "@/components/braille-spinner";
+import { PlannerCoachChat } from "@/components/planner-coach-chat";
+import { PlannerCapacityModal } from "@/components/planner-capacity-modal";
 import { useServerEvent } from "@/components/server-events";
 import { cn } from "@/lib/utils";
 import {
 	ArrowUpRightIcon,
 	BookOpenIcon,
+	BrainIcon,
 	CalendarClockIcon,
 	CheckCircle2Icon,
 	ChevronLeftIcon,
@@ -58,6 +61,7 @@ import {
 	HeartPulseIcon,
 	ImagePlusIcon,
 	Link2Icon,
+	MessageSquareTextIcon,
 	MoonIcon,
 	PauseIcon,
 	PencilIcon,
@@ -137,6 +141,11 @@ export function PlannerPage() {
 	const [busy, setBusy] = useState(false);
 	const [aiNote, setAiNote] = useState("");
 	const [coachRole, setCoachRole] = useState("");
+	const [coachOpen, setCoachOpen] = useState(false);
+	const [coachFocusArea, setCoachFocusArea] = useState<"schedule" | "lifestyle" | "general">("schedule");
+	const [coachDraft, setCoachDraft] = useState("");
+	const [coachSending, setCoachSending] = useState(false);
+	const [capacityOpen, setCapacityOpen] = useState(false);
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
 	const load = useCallback(async () => {
@@ -218,6 +227,80 @@ export function PlannerPage() {
 		}
 	}, []);
 
+	const sendToCoach = useCallback(
+		async (message: string, area?: "schedule" | "lifestyle" | "general") => {
+			const targetArea = area ?? coachFocusArea;
+			setCoachOpen(true);
+			setCoachFocusArea(targetArea);
+			setCoachSending(true);
+			setErrorMsg(null);
+			try {
+				const res = await fetch("/api/planner/coach", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						action: "send",
+						message,
+						focusArea: targetArea,
+						date: snap?.plan.date,
+						...(coachRole ? { preferredRole: coachRole } : {}),
+					}),
+				});
+				const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string };
+				if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+				if (body.snapshot) setSnap(body.snapshot);
+			} catch (e) {
+				setErrorMsg(e instanceof Error ? e.message : "Coach Chat failed.");
+			} finally {
+				setCoachSending(false);
+			}
+		},
+		[coachFocusArea, coachRole, snap?.plan.date],
+	);
+
+	const undoCoachChange = useCallback(
+		async (messageId: string) => {
+			setCoachSending(true);
+			setErrorMsg(null);
+			try {
+				const res = await fetch("/api/planner/coach", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ action: "undo", messageId, date: snap?.plan.date }),
+				});
+				const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string };
+				if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+				if (body.snapshot) setSnap(body.snapshot);
+			} catch (e) {
+				setErrorMsg(e instanceof Error ? e.message : "Could not undo coach changes.");
+			} finally {
+				setCoachSending(false);
+			}
+		},
+		[snap?.plan.date],
+	);
+
+	const clearCoachChat = useCallback(async () => {
+		setCoachSending(true);
+		try {
+			const res = await fetch("/api/planner/coach", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ action: "clear", date: snap?.plan.date }),
+			});
+			const body = (await res.json()) as { snapshot?: PlannerSnapshot };
+			if (res.ok && body.snapshot) setSnap(body.snapshot);
+		} finally {
+			setCoachSending(false);
+		}
+	}, [snap?.plan.date]);
+
+	const openCoachForArea = useCallback((area: "schedule" | "lifestyle" | "general", prefill?: string) => {
+		setCoachFocusArea(area);
+		setCoachOpen(true);
+		if (prefill) setCoachDraft(prefill);
+	}, []);
+
 	const todayLog: DailyHabitLog | undefined = snap ? snap.config.logs[snap.plan.date] : undefined;
 
 	return (
@@ -296,6 +379,29 @@ export function PlannerPage() {
 
 						<button
 							type="button"
+							data-testid="planner-capacity-btn"
+							onClick={() => setCapacityOpen(true)}
+							title="Cognitive & Learning Capacity Diagnostics (Lực học cá nhân — 0 tokens)"
+							className="inline-flex items-center gap-1 rounded-md border bg-muted/40 px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+						>
+							<BrainIcon className="size-3.5 text-primary" /> Lực học
+						</button>
+
+						<button
+							type="button"
+							data-testid="planner-coach-toggle"
+							onClick={() => setCoachOpen((v) => !v)}
+							title="Open AI Study & Habit Coach Side Chat"
+							className={cn(
+								"inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
+								coachOpen ? "border-primary bg-primary/10 text-primary" : "bg-muted/40 text-foreground hover:bg-accent",
+							)}
+						>
+							<MessageSquareTextIcon className="size-3.5" /> Coach
+						</button>
+
+						<button
+							type="button"
 							data-testid="planner-generate-btn"
 							disabled={busy}
 							onClick={() => void generatePlan()}
@@ -308,8 +414,9 @@ export function PlannerPage() {
 				)}
 			</TopBar>
 
-			<div className="min-h-0 flex-1 overflow-y-auto">
-				<div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-5 sm:px-6">
+			<div className="flex min-h-0 flex-1 overflow-hidden">
+				<div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+					<div className={cn("mx-auto flex w-full flex-col gap-4 px-4 py-5 sm:px-6", coachOpen ? "max-w-4xl" : "max-w-5xl")}>
 					{errorMsg && (
 						<div role="alert" className="flex items-center justify-between rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-2.5 text-xs text-destructive">
 							<span>{errorMsg}</span>
@@ -484,19 +591,21 @@ export function PlannerPage() {
 									)}
 									{snap.signals.learningProfile && (
 										<div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
-											<span
+											<button
+												type="button"
+												onClick={() => setCapacityOpen(true)}
 												className={cn(
-													"rounded border px-1.5 py-0.5",
+													"rounded border px-1.5 py-0.5 text-left transition-colors hover:opacity-80",
 													snap.signals.learningProfile.sufficientData
 														? "border-success/40 bg-success/10 text-success"
 														: "border-border bg-muted/40",
 												)}
-												title={snap.signals.learningProfile.sufficiencyReason}
+												title="Click to inspect full scientific Lực học diagnostics (6 axes)"
 											>
 												{snap.signals.learningProfile.sufficientData
-													? `Lực học calibrated · Solve ${snap.signals.learningProfile.overallSolveRatePct ?? "—"}% · FSRS ${snap.signals.learningProfile.overallRetentionPct ?? "—"}%`
-													: `Calibrating tốc độ (${snap.signals.learningProfile.totalFsrsReviews}/8 FSRS reviews)`}
-											</span>
+													? `Lực học calibrated · Solve ${snap.signals.learningProfile.overallSolveRatePct ?? "—"}% · FSRS ${snap.signals.learningProfile.overallRetentionPct ?? "—"}% → Inspect`
+													: `Lực học (${snap.signals.learningProfile.totalFsrsReviews}/8 FSRS) → Inspect`}
+											</button>
 											{todayLog?.compliance && (
 												<button
 													type="button"
@@ -570,8 +679,10 @@ export function PlannerPage() {
 									snap={snap}
 									todayLog={todayLog}
 									busy={busy}
+									coachBusy={coachSending}
 									onCheckIn={checkIn}
 									onPatch={patchPlanner}
+									onAskCoach={(text) => void sendToCoach(text, "schedule")}
 								/>
 							)}
 							{tab === "milestones" && (
@@ -595,6 +706,7 @@ export function PlannerPage() {
 									snap={snap}
 									busy={busy}
 									onSaveLifestyle={(lifestyle) => patchPlanner({ lifestyle })}
+									onOpenCoach={(prefill) => openCoachForArea("lifestyle", prefill)}
 									onError={setErrorMsg}
 								/>
 							)}
@@ -609,8 +721,42 @@ export function PlannerPage() {
 							)}
 						</>
 					)}
+					</div>
 				</div>
+
+				{coachOpen && snap && (
+					<PlannerCoachChat
+						messages={snap.config.coachChat ?? []}
+						lastUndoMessageId={snap.config.lastCoachUndo?.messageId}
+						focusArea={coachFocusArea}
+						onChangeFocusArea={setCoachFocusArea}
+						coachAvailable={snap.aiAvailability.coach.available}
+						coachModelLabel={snap.aiAvailability.coach.modelLabel}
+						availableRoles={snap.aiAvailability.availableRoles}
+						selectedRole={coachRole}
+						onChangeRole={setCoachRole}
+						sending={coachSending}
+						draftText={coachDraft}
+						onDraftChange={setCoachDraft}
+						onSend={sendToCoach}
+						onUndo={undoCoachChange}
+						onClear={clearCoachChat}
+						onClose={() => setCoachOpen(false)}
+					/>
+				)}
 			</div>
+
+			{snap && (
+				<PlannerCapacityModal
+					open={capacityOpen}
+					onClose={() => setCapacityOpen(false)}
+					date={snap.plan.date}
+					selectedRole={coachRole}
+					onChangeRole={setCoachRole}
+					onSnapshotUpdated={load}
+					onAskCoachWithReport={(prompt) => void sendToCoach(prompt, "general")}
+				/>
+			)}
 		</div>
 	);
 }
@@ -619,14 +765,18 @@ function TodayQuotasTab({
 	snap,
 	todayLog,
 	busy,
+	coachBusy,
 	onCheckIn,
 	onPatch,
+	onAskCoach,
 }: {
 	snap: PlannerSnapshot;
 	todayLog: DailyHabitLog | undefined;
 	busy: boolean;
+	coachBusy: boolean;
 	onCheckIn: (payload: Record<string, unknown>) => Promise<void>;
 	onPatch: (patch: Partial<PlannerConfig>) => Promise<void>;
+	onAskCoach: (text: string) => void;
 }) {
 	const date = snap.plan.date;
 	const todayOverride = snap.config.dayOverrides?.[date];
@@ -638,6 +788,7 @@ function TodayQuotasTab({
 	const [selectedForecastDay, setSelectedForecastDay] = useState<string | null>(null);
 	const [showOtherSubjects, setShowOtherSubjects] = useState(false);
 	const [customizing, setCustomizing] = useState(false);
+	const [coachQuickMsg, setCoachQuickMsg] = useState("");
 
 	// Direct today routine overrides (wake / bed / meals)
 	const [wakeDraft, setWakeDraft] = useState(todayOverride?.wakeTime ?? snap.plan.todayWakeTime);
@@ -1136,6 +1287,41 @@ function TodayQuotasTab({
 
 				{customizing && (
 					<div className="flex flex-col gap-3 rounded-xl border bg-card p-3.5 text-xs">
+						{/* Interactive AI Coach Adjust Bar */}
+						<div className="rounded-lg border border-primary/25 bg-primary/5 p-2.5">
+							<div className="mb-1 flex items-center justify-between text-[11px] font-medium text-foreground">
+								<span className="inline-flex items-center gap-1">
+									<SparklesIcon className="size-3 text-primary" /> Adjust with AI Coach (Conversational)
+								</span>
+								<span className="text-[10px] text-muted-foreground">Reads Graph · Sessions · Lực học · Sleep Logs</span>
+							</div>
+							<form
+								className="flex flex-wrap gap-1.5"
+								onSubmit={(e) => {
+									e.preventDefault();
+									const trimmed = coachQuickMsg.trim();
+									if (!trimmed || coachBusy) return;
+									setCoachQuickMsg("");
+									onAskCoach(trimmed);
+								}}
+							>
+								<input
+									type="text"
+									value={coachQuickMsg}
+									onChange={(e) => setCoachQuickMsg(e.target.value)}
+									placeholder="Hôm nay thế nào? (VD: dậy 4h mệt, bỏ bớt môn X, thêm chợp mắt trưa, tối ngủ 22:30...)"
+									className="min-w-0 flex-1 rounded-md border bg-background px-2.5 py-1 text-xs"
+								/>
+								<button
+									type="submit"
+									disabled={coachBusy || !coachQuickMsg.trim() || !snap.aiAvailability.coach.available}
+									className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+								>
+									{coachBusy ? <BrailleSpinner /> : <MessageSquareTextIcon className="size-3" />} Ask Coach AI
+								</button>
+							</form>
+						</div>
+
 						<div>
 							<div className="mb-1.5 flex items-center justify-between">
 								<span className="font-medium text-foreground">Today's Wake, Sleep & Meal Times Override</span>
@@ -2829,11 +3015,13 @@ function LifestyleTab({
 	snap,
 	busy,
 	onSaveLifestyle,
+	onOpenCoach,
 	onError,
 }: {
 	snap: PlannerSnapshot;
 	busy: boolean;
 	onSaveLifestyle: (lifestyle: LifestyleConfig) => Promise<void>;
+	onOpenCoach: (prefill?: string) => void;
 	onError: (msg: string | null) => void;
 }) {
 	const [draft, setDraft] = useState<LifestyleConfig>(snap.config.lifestyle);
@@ -2926,10 +3114,21 @@ function LifestyleTab({
 		<div className="grid gap-4 lg:grid-cols-12">
 			<div className="flex flex-col gap-4 rounded-xl border bg-card p-4 text-xs lg:col-span-7">
 				<div>
-					<h3 className="text-sm font-medium">Sleep Anchor &amp; Continuity Recovery</h3>
-					<p className="mt-0.5 text-muted-foreground">
-						Handles both gradual bedtime shifting and 4–5 AM early-waking consolidation.
-					</p>
+					<div className="flex items-start justify-between gap-2">
+						<div>
+							<h3 className="text-sm font-medium">Sleep Anchor &amp; Continuity Recovery</h3>
+							<p className="mt-0.5 text-muted-foreground">
+								Handles both gradual bedtime shifting and 4–5 AM early-waking consolidation.
+							</p>
+						</div>
+						<button
+							type="button"
+							onClick={() => onOpenCoach()}
+							className="inline-flex shrink-0 items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/15"
+						>
+							<MessageSquareTextIcon className="size-3" /> Chat Coach
+						</button>
+					</div>
 					<div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
 						<div>
 							<label className="mb-1 block text-muted-foreground">Current Bedtime</label>
@@ -3359,6 +3558,13 @@ function LifestyleTab({
 							className="inline-flex items-center gap-1 rounded-md border bg-muted/40 px-2.5 py-1.5 font-medium hover:bg-accent disabled:opacity-40"
 						>
 							<SparklesIcon className="size-3 text-primary" /> Optimize with AI
+						</button>
+						<button
+							type="button"
+							onClick={() => onOpenCoach()}
+							className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 font-medium text-primary hover:bg-accent"
+						>
+							<MessageSquareTextIcon className="size-3" /> Side Coach
 						</button>
 					</div>
 					<button
