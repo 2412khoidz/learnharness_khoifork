@@ -92,6 +92,42 @@ export interface LifestyleConfig {
 	strictSwitchWarning: boolean;
 }
 
+export type JournalActivityCategory =
+	| "study"
+	| "class"
+	| "sleep"
+	| "meal"
+	| "hobby"
+	| "rest"
+	| "distraction"
+	| "other";
+
+export interface JournalActivityEntry {
+	id: string;
+	startTime: string; // HH:MM
+	endTime: string; // HH:MM
+	category: JournalActivityCategory;
+	subject?: string;
+	title: string;
+	minutes: number;
+	source: "manual" | "parsed_text" | "ai_extracted";
+}
+
+export interface PlanComplianceReport {
+	date: string;
+	evaluatedAt: string;
+	evaluatedBy: "local" | "llm";
+	modelLabel?: string;
+	adherencePct: number;
+	plannedStudyMin: number;
+	actualStudyMin: number;
+	realismRatio: number;
+	summary: string;
+	strengths: string[];
+	frictionPoints: string[];
+	nextDayAdvice: string;
+}
+
 export interface DailyHabitLog {
 	date: string; // YYYY-MM-DD
 	actualBedtime?: string;
@@ -104,6 +140,9 @@ export interface DailyHabitLog {
 	mealsOk: boolean;
 	sleepOnTarget?: boolean;
 	note?: string;
+	journalText?: string;
+	actualEntries?: JournalActivityEntry[];
+	compliance?: PlanComplianceReport;
 	updatedAt?: string;
 }
 
@@ -151,6 +190,13 @@ export interface HabitStrengthSummary {
 	cycleWakeSuggestions: string[];
 }
 
+export interface WeeklyForecastSubjectQuota {
+	subject: string;
+	plannedMinutes: number;
+	focusHint?: string;
+	isExamPriority?: boolean;
+}
+
 export interface WeeklyForecastDay {
 	date: string;
 	weekday: Weekday;
@@ -158,6 +204,9 @@ export interface WeeklyForecastDay {
 	plannedHours: number;
 	loadLevel: "light" | "moderate" | "heavy";
 	milestoneTitles: string[];
+	subjects?: WeeklyForecastSubjectQuota[];
+	carryoverInMinutes?: number;
+	isCustomEdited?: boolean;
 }
 
 export interface DailyStudyPlan {
@@ -177,6 +226,10 @@ export interface DailyStudyPlan {
 	blocks: PlannedBlock[];
 	habitStrength?: HabitStrengthSummary;
 	weeklyForecast?: WeeklyForecastDay[];
+	carryoverNote?: string;
+	realismApplied?: number;
+	activeFocusSubjects?: string[];
+	isCustomEdited?: boolean;
 	coachSummary?: string;
 	modelUsed?: string;
 }
@@ -195,6 +248,11 @@ export interface DayOverride {
 	extraBusyEvents?: DayOneOffEvent[];
 	note?: string;
 	studyTargetHoursOverride?: number;
+	wakeTime?: string;
+	bedTime?: string;
+	meals?: MealSlot[];
+	focusSubjects?: string[];
+	customBlocks?: PlannedBlock[];
 }
 
 export interface PlannerConfig {
@@ -208,6 +266,10 @@ export interface PlannerConfig {
 	plans: Record<string, DailyStudyPlan>;
 	dayOverrides?: Record<string, DayOverride>;
 	dismissedExamProfileIds?: string[];
+	mutedSubjects?: string[];
+	pinnedSubjects?: string[];
+	dailyMaxSubjects?: number;
+	realismFactor?: number;
 	updatedAt: string;
 }
 
@@ -233,6 +295,43 @@ export interface PlannerSessionSummary {
 	updatedAt: string;
 }
 
+export interface SubjectLearningMetrics {
+	subject: string;
+	clusterId?: string;
+	fsrsReviews: number;
+	fsrsTrackedNodes: number;
+	retentionRatePct: number | null;
+	lapseRatePct: number | null;
+	avgDifficulty: number | null;
+	avgStabilityDays: number | null;
+	practiceSessions: number;
+	practiceSolvedCount: number;
+	practiceHintsCount: number;
+	practiceUnsolvedCount: number;
+	practiceSolveRatePct: number | null;
+	avgMinutesPerProblem: number | null;
+	avgMinutesPerSession: number | null;
+	teachSessions: number;
+	loggedPlannerMinutes: number;
+	paceFactor: number;
+}
+
+export interface PlannerLearningProfile {
+	sufficientData: boolean;
+	sufficiencyReason: string;
+	totalFsrsReviews: number;
+	totalPracticeSessions: number;
+	totalTeachSessions: number;
+	loggedStudyDays: number;
+	overallRetentionPct: number | null;
+	overallSolveRatePct: number | null;
+	avgMinutesPerProblem: number | null;
+	avgMinutesPerTopic: number | null;
+	sustainableDailyHours: number | null;
+	realismFactor: number;
+	bySubject: Record<string, SubjectLearningMetrics>;
+}
+
 export interface PlannerPersonalSignals {
 	date: string;
 	examPrep: ExamPrepStatus;
@@ -240,6 +339,7 @@ export interface PlannerPersonalSignals {
 	mistakeHints?: ExamPrepMistakeHints;
 	recentSessions: PlannerSessionSummary[];
 	autoTrackedStudyMinBySubject?: Record<string, number>;
+	learningProfile?: PlannerLearningProfile;
 	habitTrend: {
 		loggedDays: number;
 		avgEnergy: number | null;
@@ -330,6 +430,106 @@ export function addDaysToDate(dateStr: string, deltaDays: number): string {
 	const [y, m, d] = dateStr.split("-").map(Number);
 	const dt = new Date(Date.UTC(y!, m! - 1, d! + deltaDays));
 	return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Normalize subject names for tolerant matching across milestones, Knowledge Graph clusters,
+ * muted/pinned preferences, and freeform daily journal entries.
+ */
+export function normalizeSubjectKey(subject: string): string {
+	return subject
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/đ/g, "d")
+		.replace(/Đ/g, "d")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, " ")
+		.trim();
+}
+
+export function isSubjectMuted(subject: string, mutedSubjects?: readonly string[]): boolean {
+	if (!mutedSubjects || mutedSubjects.length === 0) return false;
+	const target = normalizeSubjectKey(subject);
+	if (!target) return false;
+	return mutedSubjects.some((m) => {
+		const mk = normalizeSubjectKey(m);
+		return mk === target || (mk.length >= 4 && (target.includes(mk) || mk.includes(target)));
+	});
+}
+
+export function resolveSubjectMaxDailyCap(config: PlannerConfig): number {
+	if (typeof config.dailyMaxSubjects === "number" && Number.isFinite(config.dailyMaxSubjects)) {
+		return clamp(Math.round(config.dailyMaxSubjects), 1, 5);
+	}
+	return config.intensity === "healthy" ? 2 : 3;
+}
+
+/**
+ * Convert raw inline LaTeX / truncated math fragments into crisp plain Unicode
+ * text for compact cards and checklists, clipping cleanly on word boundaries.
+ */
+export function formatPlainMathPreview(raw: string, maxLen = 180): string {
+	let s = String(raw || "").replace(/\s+/g, " ").trim();
+	if (!s) return "";
+	// Strip broken incomplete trailing LaTeX command left by earlier upstream slicing
+	s = s.replace(/\s*\$\s*\\[a-zA-Z]*$/g, "").replace(/\\[a-zA-Z]*$/g, (m) => (m.length <= 4 ? "" : m));
+	s = s.replace(/\$\$/g, "").replace(/\$/g, "");
+	s = s.replace(/\\(?:left|right|displaystyle|textstyle)\b/g, "");
+	// Repeatedly simplify \frac{A}{B}
+	for (let i = 0; i < 3; i++) {
+		s = s.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, "($1)/($2)");
+	}
+	s = s.replace(/\\sqrt\s*\{([^{}]+)\}/g, "√($1)");
+	const replacements: ReadonlyArray<[RegExp, string]> = [
+		[/\\cdot/g, "·"],
+		[/\\times/g, "×"],
+		[/\\div/g, "÷"],
+		[/\\pm/g, "±"],
+		[/\\infty/g, "∞"],
+		[/\\leq?/g, "≤"],
+		[/\\geq?/g, "≥"],
+		[/\\neq?/g, "≠"],
+		[/\\approx/g, "≈"],
+		[/\\Leftrightarrow|\\iff/g, "⇔"],
+		[/\\Rightarrow/g, "⇒"],
+		[/\\rightarrow|\\to\b/g, "→"],
+		[/\\forall/g, "∀"],
+		[/\\exists/g, "∃"],
+		[/\\in\b/g, "∈"],
+		[/\\notin\b/g, "∉"],
+		[/\\subset/g, "⊂"],
+		[/\\cup/g, "∪"],
+		[/\\cap/g, "∩"],
+		[/\\sum/g, "∑"],
+		[/\\prod/g, "∏"],
+		[/\\int/g, "∫"],
+		[/\\partial/g, "∂"],
+		[/\\pi/g, "π"],
+		[/\\alpha/g, "α"],
+		[/\\beta/g, "β"],
+		[/\\gamma/g, "γ"],
+		[/\\delta/g, "δ"],
+		[/\\varepsilon|\\epsilon/g, "ε"],
+		[/\\theta/g, "θ"],
+		[/\\lambda/g, "λ"],
+		[/\\sigma/g, "σ"],
+		[/\\omega/g, "ω"],
+	];
+	for (const [re, glyph] of replacements) {
+		s = s.replace(re, glyph);
+	}
+	s = s
+		.replace(/_\{([^{}]+)\}/g, "_($1)")
+		.replace(/\^\{([^{}]+)\}/g, "^($1)")
+		.replace(/\\([a-zA-Z]+)/g, "$1")
+		.replace(/[{}]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+
+	if (s.length <= maxLen) return s;
+	const sliced = s.slice(0, maxLen - 1);
+	const wordBoundary = sliced.lastIndexOf(" ");
+	return `${(wordBoundary > maxLen * 0.55 ? sliced.slice(0, wordBoundary) : sliced).trimEnd()}…`;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -471,6 +671,131 @@ function sanitizeMilestones(raw: unknown, fallback: readonly StudyMilestone[] = 
 	return out;
 }
 
+function sanitizeMealSlots(raw: unknown, fallback?: readonly MealSlot[]): MealSlot[] {
+	if (!Array.isArray(raw)) return fallback ? fallback.map((m) => ({ ...m })) : [];
+	return raw
+		.filter((m): m is Record<string, unknown> => Boolean(m && typeof m === "object" && !Array.isArray(m)))
+		.slice(0, 6)
+		.map((m, idx) => ({
+			id: typeof m.id === "string" && m.id.trim() ? m.id.trim().slice(0, 40) : `meal_${idx}`,
+			label: typeof m.label === "string" && m.label.trim() ? m.label.trim().slice(0, 40) : `Meal ${idx + 1}`,
+			startTime: normalizeClockString(m.startTime, "12:00"),
+			durationMin: clamp(Math.round(Number(m.durationMin) || 40), 15, 120),
+		}));
+}
+
+function sanitizePlannedBlocks(raw: unknown, dateFallback: string): PlannedBlock[] {
+	if (!Array.isArray(raw)) return [];
+	const out: PlannedBlock[] = [];
+	for (let i = 0; i < raw.length && out.length < 48; i++) {
+		const b = raw[i] as Record<string, unknown> | undefined;
+		if (!b || typeof b !== "object" || Array.isArray(b)) continue;
+		const s = parseClockMin(b.startTime);
+		const e = parseClockMin(b.endTime);
+		if (s === null) continue;
+		let startMin = typeof b.startMin === "number" && Number.isFinite(b.startMin) ? Math.round(b.startMin) : s;
+		let endMin = typeof b.endMin === "number" && Number.isFinite(b.endMin)
+			? Math.round(b.endMin)
+			: e !== null
+				? (e <= s ? e + 1440 : e)
+				: startMin + clamp(Math.round(Number(b.durationMin) || 45), 5, 360);
+		if (endMin <= startMin) {
+			if (e !== null && e + 1440 > s) endMin = e + 1440;
+			else continue;
+		}
+		const durationMin = clamp(endMin - startMin, 5, 600);
+		endMin = startMin + durationMin;
+		const typeRaw = b.type;
+		const type: PlannedBlock["type"] =
+			typeRaw === "study" || typeRaw === "break" || typeRaw === "hobby" || typeRaw === "meal" || typeRaw === "sleep" || typeRaw === "fixed"
+				? typeRaw
+				: "study";
+		const title = typeof b.title === "string" && b.title.trim() ? b.title.trim().slice(0, 120) : "Study block";
+		const subject = typeof b.subject === "string" && b.subject.trim() ? b.subject.trim().slice(0, 80) : undefined;
+		const cognitiveLoad: CognitiveLoad | undefined =
+			b.cognitiveLoad === "heavy" || b.cognitiveLoad === "medium" || b.cognitiveLoad === "light"
+				? b.cognitiveLoad
+				: undefined;
+		out.push({
+			id: typeof b.id === "string" && b.id.trim() ? b.id.trim().slice(0, 80) : `blk_custom_${dateFallback}_${i}`,
+			date: isValidDateString(b.date) ? b.date : dateFallback,
+			startTime: formatClockMin(startMin),
+			endTime: formatClockMin(endMin),
+			startMin,
+			endMin,
+			durationMin,
+			type,
+			title,
+			...(subject ? { subject } : {}),
+			...(typeof b.milestoneId === "string" && b.milestoneId.trim() ? { milestoneId: b.milestoneId.trim().slice(0, 64) } : {}),
+			...(cognitiveLoad ? { cognitiveLoad } : {}),
+			...(typeof b.reason === "string" && b.reason.trim() ? { reason: b.reason.trim().slice(0, 140) } : {}),
+			...(typeof b.strictSwitch === "boolean" ? { strictSwitch: b.strictSwitch } : {}),
+			...(typeof b.actionTopic === "string" && b.actionTopic.trim() ? { actionTopic: b.actionTopic.trim().slice(0, 140) } : {}),
+		});
+	}
+	return out.sort((a, b) => a.startMin - b.startMin);
+}
+
+function sanitizeActualEntries(raw: unknown, dateFallback: string): JournalActivityEntry[] {
+	if (!Array.isArray(raw)) return [];
+	const out: JournalActivityEntry[] = [];
+	for (let i = 0; i < raw.length && out.length < 64; i++) {
+		const r = raw[i] as Record<string, unknown> | undefined;
+		if (!r || typeof r !== "object" || Array.isArray(r)) continue;
+		const s = parseClockMin(r.startTime);
+		const e = parseClockMin(r.endTime);
+		const startMin = s ?? 8 * 60;
+		const minutesRaw = Number(r.minutes);
+		const minutes = Number.isFinite(minutesRaw) && minutesRaw > 0
+			? clamp(Math.round(minutesRaw), 1, 720)
+			: e !== null
+				? clamp(e > startMin ? e - startMin : e + 1440 - startMin, 1, 720)
+				: 30;
+		const endMin = e !== null ? (e > startMin ? e : e + 1440) : startMin + minutes;
+		const cat = r.category;
+		const category: JournalActivityCategory =
+			cat === "study" || cat === "class" || cat === "sleep" || cat === "meal" || cat === "hobby" || cat === "rest" || cat === "distraction" || cat === "other"
+				? cat
+				: "other";
+		const title = typeof r.title === "string" && r.title.trim() ? r.title.trim().slice(0, 140) : "Logged activity";
+		const src = r.source === "manual" || r.source === "ai_extracted" ? r.source : "parsed_text";
+		out.push({
+			id: typeof r.id === "string" && r.id.trim() ? r.id.trim().slice(0, 64) : `j_${dateFallback}_${i}`,
+			startTime: formatClockMin(startMin),
+			endTime: formatClockMin(endMin),
+			category,
+			...(typeof r.subject === "string" && r.subject.trim() ? { subject: r.subject.trim().slice(0, 80) } : {}),
+			title,
+			minutes,
+			source: src,
+		});
+	}
+	return out;
+}
+
+function sanitizeComplianceReport(raw: unknown, dateFallback: string): PlanComplianceReport | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const r = raw as Record<string, unknown>;
+	if (typeof r.summary !== "string" || !r.summary.trim()) return undefined;
+	const plannedStudyMin = clamp(Math.round(Number(r.plannedStudyMin) || 0), 0, 960);
+	const actualStudyMin = clamp(Math.round(Number(r.actualStudyMin) || 0), 0, 960);
+	return {
+		date: isValidDateString(r.date) ? r.date : dateFallback,
+		evaluatedAt: typeof r.evaluatedAt === "string" ? r.evaluatedAt : new Date().toISOString(),
+		evaluatedBy: r.evaluatedBy === "llm" ? "llm" : "local",
+		...(typeof r.modelLabel === "string" && r.modelLabel.trim() ? { modelLabel: r.modelLabel.trim().slice(0, 120) } : {}),
+		adherencePct: clamp(Math.round(Number(r.adherencePct) || 0), 0, 100),
+		plannedStudyMin,
+		actualStudyMin,
+		realismRatio: clamp(Math.round((Number(r.realismRatio) || 1) * 100) / 100, 0.35, 1.45),
+		summary: r.summary.trim().slice(0, 600),
+		strengths: sanitizeStringArray(r.strengths, 6, 180),
+		frictionPoints: sanitizeStringArray(r.frictionPoints, 6, 180),
+		nextDayAdvice: typeof r.nextDayAdvice === "string" ? r.nextDayAdvice.trim().slice(0, 260) : "",
+	};
+}
+
 function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIFESTYLE_CONFIG): LifestyleConfig {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		return {
@@ -495,17 +820,7 @@ function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIF
 		peakFocusWindow,
 	};
 
-	const meals: MealSlot[] = Array.isArray(obj.meals)
-		? obj.meals
-			.filter((m): m is Record<string, unknown> => Boolean(m && typeof m === "object" && !Array.isArray(m)))
-			.slice(0, 6)
-			.map((m, idx) => ({
-				id: typeof m.id === "string" && m.id.trim() ? m.id.trim().slice(0, 40) : `meal_${idx}`,
-				label: typeof m.label === "string" && m.label.trim() ? m.label.trim().slice(0, 40) : `Meal ${idx + 1}`,
-				startTime: normalizeClockString(m.startTime, "12:00"),
-				durationMin: clamp(Math.round(Number(m.durationMin) || 40), 15, 120),
-			}))
-		: fallback.meals.map((m) => ({ ...m }));
+	const meals: MealSlot[] = sanitizeMealSlots(obj.meals, fallback.meals);
 
 	const hobbies = Array.isArray(obj.hobbies)
 		? sanitizeStringArray(obj.hobbies, 12, 60)
@@ -527,7 +842,7 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 	const entries = Object.entries(raw as Record<string, unknown>)
 		.filter(([date]) => DATE_RE.test(date))
 		.sort(([a], [b]) => b.localeCompare(a))
-		.slice(0, 60);
+		.slice(0, 365);
 	const out: Record<string, DailyHabitLog> = {};
 	for (const [date, val] of entries) {
 		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
@@ -543,6 +858,8 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 				}
 			}
 		}
+		const actualEntries = sanitizeActualEntries(v.actualEntries, date);
+		const compliance = sanitizeComplianceReport(v.compliance, date);
 		out[date] = {
 			date,
 			...(parseClockMin(v.actualBedtime) !== null ? { actualBedtime: normalizeClockString(v.actualBedtime, "23:30") } : {}),
@@ -555,6 +872,9 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			mealsOk: typeof v.mealsOk === "boolean" ? v.mealsOk : false,
 			...(typeof v.sleepOnTarget === "boolean" ? { sleepOnTarget: v.sleepOnTarget } : {}),
 			...(typeof v.note === "string" && v.note.trim() ? { note: v.note.trim().slice(0, 400) } : {}),
+			...(typeof v.journalText === "string" && v.journalText.trim() ? { journalText: v.journalText.trim().slice(0, 4000) } : {}),
+			...(actualEntries.length > 0 ? { actualEntries } : {}),
+			...(compliance ? { compliance } : {}),
 			...(typeof v.updatedAt === "string" ? { updatedAt: v.updatedAt } : {}),
 		};
 	}
@@ -566,7 +886,7 @@ function sanitizePlans(raw: unknown): Record<string, DailyStudyPlan> {
 	const entries = Object.entries(raw as Record<string, unknown>)
 		.filter(([date]) => DATE_RE.test(date))
 		.sort(([a], [b]) => b.localeCompare(a))
-		.slice(0, 14);
+		.slice(0, 90);
 	const out: Record<string, DailyStudyPlan> = {};
 	for (const [date, val] of entries) {
 		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
@@ -583,7 +903,7 @@ function sanitizeDayOverrides(raw: unknown): Record<string, DayOverride> {
 	const entries = Object.entries(raw as Record<string, unknown>)
 		.filter(([date]) => DATE_RE.test(date))
 		.sort(([a], [b]) => b.localeCompare(a))
-		.slice(0, 120);
+		.slice(0, 180);
 	for (const [date, val] of entries) {
 		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
 		const obj = val as Record<string, unknown>;
@@ -616,13 +936,35 @@ function sanitizeDayOverrides(raw: unknown): Record<string, DayOverride> {
 		const studyTargetHoursOverride = hasTarget
 			? clamp(Math.round(Number(obj.studyTargetHoursOverride) * 10) / 10, 0, 14)
 			: undefined;
-		if (!skipFixedEvents && extraBusyEvents.length === 0 && !note && studyTargetHoursOverride === undefined) continue;
+		const wakeTime = parseClockMin(obj.wakeTime) !== null ? normalizeClockString(obj.wakeTime, "07:00") : undefined;
+		const bedTime = parseClockMin(obj.bedTime) !== null ? normalizeClockString(obj.bedTime, "23:30") : undefined;
+		const meals = Array.isArray(obj.meals) ? sanitizeMealSlots(obj.meals) : undefined;
+		const focusSubjects = sanitizeStringArray(obj.focusSubjects, 8, 80);
+		const customBlocks = sanitizePlannedBlocks(obj.customBlocks, date);
+		if (
+			!skipFixedEvents &&
+			extraBusyEvents.length === 0 &&
+			!note &&
+			studyTargetHoursOverride === undefined &&
+			!wakeTime &&
+			!bedTime &&
+			(!meals || meals.length === 0) &&
+			focusSubjects.length === 0 &&
+			customBlocks.length === 0
+		) {
+			continue;
+		}
 		out[date] = {
 			date,
 			...(skipFixedEvents ? { skipFixedEvents } : {}),
 			...(extraBusyEvents.length > 0 ? { extraBusyEvents } : {}),
 			...(note ? { note } : {}),
 			...(studyTargetHoursOverride !== undefined ? { studyTargetHoursOverride } : {}),
+			...(wakeTime ? { wakeTime } : {}),
+			...(bedTime ? { bedTime } : {}),
+			...(meals && meals.length > 0 ? { meals } : {}),
+			...(focusSubjects.length > 0 ? { focusSubjects } : {}),
+			...(customBlocks.length > 0 ? { customBlocks } : {}),
 		};
 	}
 	return out;
@@ -639,6 +981,8 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 			plans: {},
 			dayOverrides: {},
 			dismissedExamProfileIds: [],
+			mutedSubjects: [],
+			pinnedSubjects: [],
 		};
 	}
 	const obj = raw as Record<string, unknown>;
@@ -647,6 +991,14 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		obj.intensity === "healthy" || obj.intensity === "intensive" || obj.intensity === "balanced"
 			? obj.intensity
 			: fallback.intensity;
+	const dailyMaxSubjects =
+		typeof obj.dailyMaxSubjects === "number" && Number.isFinite(obj.dailyMaxSubjects)
+			? clamp(Math.round(obj.dailyMaxSubjects), 1, 5)
+			: undefined;
+	const realismFactor =
+		typeof obj.realismFactor === "number" && Number.isFinite(obj.realismFactor)
+			? clamp(Math.round(Number(obj.realismFactor) * 100) / 100, 0.65, 1.25)
+			: undefined;
 	return {
 		version: 1,
 		engineMode,
@@ -658,6 +1010,10 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		plans: sanitizePlans(obj.plans),
 		dayOverrides: sanitizeDayOverrides(obj.dayOverrides),
 		dismissedExamProfileIds: sanitizeStringArray(obj.dismissedExamProfileIds, 60, 64),
+		mutedSubjects: sanitizeStringArray(obj.mutedSubjects, 40, 80),
+		pinnedSubjects: sanitizeStringArray(obj.pinnedSubjects, 40, 80),
+		...(dailyMaxSubjects !== undefined ? { dailyMaxSubjects } : {}),
+		...(realismFactor !== undefined ? { realismFactor } : {}),
 		updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : fallback.updatedAt,
 	};
 }
@@ -689,6 +1045,7 @@ export function computeSleepAnchorForDate(
 	logs: Record<string, DailyHabitLog>,
 	date: string,
 	intensity: PlannerIntensity,
+	dayOverride?: DayOverride,
 ): SleepScheduleCalc {
 	const pastLogs = Object.values(logs)
 		.filter((l) => l.date < date && (l.actualBedtime || l.actualWakeTime))
@@ -708,11 +1065,14 @@ export function computeSleepAnchorForDate(
 	const baselineBedNorm = normalizeBedtimeMin(latest?.actualBedtime ?? sleep.currentBedtime);
 	const targetBedNorm = normalizeBedtimeMin(sleep.targetBedtime);
 
-	// Today's actual/estimated wake time
+	// Today's actual/estimated/overridden wake time
 	let todayWakeMin: number;
+	const overrideWake = parseClockMin(dayOverride?.wakeTime);
 	const explicitTodayWake = parseClockMin(todayLog?.actualWakeTime);
 	const latestWake = parseClockMin(latest?.actualWakeTime);
-	if (explicitTodayWake !== null) {
+	if (overrideWake !== null) {
+		todayWakeMin = clamp(overrideWake, 4 * 60, 15 * 60);
+	} else if (explicitTodayWake !== null) {
 		todayWakeMin = clamp(explicitTodayWake, 4 * 60, 15 * 60);
 	} else if (latestWake !== null) {
 		todayWakeMin = clamp(latestWake, 4 * 60, 15 * 60);
@@ -726,7 +1086,11 @@ export function computeSleepAnchorForDate(
 	let daysToTarget = 0;
 	let advice: string;
 
-	if (diff > 15) {
+	const overrideBedParsed = parseClockMin(dayOverride?.bedTime);
+	if (overrideBedParsed !== null && dayOverride?.bedTime) {
+		tonightBedNorm = normalizeBedtimeMin(dayOverride.bedTime);
+		advice = `Custom sleep window for ${date}: wake ${formatClockMin(todayWakeMin)}, sleep by ${formatClockMin(tonightBedNorm)}.`;
+	} else if (diff > 15) {
 		const step = Math.min(diff, sleep.shiftStepMinPerDay);
 		tonightBedNorm = baselineBedNorm - step;
 		const remainingAfterTonight = Math.max(0, tonightBedNorm - targetBedNorm);
@@ -953,13 +1317,103 @@ function matchSignalForMilestone(
 	});
 }
 
+function findLearningMetricsForSubject(
+	subject: string,
+	profile?: PlannerLearningProfile,
+): SubjectLearningMetrics | undefined {
+	if (!profile || !profile.bySubject) return undefined;
+	const target = normalizeSubjectKey(subject);
+	if (!target) return undefined;
+	for (const [k, metrics] of Object.entries(profile.bySubject)) {
+		const mk = normalizeSubjectKey(k);
+		if (mk === target || (mk.length >= 4 && (target.includes(mk) || mk.includes(target)))) {
+			return metrics;
+		}
+	}
+	return undefined;
+}
+
+function resolveCombinedPaceMultiplier(
+	subject: string,
+	config: PlannerConfig,
+	signals: PlannerPersonalSignals,
+	date: string,
+): number {
+	const plannerPace = computeSubjectPaceMultiplier(subject, config, date);
+	const profile = signals.learningProfile;
+	if (!profile || !profile.sufficientData) return plannerPace;
+	const subMetrics = findLearningMetricsForSubject(subject, profile);
+	const measuredPace = subMetrics?.paceFactor ?? 1.0;
+	if (plannerPace === 1.0) return measuredPace;
+	return clamp(Math.round((plannerPace * 0.6 + measuredPace * 0.4) * 100) / 100, 0.75, 1.65);
+}
+
+/**
+ * Look back over the last 3 days and compute safely amortized study deficit
+ * so missed sessions carry forward gently over several days without causing burnout spikes.
+ */
+export function computeCarryoverDeficit(
+	config: PlannerConfig,
+	date: string,
+): { totalShortfallMin: number; amortizedTodayMin: number; bySubject: Record<string, number> } {
+	let totalShortfallMin = 0;
+	const bySubject: Record<string, number> = {};
+	for (let d = 1; d <= 3; d++) {
+		const pastDate = addDaysToDate(date, -d);
+		const plan = config.plans[pastDate];
+		const log = config.logs[pastDate];
+		if (!plan || !log) continue;
+		const hasActivity =
+			Object.keys(log.loggedStudyMinBySubject).length > 0 ||
+			log.completedBlockIds.length > 0 ||
+			Boolean(log.compliance) ||
+			(log.actualEntries?.length ?? 0) > 0;
+		if (!hasActivity) continue;
+		const weight = d === 1 ? 1.0 : d === 2 ? 0.65 : 0.35;
+		for (const q of plan.quotas) {
+			if (isSubjectMuted(q.subject, config.mutedSubjects)) continue;
+			const logged = log.loggedStudyMinBySubject[q.subject] ?? 0;
+			const deficit = Math.max(0, q.targetMin - logged);
+			if (deficit >= 15) {
+				const weighted = Math.round((deficit * weight) / 3);
+				if (weighted >= 10) {
+					totalShortfallMin += Math.round(deficit * weight);
+					const key = normalizeSubjectKey(q.subject);
+					bySubject[key] = (bySubject[key] ?? 0) + weighted;
+				}
+			}
+		}
+	}
+	const amortizedTodayMin = clamp(Math.round(Object.values(bySubject).reduce((a, b) => a + b, 0) / 5) * 5, 0, 75);
+	return { totalShortfallMin, amortizedTodayMin, bySubject };
+}
+
+function isSubjectInList(subject: string, list?: readonly string[]): boolean {
+	if (!list || list.length === 0) return false;
+	const target = normalizeSubjectKey(subject);
+	return list.some((entry) => {
+		const ek = normalizeSubjectKey(entry);
+		return ek === target || (ek.length >= 4 && (target.includes(ek) || ek.includes(target)));
+	});
+}
+
 function collectSubjectCandidates(
 	config: PlannerConfig,
 	signals: PlannerPersonalSignals,
+	opts?: { targetDate?: string; rotationOffset?: number; carryoverBySubject?: Record<string, number> },
 ): SubjectCandidate[] {
-	const candidates: SubjectCandidate[] = [];
+	const targetDate = opts?.targetDate ?? signals.date;
+	const rotationOffset = opts?.rotationOffset ?? 0;
+	const dayOverride = config.dayOverrides?.[targetDate];
+	const focusSet = dayOverride?.focusSubjects ?? [];
+	const hasExplicitFocus = focusSet.length > 0;
+	const maxDailyCap = resolveSubjectMaxDailyCap(config);
+	const effectiveCap = hasExplicitFocus ? Math.max(focusSet.length, Math.min(2, maxDailyCap)) : maxDailyCap;
+
+	const primaryCandidates: SubjectCandidate[] = [];
+	const backgroundCandidates: SubjectCandidate[] = [];
 	const coveredClusterIds = new Set<string>();
-	const coveredSubjects = new Set<string>();
+	const coveredSubjectKeys = new Set<string>();
 
 	// Merge milestones + any active ExamPrep exam profiles not yet represented as milestones
 	const milestones: StudyMilestone[] = [...config.milestones];
@@ -992,12 +1446,14 @@ function collectSubjectCandidates(
 	}
 
 	for (const ms of milestones) {
-		const daysLeft = Math.max(0, daysBetweenDates(signals.date, ms.dueDate));
+		const isFocusedToday = isSubjectInList(ms.subject, focusSet) || isSubjectInList(ms.title, focusSet);
+		if (!isFocusedToday && isSubjectMuted(ms.subject, config.mutedSubjects)) continue;
+		const daysLeft = Math.max(0, daysBetweenDates(targetDate, ms.dueDate));
 		const remHours = Math.max(0.5, ms.estimatedHours - ms.completedHours);
 		const sig = matchSignalForMilestone(ms, signals);
 		if (sig) coveredClusterIds.add(sig.clusterId);
 		for (const cid of ms.clusterIds) coveredClusterIds.add(cid);
-		coveredSubjects.add(ms.subject.toLowerCase());
+		coveredSubjectKeys.add(normalizeSubjectKey(ms.subject));
 
 		const deadlinePressure = daysLeft === 0 ? 120 : 75 / Math.pow(daysLeft, 0.72);
 		const workloadPressure = clamp((remHours / Math.max(1, daysLeft)) * 18, 0, 60);
@@ -1006,34 +1462,42 @@ function collectSubjectCandidates(
 		const graphWeaknessBonus = sig
 			? sig.dueCount * 5 + sig.weakCount * 6 + sig.untrackedCount * 1.5 + (100 - sig.readinessPct) * 0.25
 			: 0;
-		const urgencyScore = Math.round(deadlinePressure + workloadPressure + priorityBonus + kindBonus + graphWeaknessBonus);
+		const carryoverMin = clamp(opts?.carryoverBySubject?.[normalizeSubjectKey(ms.subject)] ?? 0, 0, 45);
+		const focusBoost = isFocusedToday ? 220 : hasExplicitFocus && daysLeft > 2 ? -65 : 0;
+		const urgencyScore = Math.round(
+			deadlinePressure + workloadPressure + priorityBonus + kindBonus + graphWeaknessBonus + focusBoost + carryoverMin * 0.4,
+		);
 
 		const checklist: QuotaChecklistItem[] = [];
 		const openTopics = ms.syllabusTopics.filter((t) => !t.done).slice(0, 2);
 		for (const t of openTopics) {
-			checklist.push({ id: `chk_${ms.id}_${t.id}`, text: `Topic: ${t.title} (~${t.estHours}h)` });
+			checklist.push({ id: `chk_${ms.id}_${t.id}`, text: formatPlainMathPreview(`Topic: ${t.title} (~${t.estHours}h)`, 140) });
 		}
 		if (sig && sig.dueCount > 0) {
-			const sample = sig.dueSampleNames.slice(0, 2).join(", ");
+			const sample = sig.dueSampleNames.slice(0, 2).map((s) => formatPlainMathPreview(s, 45)).join(", ");
 			checklist.push({
 				id: `chk_${ms.id}_fsrs`,
 				text: `Review ${sig.dueCount} due FSRS card${sig.dueCount === 1 ? "" : "s"}${sample ? ` (${sample})` : ""}`,
 			});
 		}
 		if (sig && sig.weakCount > 0) {
-			const sample = sig.weakSampleNames.slice(0, 2).join(", ");
+			const sample = sig.weakSampleNames.slice(0, 2).map((s) => formatPlainMathPreview(s, 45)).join(", ");
 			checklist.push({
 				id: `chk_${ms.id}_weak`,
 				text: `Drill weak foundation${sig.weakCount === 1 ? "" : "s"}${sample ? `: ${sample}` : ""}`,
 			});
 		}
 		if (checklist.length === 0) {
-			checklist.push({ id: `chk_${ms.id}_core`, text: `Advance ${ms.title} (+${ms.cognitiveLoad === "heavy" ? "deep problem set" : "focused practice"})` });
+			checklist.push({
+				id: `chk_${ms.id}_core`,
+				text: `Advance ${ms.title} (+${ms.cognitiveLoad === "heavy" ? "deep problem set" : "focused practice"})`,
+			});
 		}
 
 		const parts: string[] = [];
 		parts.push(daysLeft === 0 ? "Due today" : `D-${daysLeft}`);
 		if (remHours > 0) parts.push(`${Math.round(remHours * 10) / 10}h left`);
+		if (carryoverMin >= 10) parts.push(`+${carryoverMin}m carryover`);
 		if (sig && (sig.dueCount > 0 || sig.weakCount > 0)) {
 			parts.push(`${sig.dueCount} due · ${sig.weakCount} weak`);
 		}
@@ -1042,36 +1506,49 @@ function collectSubjectCandidates(
 			? `${sig.readinessPct}% ready · ${sig.dueCount} FSRS due · ${sig.weakCount} weak · ${sig.untrackedCount} untracked`
 			: undefined;
 
-		const paceMultiplier = computeSubjectPaceMultiplier(ms.subject, config, signals.date);
-		candidates.push({
+		const paceMultiplier = resolveCombinedPaceMultiplier(ms.subject, config, signals, targetDate);
+		primaryCandidates.push({
 			subject: ms.subject,
 			milestone: ms,
 			signal: sig,
-			urgencyScore,
+			urgencyScore: Math.max(10, urgencyScore),
 			paceMultiplier,
 			cognitiveLoad: ms.cognitiveLoad,
-			neededMinToday: clamp(Math.round((remHours / Math.max(1, daysLeft)) * 60 * paceMultiplier), 40, 260),
+			neededMinToday: clamp(Math.round((remHours / Math.max(1, daysLeft)) * 60 * paceMultiplier + carryoverMin), 35, 240),
 			reason: parts.join(" · "),
 			weaknessSummary,
 			checklist,
 		});
 	}
 
-	// Add uncovered knowledge-graph subjects (stale sessions / due cards / weak foundations)
+	// Non-exam Knowledge Graph clusters: promoted if pinned/focused today; otherwise kept in background maintenance pool
 	for (const sig of signals.subjectSignals) {
 		if (coveredClusterIds.has(sig.clusterId)) continue;
-		if (coveredSubjects.has(sig.label.toLowerCase())) continue;
+		const sigKey = normalizeSubjectKey(sig.label);
+		if (coveredSubjectKeys.has(sigKey)) continue;
+		const isFocusedToday = isSubjectInList(sig.label, focusSet);
+		const isPinned = isSubjectInList(sig.label, config.pinnedSubjects);
+		if (!isFocusedToday && isSubjectMuted(sig.label, config.mutedSubjects)) continue;
+
 		const staleDays = sig.lastStudiedAt
-			? clamp(daysBetweenDates(sig.lastStudiedAt.slice(0, 10), signals.date), 0, 14)
+			? clamp(daysBetweenDates(sig.lastStudiedAt.slice(0, 10), targetDate), 0, 14)
 			: 5;
+		const carryoverMin = clamp(opts?.carryoverBySubject?.[sigKey] ?? 0, 0, 35);
 		const urgencyScore = Math.round(
-			20 + sig.dueCount * 5 + sig.weakCount * 6 + sig.untrackedCount * 1.2 + (100 - sig.readinessPct) * 0.3 + staleDays * 2,
+			20 +
+				sig.dueCount * 5 +
+				sig.weakCount * 6 +
+				sig.untrackedCount * 1.2 +
+				(100 - sig.readinessPct) * 0.3 +
+				staleDays * 2 +
+				(isFocusedToday ? 220 : isPinned ? 45 : 0),
 		);
 		const checklist: QuotaChecklistItem[] = [];
 		if (sig.dueCount > 0) {
+			const sample = sig.dueSampleNames[0] ? formatPlainMathPreview(sig.dueSampleNames[0], 50) : "";
 			checklist.push({
 				id: `chk_sig_${sig.clusterId}_due`,
-				text: `FSRS review: ${sig.dueCount} card${sig.dueCount === 1 ? "" : "s"}${sig.dueSampleNames[0] ? ` (${sig.dueSampleNames[0]})` : ""}`,
+				text: `FSRS review: ${sig.dueCount} card${sig.dueCount === 1 ? "" : "s"}${sample ? ` (${sample})` : ""}`,
 			});
 		}
 		if (sig.weakCount > 0 || sig.untrackedCount > 0) {
@@ -1083,24 +1560,86 @@ function collectSubjectCandidates(
 		if (checklist.length === 0) {
 			checklist.push({ id: `chk_sig_${sig.clusterId}_rev`, text: `Active recall check on ${sig.label}` });
 		}
-		const paceMultiplier = computeSubjectPaceMultiplier(sig.label, config, signals.date);
-		candidates.push({
+		const paceMultiplier = resolveCombinedPaceMultiplier(sig.label, config, signals, targetDate);
+		const cand: SubjectCandidate = {
 			subject: sig.label,
 			signal: sig,
 			urgencyScore,
 			paceMultiplier,
 			cognitiveLoad: sig.weakCount > 2 || sig.untrackedCount > 5 ? "heavy" : "medium",
-			neededMinToday: clamp(Math.round((45 + sig.dueCount * 6 + sig.weakCount * 10) * paceMultiplier), 40, 140),
+			neededMinToday: clamp(Math.round((35 + sig.dueCount * 6 + sig.weakCount * 9) * paceMultiplier + carryoverMin), 30, 120),
 			reason: `${sig.readinessPct}% ready · ${sig.dueCount} due`,
 			weaknessSummary: `${sig.readinessPct}% ready · ${sig.dueCount} FSRS due · ${sig.weakCount} weak`,
 			checklist,
-		});
+		};
+		if (isFocusedToday || isPinned) {
+			primaryCandidates.push(cand);
+		} else {
+			backgroundCandidates.push(cand);
+		}
 	}
 
-	// General fallback when workspace has no milestones and no graph clusters yet
-	if (candidates.length === 0) {
+	// Build final focused candidate list (honoring day focus override + multi-day rotation across week)
+	const sortedPrimary = primaryCandidates.sort((a, b) => b.urgencyScore - a.urgencyScore);
+	const sortedBackground = backgroundCandidates.sort((a, b) => b.urgencyScore - a.urgencyScore);
+
+	let chosen: SubjectCandidate[] = [];
+	if (hasExplicitFocus) {
+		const matchedFocus = [...sortedPrimary, ...sortedBackground].filter(
+			(c) => isSubjectInList(c.subject, focusSet) || (c.milestone && isSubjectInList(c.milestone.title, focusSet)),
+		);
+		const urgentOverflow = sortedPrimary.filter(
+			(c) => !matchedFocus.includes(c) && c.milestone && daysBetweenDates(targetDate, c.milestone.dueDate) <= 2,
+		);
+		chosen = [...matchedFocus, ...urgentOverflow].slice(0, effectiveCap);
+		// If user typed a brand-new focus subject not yet in milestones/graph, synthesize a clean block for it
+		if (chosen.length === 0) {
+			for (const f of focusSet.slice(0, 2)) {
+				chosen.push({
+					subject: f,
+					urgencyScore: 140,
+					paceMultiplier: resolveCombinedPaceMultiplier(f, config, signals, targetDate),
+					cognitiveLoad: "heavy",
+					neededMinToday: 120,
+					reason: "Focused study priority",
+					checklist: [{ id: `chk_focus_${normalizeSubjectKey(f)}`, text: `Deep work sprint on ${f}` }],
+				});
+			}
+		}
+	} else if (sortedPrimary.length > 0) {
+		// Always include top urgent target + rotate secondary milestones across weekdays when > maxDailyCap
+		const fixedTopCount = sortedPrimary.length <= effectiveCap ? sortedPrimary.length : Math.max(1, effectiveCap - 1);
+		chosen = sortedPrimary.slice(0, fixedTopCount);
+		if (sortedPrimary.length > fixedTopCount) {
+			const rotatingPool = sortedPrimary.slice(fixedTopCount);
+			for (let i = 0; i < rotatingPool.length && chosen.length < effectiveCap; i++) {
+				const idx = (rotationOffset + i) % rotatingPool.length;
+				chosen.push(rotatingPool[idx]!);
+			}
+		}
+		// Only fill remaining spare slot with urgent FSRS/weak Graph cluster when not in healthy mode
+		if (chosen.length < effectiveCap && config.intensity !== "healthy") {
+			const urgentBg = sortedBackground.filter((b) => (b.signal?.dueCount ?? 0) > 0 || (b.signal?.weakCount ?? 0) > 0);
+			if (urgentBg.length > 0) {
+				chosen.push(urgentBg[rotationOffset % urgentBg.length]!);
+			}
+		}
+	} else if (sortedBackground.length > 0) {
+		if (sortedBackground.length <= effectiveCap) {
+			chosen = sortedBackground;
+		} else {
+			chosen = [sortedBackground[0]!];
+			const rest = sortedBackground.slice(1);
+			for (let i = 0; i < rest.length && chosen.length < effectiveCap; i++) {
+				chosen.push(rest[(rotationOffset + i) % rest.length]!);
+			}
+		}
+	}
+
+	// General fallback when workspace has no milestones and all clusters are absent/muted
+	if (chosen.length === 0) {
 		const firstSession = signals.recentSessions[0]?.title || "Core Foundations";
-		candidates.push({
+		chosen.push({
 			subject: firstSession,
 			urgencyScore: 40,
 			paceMultiplier: 1.0,
@@ -1111,7 +1650,7 @@ function collectSubjectCandidates(
 		});
 	}
 
-	return candidates.sort((a, b) => b.urgencyScore - a.urgencyScore).slice(0, 6);
+	return chosen.sort((a, b) => b.urgencyScore - a.urgencyScore).slice(0, effectiveCap);
 }
 
 export interface SchedulableSlot {
@@ -1231,92 +1770,52 @@ function resolveBusyEventsForDate(
 	return out.sort((a, b) => (parseClockMin(a.startTime) ?? 0) - (parseClockMin(b.startTime) ?? 0));
 }
 
-function computeWeeklyForecast(
-	config: PlannerConfig,
-	startDate: string,
-	totalUrgencyNeeded: number,
-): WeeklyForecastDay[] {
-	const modeUtilization =
-		config.intensity === "healthy" ? 0.58 : config.intensity === "intensive" ? 0.86 : 0.72;
-	const baseHobby = config.lifestyle.dailyHobbyMin;
-	const targetHobbyMin =
-		config.intensity === "healthy"
-			? Math.max(baseHobby, 75)
-			: config.intensity === "intensive"
-				? Math.min(baseHobby, 35)
-				: baseHobby;
-
-	const out: WeeklyForecastDay[] = [];
-	for (let offset = 0; offset < 7; offset++) {
-		const date = addDaysToDate(startDate, offset);
-		const weekday = weekdayForDate(date);
-		const dayOverride = config.dayOverrides?.[date];
-		const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, date, config.intensity);
-		let intervals: TimeInterval[] = [{ startMin: sleepCalc.todayWakeMin, endMin: sleepCalc.tonightBedMin - 25 }];
-
-		for (const ev of resolveBusyEventsForDate(config, date)) {
-			const s = parseClockMin(ev.startTime);
-			const e = parseClockMin(ev.endTime);
-			if (s === null || e === null || e <= s) continue;
-			const iv = { startMin: Math.max(s, sleepCalc.todayWakeMin), endMin: Math.min(e, sleepCalc.tonightBedMin - 25) };
-			if (iv.endMin > iv.startMin) intervals = subtractInterval(intervals, iv);
-		}
-		for (const meal of config.lifestyle.meals) {
-			const s = parseClockMin(meal.startTime);
-			if (s === null) continue;
-			const iv = { startMin: Math.max(s, sleepCalc.todayWakeMin), endMin: Math.min(s + meal.durationMin, sleepCalc.tonightBedMin - 25) };
-			if (iv.endMin - iv.startMin >= 15) intervals = subtractInterval(intervals, iv);
-		}
-
-		const freeBeforeHobby = intervals.reduce((acc, iv) => acc + Math.max(0, iv.endMin - iv.startMin), 0);
-		const hobbyMin = Math.min(targetHobbyMin, Math.max(0, Math.floor(freeBeforeHobby * 0.25)));
-		const focusAvail = Math.max(0, freeBeforeHobby - hobbyMin);
-		const plannedMin =
-			dayOverride?.studyTargetHoursOverride !== undefined
-				? Math.min(focusAvail, Math.round(dayOverride.studyTargetHoursOverride * 60))
-				: Math.min(
-					Math.round(focusAvail * 0.9),
-					Math.max(
-						Math.min(focusAvail * modeUtilization, totalUrgencyNeeded + 30),
-						Math.min(focusAvail, config.intensity === "intensive" ? 240 : 120),
-					),
-				);
-		const plannedHours = Math.round((plannedMin / 60) * 10) / 10;
-		const milestoneTitles = config.milestones.filter((m) => m.dueDate === date).map((m) => m.title);
-		const loadLevel: WeeklyForecastDay["loadLevel"] =
-			milestoneTitles.length > 0 || plannedHours >= 5
-				? "heavy"
-				: plannedHours >= 2.5
-					? "moderate"
-					: "light";
-
-		out.push({
-			date,
-			weekday,
-			freeHours: Math.round((freeBeforeHobby / 60) * 10) / 10,
-			plannedHours,
-			loadLevel,
-			milestoneTitles,
-		});
-	}
-	return out;
+function resolveEffectiveRealism(config: PlannerConfig, signals: PlannerPersonalSignals): number {
+	const raw = config.realismFactor ?? signals.learningProfile?.realismFactor ?? 1.0;
+	return clamp(Math.round(raw * 100) / 100, 0.65, 1.25);
 }
 
-/**
- * Compute daily study schedule locally in ~1-5ms (0 tokens).
- */
-export function computeLocalPlannerPlan(
-	config: PlannerConfig,
-	signals: PlannerPersonalSignals,
-	now = Date.now(),
-): DailyStudyPlan {
-	const date = signals.date;
-	const dayOverride = config.dayOverrides?.[date];
-	const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, date, config.intensity);
+function allocateDailyQuotasBySubject(
+	candidates: readonly SubjectCandidate[],
+	rawStudyBudget: number,
+	focusBudgetAvailable: number,
+	intensity: PlannerIntensity,
+): Map<string, number> {
+	const quotasBySubject = new Map<string, number>();
+	if (rawStudyBudget < 20 || candidates.length === 0) return quotasBySubject;
 
+	const urgencySum = Math.max(1, candidates.reduce((acc, c) => acc + c.urgencyScore, 0));
+	const capFraction = candidates.length >= 2 && intensity !== "intensive" ? 0.58 : candidates.length >= 2 ? 0.68 : 1;
+	let allocatedSum = 0;
+	for (const c of candidates) {
+		const rawShare = Math.round((rawStudyBudget * c.urgencyScore) / urgencySum);
+		const capped = Math.min(rawShare, Math.round(rawStudyBudget * capFraction));
+		const rounded = Math.max(Math.min(25, rawStudyBudget), Math.round(capped / 15) * 15);
+		quotasBySubject.set(c.subject, rounded);
+		allocatedSum += rounded;
+	}
+	if (allocatedSum > focusBudgetAvailable) {
+		const ratio = (focusBudgetAvailable * 0.85) / allocatedSum;
+		for (const c of candidates) {
+			quotasBySubject.set(c.subject, Math.max(20, Math.round(((quotasBySubject.get(c.subject) ?? 30) * ratio) / 5) * 5));
+		}
+	}
+	return quotasBySubject;
+}
+
+function carveAwakeScheduleBaseline(
+	config: PlannerConfig,
+	date: string,
+	dayOverride: DayOverride | undefined,
+	sleepCalc: SleepScheduleCalc,
+): {
+	awakeIntervals: TimeInterval[];
+	fixedBlocks: PlannedBlock[];
+	freeBeforeHobby: number;
+	hobbyMin: number;
+} {
 	const fixedBlocks: PlannedBlock[] = [];
 	const dayEvents = resolveBusyEventsForDate(config, date);
-
 	let awakeIntervals: TimeInterval[] = [{ startMin: sleepCalc.todayWakeMin, endMin: sleepCalc.tonightBedMin - 25 }];
 
 	for (const ev of dayEvents) {
@@ -1341,7 +1840,8 @@ export function computeLocalPlannerPlan(
 		}
 	}
 
-	for (const meal of config.lifestyle.meals) {
+	const activeMeals = dayOverride?.meals && dayOverride.meals.length > 0 ? dayOverride.meals : config.lifestyle.meals;
+	for (const meal of activeMeals) {
 		const s = parseClockMin(meal.startTime);
 		if (s === null) continue;
 		const e = s + meal.durationMin;
@@ -1362,10 +1862,7 @@ export function computeLocalPlannerPlan(
 		}
 	}
 
-	const totalFreeBeforeHobby = awakeIntervals.reduce((acc, iv) => acc + Math.max(0, iv.endMin - iv.startMin), 0);
-	const freeHoursTotal = Math.round((totalFreeBeforeHobby / 60) * 10) / 10;
-
-	// Scale hobby/recharge time cleanly with intensity
+	const freeBeforeHobby = awakeIntervals.reduce((acc, iv) => acc + Math.max(0, iv.endMin - iv.startMin), 0);
 	const baseHobby = config.lifestyle.dailyHobbyMin;
 	const targetHobbyMin =
 		config.intensity === "healthy"
@@ -1373,7 +1870,176 @@ export function computeLocalPlannerPlan(
 			: config.intensity === "intensive"
 				? Math.min(baseHobby, 35)
 				: baseHobby;
-	const hobbyMin = Math.min(targetHobbyMin, Math.max(0, Math.floor(totalFreeBeforeHobby * 0.25)));
+	const hobbyMin = Math.min(targetHobbyMin, Math.max(0, Math.floor(freeBeforeHobby * 0.25)));
+	return { awakeIntervals, fixedBlocks, freeBeforeHobby, hobbyMin };
+}
+
+function computeRealisticStudyBudget(
+	config: PlannerConfig,
+	signals: PlannerPersonalSignals,
+	date: string,
+	dayOverride: DayOverride | undefined,
+	focusBudgetAvailable: number,
+	candidates: readonly SubjectCandidate[],
+	amortizedCarryoverMin: number,
+): { rawStudyBudget: number; minDailyMin: number; realism: number } {
+	const realism = resolveEffectiveRealism(config, signals);
+	const modeUtilization =
+		config.intensity === "healthy" ? 0.46 : config.intensity === "intensive" ? 0.78 : 0.58;
+	const comfortableCapMin =
+		config.intensity === "healthy" ? 225 : config.intensity === "intensive" ? 450 : 310;
+	const totalUrgencyNeeded = candidates.reduce((acc, c) => acc + c.neededMinToday, 0);
+
+	const deadlineMinNeed = candidates.reduce((acc, c) => {
+		if (!c.milestone) return acc + 25;
+		const d = Math.max(1, daysBetweenDates(date, c.milestone.dueDate));
+		const rem = Math.max(0, c.milestone.estimatedHours - c.milestone.completedHours);
+		return acc + (rem / d) * 60;
+	}, 0);
+
+	// Allow relaxing the comfort cap when an urgent deadline (< 5 days) mathematically needs extra time
+	const hasUrgentExam = candidates.some((c) => c.milestone && daysBetweenDates(date, c.milestone.dueDate) <= 5);
+	const effectiveCapMin = hasUrgentExam
+		? Math.min(Math.round(focusBudgetAvailable * 0.85), Math.round(comfortableCapMin * 1.25))
+		: comfortableCapMin;
+
+	const adaptedBaseTarget = Math.min(
+		Math.round(focusBudgetAvailable * modeUtilization),
+		Math.max(Math.round(effectiveCapMin * realism), 90),
+	);
+	const demandTarget = Math.round((totalUrgencyNeeded + amortizedCarryoverMin * 0.5) * realism);
+	const rawStudyBudget =
+		dayOverride?.studyTargetHoursOverride !== undefined
+			? Math.min(focusBudgetAvailable, Math.round(dayOverride.studyTargetHoursOverride * 60))
+			: Math.min(
+				Math.round(focusBudgetAvailable * 0.88),
+				Math.max(
+					Math.min(adaptedBaseTarget, Math.max(demandTarget, config.intensity === "intensive" ? 180 : 105)),
+					Math.min(focusBudgetAvailable, config.intensity === "intensive" ? 210 : 90),
+				),
+			);
+
+	const minDailyMin =
+		dayOverride?.studyTargetHoursOverride !== undefined
+			? Math.min(focusBudgetAvailable, Math.round(dayOverride.studyTargetHoursOverride * 60))
+			: Math.min(
+				focusBudgetAvailable,
+				Math.max(60, Math.round(Math.max(deadlineMinNeed, rawStudyBudget * 0.72) / 15) * 15),
+			);
+
+	return { rawStudyBudget, minDailyMin, realism };
+}
+
+function computeWeeklyForecast(
+	config: PlannerConfig,
+	signals: PlannerPersonalSignals,
+	startDate: string,
+	todayCarryoverMin: number,
+): WeeklyForecastDay[] {
+	const out: WeeklyForecastDay[] = [];
+	const carryover = computeCarryoverDeficit(config, startDate);
+	for (let offset = 0; offset < 7; offset++) {
+		const date = addDaysToDate(startDate, offset);
+		const weekday = weekdayForDate(date);
+		const dayOverride = config.dayOverrides?.[date];
+		const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, date, config.intensity, dayOverride);
+		const { freeBeforeHobby, hobbyMin } = carveAwakeScheduleBaseline(config, date, dayOverride, sleepCalc);
+		const focusAvail = Math.max(0, freeBeforeHobby - hobbyMin);
+
+		const dayCarryover = offset === 0 ? todayCarryoverMin : offset <= 2 ? Math.round(todayCarryoverMin * 0.5) : 0;
+		const candidates = collectSubjectCandidates(config, signals, {
+			targetDate: date,
+			rotationOffset: offset,
+			carryoverBySubject: offset <= 2 ? carryover.bySubject : undefined,
+		});
+
+		const customBlocks = dayOverride?.customBlocks ?? [];
+		let plannedMin: number;
+		let subjects: WeeklyForecastSubjectQuota[];
+		if (customBlocks.length > 0) {
+			const customStudy = customBlocks.filter((b) => b.type === "study");
+			plannedMin = customStudy.reduce((a, b) => a + b.durationMin, 0);
+			const bySub = new Map<string, { minutes: number; hint?: string; isExam?: boolean }>();
+			for (const b of customStudy) {
+				const key = b.subject || b.title;
+				const prev = bySub.get(key) ?? { minutes: 0, hint: b.actionTopic || b.title, isExam: Boolean(b.milestoneId) };
+				prev.minutes += b.durationMin;
+				bySub.set(key, prev);
+			}
+			subjects = [...bySub.entries()].map(([subject, info]) => ({
+				subject,
+				plannedMinutes: info.minutes,
+				...(info.hint ? { focusHint: info.hint } : {}),
+				...(info.isExam ? { isExamPriority: true } : {}),
+			}));
+		} else {
+			const { rawStudyBudget } = computeRealisticStudyBudget(
+				config,
+				signals,
+				date,
+				dayOverride,
+				focusAvail,
+				candidates,
+				dayCarryover,
+			);
+			const quotasBySubject = allocateDailyQuotasBySubject(candidates, rawStudyBudget, focusAvail, config.intensity);
+			plannedMin = [...quotasBySubject.values()].reduce((a, b) => a + b, 0);
+			subjects = candidates
+				.filter((c) => (quotasBySubject.get(c.subject) ?? 0) > 0)
+				.map((c) => ({
+					subject: c.subject,
+					plannedMinutes: quotasBySubject.get(c.subject) ?? 45,
+					...(c.checklist[0]?.text ? { focusHint: c.checklist[0].text } : {}),
+					...(c.milestone ? { isExamPriority: true } : {}),
+				}));
+		}
+
+		const plannedHours = Math.round((plannedMin / 60) * 10) / 10;
+		const milestoneTitles = config.milestones.filter((m) => m.dueDate === date).map((m) => m.title);
+		const loadLevel: WeeklyForecastDay["loadLevel"] =
+			milestoneTitles.length > 0 || plannedHours >= 5
+				? "heavy"
+				: plannedHours >= 2.5
+					? "moderate"
+					: "light";
+
+		out.push({
+			date,
+			weekday,
+			freeHours: Math.round((freeBeforeHobby / 60) * 10) / 10,
+			plannedHours,
+			loadLevel,
+			milestoneTitles,
+			subjects,
+			...(dayCarryover > 0 ? { carryoverInMinutes: dayCarryover } : {}),
+			...(customBlocks.length > 0 ? { isCustomEdited: true } : {}),
+		});
+	}
+	return out;
+}
+
+/**
+ * Compute daily study schedule locally in ~1-5ms (0 tokens).
+ */
+export function computeLocalPlannerPlan(
+	config: PlannerConfig,
+	signals: PlannerPersonalSignals,
+	now = Date.now(),
+): DailyStudyPlan {
+	const date = signals.date;
+	const dayOverride = config.dayOverrides?.[date];
+	const sleepCalc = computeSleepAnchorForDate(config.lifestyle.sleep, config.logs, date, config.intensity, dayOverride);
+	const carryover = computeCarryoverDeficit(config, date);
+	const carryoverNote =
+		carryover.amortizedTodayMin > 0
+			? `Adaptive carryover: +${carryover.amortizedTodayMin}m redistributed gently from recent missed blocks.`
+			: undefined;
+
+	const baseCarve = carveAwakeScheduleBaseline(config, date, dayOverride, sleepCalc);
+	let awakeIntervals = baseCarve.awakeIntervals;
+	const fixedBlocks = baseCarve.fixedBlocks;
+	const freeHoursTotal = Math.round((baseCarve.freeBeforeHobby / 60) * 10) / 10;
+	const hobbyMin = baseCarve.hobbyMin;
 
 	// Place hobby block in late afternoon/evening (around 17:00..22:30) where longest gap >= hobbyMin
 	const hobbyBlocks: PlannedBlock[] = [];
@@ -1409,57 +2075,76 @@ export function computeLocalPlannerPlan(
 	}
 
 	const focusBudgetAvailable = awakeIntervals.reduce((acc, iv) => acc + Math.max(0, iv.endMin - iv.startMin), 0);
-	const modeUtilization =
-		config.intensity === "healthy" ? 0.58 : config.intensity === "intensive" ? 0.86 : 0.72;
-	const candidates = collectSubjectCandidates(config, signals);
-	const totalUrgencyNeeded = candidates.reduce((acc, c) => acc + c.neededMinToday, 0);
-	const rawStudyBudget =
-		dayOverride?.studyTargetHoursOverride !== undefined
-			? Math.min(focusBudgetAvailable, Math.round(dayOverride.studyTargetHoursOverride * 60))
-			: Math.min(
-				Math.round(focusBudgetAvailable * 0.9),
-				Math.max(
-					Math.min(focusBudgetAvailable * modeUtilization, totalUrgencyNeeded + 30),
-					Math.min(focusBudgetAvailable, config.intensity === "intensive" ? 240 : 120),
-				),
-			);
-
-	// Minimum daily study hours needed across deadlines, clamped to safe limits
-	const deadlineMinNeed = candidates.reduce((acc, c) => {
-		if (!c.milestone) return acc + 30;
-		const d = Math.max(1, daysBetweenDates(date, c.milestone.dueDate));
-		const rem = Math.max(0, c.milestone.estimatedHours - c.milestone.completedHours);
-		return acc + (rem / d) * 60;
-	}, 0);
-	const minDailyMin =
-		dayOverride?.studyTargetHoursOverride !== undefined
-			? Math.min(focusBudgetAvailable, Math.round(dayOverride.studyTargetHoursOverride * 60))
-			: Math.min(
-				focusBudgetAvailable,
-				Math.max(60, Math.round(Math.max(deadlineMinNeed, rawStudyBudget * 0.75) / 15) * 15),
-			);
+	const candidates = collectSubjectCandidates(config, signals, {
+		targetDate: date,
+		rotationOffset: 0,
+		carryoverBySubject: carryover.bySubject,
+	});
+	const { rawStudyBudget, minDailyMin, realism } = computeRealisticStudyBudget(
+		config,
+		signals,
+		date,
+		dayOverride,
+		focusBudgetAvailable,
+		candidates,
+		carryover.amortizedTodayMin,
+	);
 	const minDailyStudyHours = Math.round((minDailyMin / 60) * 10) / 10;
 
-	// Allocate minutes across multiple subjects cleanly (anti-monopoly cap <= 55% when >= 2 subjects)
-	const quotasBySubject = new Map<string, number>();
-	if (rawStudyBudget >= 20) {
-		const urgencySum = Math.max(1, candidates.reduce((acc, c) => acc + c.urgencyScore, 0));
-		const capFraction = candidates.length >= 2 && config.intensity !== "intensive" ? 0.55 : candidates.length >= 2 ? 0.65 : 1;
-		let allocatedSum = 0;
-		for (const c of candidates) {
-			const rawShare = Math.round((rawStudyBudget * c.urgencyScore) / urgencySum);
-			const capped = Math.min(rawShare, Math.round(rawStudyBudget * capFraction));
-			const rounded = Math.max(Math.min(25, rawStudyBudget), Math.round(capped / 15) * 15);
-			quotasBySubject.set(c.subject, rounded);
-			allocatedSum += rounded;
+	// If user manually edited today's timeline directly, honor customBlocks verbatim while keeping habit metrics + 7-day forecast intact
+	const topMistakeRuleRaw = signals.mistakeHints?.recentRules[0];
+	const topMistakeRule = topMistakeRuleRaw ? formatPlainMathPreview(topMistakeRuleRaw, 160) : undefined;
+	if (dayOverride?.customBlocks && dayOverride.customBlocks.length > 0) {
+		const customBlocks = dayOverride.customBlocks;
+		const studyCustom = customBlocks.filter((b) => b.type === "study");
+		const customMinutesBySubj = new Map<string, number>();
+		for (const b of studyCustom) {
+			const sName = b.subject || b.title;
+			customMinutesBySubj.set(sName, (customMinutesBySubj.get(sName) ?? 0) + b.durationMin);
 		}
-		if (allocatedSum > focusBudgetAvailable && candidates.length > 0) {
-			const ratio = (focusBudgetAvailable * 0.85) / allocatedSum;
-			for (const c of candidates) {
-				quotasBySubject.set(c.subject, Math.max(20, Math.round(((quotasBySubject.get(c.subject) ?? 30) * ratio) / 5) * 5));
-			}
-		}
+		const plannedMin = studyCustom.reduce((a, b) => a + b.durationMin, 0);
+		const customQuotas: DailyQuotaItem[] = [...customMinutesBySubj.entries()].map(([subj, mins], idx) => {
+			const matched = candidates.find((c) => normalizeSubjectKey(c.subject) === normalizeSubjectKey(subj));
+			return {
+				id: matched?.milestone?.id ? `q_${matched.milestone.id}` : `q_custom_${idx}`,
+				subject: subj,
+				...(matched?.milestone ? { milestoneId: matched.milestone.id } : {}),
+				targetMin: mins,
+				urgencyScore: matched?.urgencyScore ?? 65,
+				...(matched && matched.paceMultiplier !== 1 ? { paceMultiplier: matched.paceMultiplier } : {}),
+				...(matched?.weaknessSummary ? { weaknessSummary: matched.weaknessSummary } : {}),
+				checklist: matched
+					? (idx === 0 && topMistakeRule
+						? [...matched.checklist, { id: `chk_mistake_${date}`, text: `Mistake rule check: ${topMistakeRule}` }]
+						: matched.checklist)
+					: [{ id: `chk_custom_${date}_${idx}`, text: `Complete scheduled ${subj} session` }],
+			};
+		});
+		return {
+			date,
+			generatedAt: new Date(now).toISOString(),
+			engineUsed: "local",
+			intensity: config.intensity,
+			minDailyStudyHours,
+			plannedStudyHours: Math.round((plannedMin / 60) * 10) / 10,
+			freeHoursTotal,
+			recommendedBedtime: formatClockMin(sleepCalc.tonightBedMin),
+			recommendedWakeTime: formatClockMin(sleepCalc.tonightWakeMin),
+			todayWakeTime: formatClockMin(sleepCalc.todayWakeMin),
+			sleepShiftAdvice: sleepCalc.advice,
+			daysToSleepTarget: sleepCalc.daysToTarget,
+			quotas: customQuotas,
+			blocks: customBlocks,
+			habitStrength: computeHabitStrengthSummary(config, date, sleepCalc.tonightBedMin),
+			weeklyForecast: computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin),
+			...(carryoverNote ? { carryoverNote } : {}),
+			realismApplied: realism,
+			...(dayOverride.focusSubjects && dayOverride.focusSubjects.length > 0 ? { activeFocusSubjects: dayOverride.focusSubjects } : {}),
+			isCustomEdited: true,
+		};
 	}
+
+	const quotasBySubject = allocateDailyQuotasBySubject(candidates, rawStudyBudget, focusBudgetAvailable, config.intensity);
 
 	// Carve focus + break slots inside remaining awake intervals
 	const blockLen = config.lifestyle.blockDurationMin;
@@ -1511,7 +2196,6 @@ export function computeLocalPlannerPlan(
 		const available = candidates.filter((c) => (remainingQuota.get(c.subject) ?? 0) >= 20);
 		if (available.length === 0) break;
 
-		// Prefer not repeating same subject twice in a row unless only 1 remains
 		const nonRepeating = available.filter((c) => c.subject !== lastAssignedSubject);
 		const pool = nonRepeating.length > 0 ? nonRepeating : available;
 		pool.sort((a, b) => {
@@ -1598,8 +2282,6 @@ export function computeLocalPlannerPlan(
 	);
 	const plannedMin = [...actualAssignedBySubject.values()].reduce((a, b) => a + b, 0);
 
-	// Add recurring mistake reminder into top subject's checklist if available
-	const topMistakeRule = signals.mistakeHints?.recentRules[0];
 	const quotas: DailyQuotaItem[] = candidates
 		.filter((c) => (actualAssignedBySubject.get(c.subject) ?? 0) > 0)
 		.map((c, idx) => ({
@@ -1632,7 +2314,10 @@ export function computeLocalPlannerPlan(
 		quotas,
 		blocks: allBlocks,
 		habitStrength: computeHabitStrengthSummary(config, date, sleepCalc.tonightBedMin),
-		weeklyForecast: computeWeeklyForecast(config, date, totalUrgencyNeeded),
+		weeklyForecast: computeWeeklyForecast(config, signals, date, carryover.amortizedTodayMin),
+		...(carryoverNote ? { carryoverNote } : {}),
+		realismApplied: realism,
+		...(dayOverride?.focusSubjects && dayOverride.focusSubjects.length > 0 ? { activeFocusSubjects: dayOverride.focusSubjects } : {}),
 	};
 }
 
@@ -1667,6 +2352,9 @@ export function buildCompactPlannerDigest(
 			.filter((b) => b.type === "fixed")
 			.map((b) => `${b.startTime}-${b.endTime} ${b.title}`),
 		hobbies: config.lifestyle.hobbies,
+		mutedSubjects: config.mutedSubjects ?? [],
+		focusSubjectsToday: config.dayOverrides?.[signals.date]?.focusSubjects ?? [],
+		realismFactor: config.realismFactor ?? signals.learningProfile?.realismFactor ?? 1.0,
 		milestones: config.milestones.slice(0, 12).map((m) => ({
 			id: m.id,
 			kind: m.kind,
@@ -1678,20 +2366,31 @@ export function buildCompactPlannerDigest(
 			load: m.cognitiveLoad,
 			openTopics: m.syllabusTopics.filter((t) => !t.done).slice(0, 4).map((t) => t.title),
 		})),
-		knowledgeSignals: signals.subjectSignals.slice(0, 8).map((s) => ({
-			label: s.label,
-			readinessPct: s.readinessPct,
-			dueCount: s.dueCount,
-			weakCount: s.weakCount,
-			untrackedCount: s.untrackedCount,
-			dueSample: s.dueSampleNames.slice(0, 3),
-			weakSample: s.weakSampleNames.slice(0, 3),
-		})),
+		knowledgeSignals: signals.subjectSignals
+			.filter((s) => !isSubjectMuted(s.label, config.mutedSubjects))
+			.slice(0, 8)
+			.map((s) => ({
+				label: s.label,
+				readinessPct: s.readinessPct,
+				dueCount: s.dueCount,
+				weakCount: s.weakCount,
+				untrackedCount: s.untrackedCount,
+				dueSample: s.dueSampleNames.slice(0, 3),
+				weakSample: s.weakSampleNames.slice(0, 3),
+			})),
+		learningSpeed: signals.learningProfile?.sufficientData
+			? {
+				overallRetentionPct: signals.learningProfile.overallRetentionPct,
+				overallSolveRatePct: signals.learningProfile.overallSolveRatePct,
+				avgMinutesPerProblem: signals.learningProfile.avgMinutesPerProblem,
+				sustainableDailyHours: signals.learningProfile.sustainableDailyHours,
+			}
+			: null,
 		mistakes: signals.mistakeHints
 			? {
 				total: signals.mistakeHints.totalCount,
 				pattern: signals.mistakeHints.recurringPattern,
-				topRules: signals.mistakeHints.recentRules.slice(0, 3),
+				topRules: signals.mistakeHints.recentRules.slice(0, 3).map((r) => formatPlainMathPreview(r, 160)),
 			}
 			: null,
 		habitTrend: signals.habitTrend,
@@ -1840,6 +2539,8 @@ export interface HabitCheckInPatch {
 	mealsOk?: boolean;
 	sleepOnTarget?: boolean;
 	note?: string;
+	journalText?: string;
+	actualEntries?: JournalActivityEntry[];
 }
 
 export function applyHabitCheckIn(
@@ -1933,6 +2634,8 @@ export function applyHabitCheckIn(
 		...(patch.mealsOk !== undefined ? { mealsOk: patch.mealsOk } : {}),
 		...(patch.sleepOnTarget !== undefined ? { sleepOnTarget: patch.sleepOnTarget } : {}),
 		...(patch.note !== undefined ? { note: patch.note.trim().slice(0, 400) } : {}),
+		...(patch.journalText !== undefined ? { journalText: patch.journalText.trim().slice(0, 4000) } : {}),
+		...(patch.actualEntries !== undefined ? { actualEntries: sanitizeActualEntries(patch.actualEntries, date) } : {}),
 		completedBlockIds: [...completedBlockIds],
 		completedChecklistIds: [...completedChecklistIds],
 		loggedStudyMinBySubject,
@@ -2257,4 +2960,393 @@ export function buildMonthGridDates(year: number, monthIndex0: number): Calendar
 		});
 	}
 	return out;
+}
+
+// ─── Personalized Workload Calibration ("Lực học") & 24h Journal Evaluator ───
+
+export interface PersonalizedWorkloadEstimate {
+	estimatedHours: number;
+	recommendedDailyHours: number;
+	paceFactorApplied: number;
+	confidence: "personalized" | "baseline";
+	sufficiencyReason: string;
+	breakdownReasons: string[];
+	topicEstimates?: SyllabusTopic[];
+}
+
+/**
+ * Compute realistic `estimatedHours` for an exam/milestone from the student's actual
+ * measured learning speed (FSRS stability/retention, Practice solve rate & minutes/problem,
+ * Teach session pace, Graph weak/untracked counts), transparently reporting when data is still baseline.
+ */
+export function computePersonalizedMilestoneEstimate(opts: {
+	title: string;
+	subject: string;
+	kind?: StudyMilestone["kind"];
+	dueDate?: string;
+	todayDate?: string;
+	baseHours?: number;
+	syllabusTopics?: readonly SyllabusTopic[];
+	clusterIds?: readonly string[];
+	signals: PlannerPersonalSignals;
+}): PersonalizedWorkloadEstimate {
+	const today = opts.todayDate ?? opts.signals.date;
+	const profile = opts.signals.learningProfile;
+	const matchedSignal = opts.signals.subjectSignals.find(
+		(s) =>
+			(opts.clusterIds?.includes(s.clusterId) ?? false) ||
+			normalizeSubjectKey(s.label) === normalizeSubjectKey(opts.subject) ||
+			normalizeSubjectKey(s.label).includes(normalizeSubjectKey(opts.subject || opts.title)),
+	);
+	const subjectMetrics =
+		findLearningMetricsForSubject(opts.subject, profile) ??
+		findLearningMetricsForSubject(opts.title, profile) ??
+		(matchedSignal ? findLearningMetricsForSubject(matchedSignal.label, profile) : undefined);
+
+	const topics = opts.syllabusTopics ? [...opts.syllabusTopics] : [];
+	const rawTopicSum = topics.reduce((a, t) => a + t.estHours, 0);
+	const baseHours =
+		opts.baseHours && opts.baseHours > 0
+			? opts.baseHours
+			: rawTopicSum > 0
+				? rawTopicSum
+				: opts.kind === "competition"
+					? 28
+					: opts.kind === "project"
+						? 18
+						: 14;
+
+	const reasons: string[] = [];
+	let graphGapHours = 0;
+	if (matchedSignal) {
+		const untrackedAdd = matchedSignal.untrackedCount * 0.45;
+		const weakAdd = matchedSignal.weakCount * 0.85;
+		const dueAdd = matchedSignal.dueCount * 0.2;
+		graphGapHours = Math.round((untrackedAdd + weakAdd + dueAdd) * 10) / 10;
+		if (graphGapHours >= 0.5) {
+			reasons.push(
+				`Graph gaps (${matchedSignal.label}): ${matchedSignal.untrackedCount} untracked · ${matchedSignal.weakCount} weak · ${matchedSignal.dueCount} FSRS due (+${graphGapHours}h)`,
+			);
+		}
+	}
+
+	let paceFactor = 1.0;
+	const sufficient = Boolean(profile?.sufficientData);
+	if (sufficient && subjectMetrics && (subjectMetrics.fsrsReviews >= 4 || subjectMetrics.practiceSessions >= 2)) {
+		paceFactor = subjectMetrics.paceFactor;
+		const metricParts: string[] = [];
+		if (subjectMetrics.retentionRatePct !== null) metricParts.push(`FSRS retention ${subjectMetrics.retentionRatePct}%`);
+		if (subjectMetrics.practiceSolveRatePct !== null) metricParts.push(`Practice solve ${subjectMetrics.practiceSolveRatePct}%`);
+		if (subjectMetrics.avgMinutesPerProblem !== null) metricParts.push(`~${subjectMetrics.avgMinutesPerProblem}m/problem`);
+		reasons.push(`Subject learning speed (${subjectMetrics.subject}): ${metricParts.join(", ")} → ${paceFactor}× pace`);
+	} else if (sufficient && profile) {
+		const globalSolve = profile.overallSolveRatePct ?? 70;
+		const globalRet = profile.overallRetentionPct ?? 75;
+		const derived = 1 + (75 - globalSolve) * 0.004 + (80 - globalRet) * 0.003;
+		paceFactor = clamp(Math.round(derived * 100) / 100, 0.8, 1.45);
+		reasons.push(
+			`Overall student profile (${profile.totalFsrsReviews} FSRS reviews, solve rate ${profile.overallSolveRatePct ?? "—"}%, retention ${profile.overallRetentionPct ?? "—"}%) → ${paceFactor}× pace`,
+		);
+	} else {
+		reasons.push(profile?.sufficiencyReason ?? "Baseline estimate used — log 2+ days or complete more Practice/FSRS reviews to unlock personalized pace.");
+	}
+
+	const calibratedHours = Math.max(2, Math.round((baseHours * 0.8 + graphGapHours + baseHours * 0.2) * paceFactor * 2) / 2);
+	const daysLeft = opts.dueDate ? Math.max(1, daysBetweenDates(today, opts.dueDate)) : 14;
+	const recommendedDailyHours = Math.max(0.5, Math.round((calibratedHours / daysLeft) * 10) / 10);
+
+	const adjustedTopics =
+		topics.length > 0
+			? topics.map((t) => ({
+				...t,
+				estHours: Math.max(0.5, Math.round(t.estHours * paceFactor * 2) / 2),
+			}))
+			: undefined;
+
+	return {
+		estimatedHours: calibratedHours,
+		recommendedDailyHours,
+		paceFactorApplied: Math.round(paceFactor * 100) / 100,
+		confidence: sufficient ? "personalized" : "baseline",
+		sufficiencyReason: profile?.sufficiencyReason ?? "Need more FSRS reviews & logged days",
+		breakdownReasons: reasons,
+		...(adjustedTopics ? { topicEstimates: adjustedTopics } : {}),
+	};
+}
+
+function classifyJournalLine(text: string, knownSubjects: readonly string[]): {
+	category: JournalActivityCategory;
+	subject?: string;
+} {
+	const norm = normalizeSubjectKey(text);
+	let matchedSubject: string | undefined;
+	let bestLen = 0;
+	for (const sub of knownSubjects) {
+		const nk = normalizeSubjectKey(sub);
+		if (!nk || nk.length < 2) continue;
+		if ((norm.includes(nk) || nk.split(" ").filter((w) => w.length >= 3).every((w) => norm.includes(w))) && nk.length > bestLen) {
+			matchedSubject = sub;
+			bestLen = nk.length;
+		}
+	}
+
+	if (/\b(ngu|sleep|nap|chp mat|chop mat|di ngu|thuc day|wake)\b/.test(norm)) {
+		return { category: "sleep" };
+	}
+	if (/\b(an sang|an trua|an toi|an com|lunch|dinner|breakfast|meal|bua)\b/.test(norm)) {
+		return { category: "meal" };
+	}
+	if (/\b(len lop|giang duong|tiet hoc|lecture|class|seminar|di hoc)\b/.test(norm)) {
+		return { category: "class", ...(matchedSubject ? { subject: matchedSubject } : {}) };
+	}
+	if (/\b(luot|tiktok|facebook|youtube|game|choi game|sao nhang|mat tap trung|distraction|scroll|reel|shorts)\b/.test(norm)) {
+		return { category: "distraction" };
+	}
+	if (/\b(chay bo|the thao|gym|dan|nhac|music|movie|phim|hobby|giai tri|cafe|di choi)\b/.test(norm)) {
+		return { category: "hobby" };
+	}
+	if (/\b(nghi|rest|relax|tam|ve sinh)\b/.test(norm)) {
+		return { category: "rest" };
+	}
+	if (matchedSubject || /\b(hoc|on|giai|luyen|doc|chung minh|bai tap|flashcard|fsrs|study|practice|proof|olympic|code|lap trinh)\b/.test(norm)) {
+		return { category: "study", ...(matchedSubject ? { subject: matchedSubject } : {}) };
+	}
+	return { category: "other" };
+}
+
+function parseFlexibleTimeToken(hourStr: string, minStr?: string): number | null {
+	const h = Number(hourStr);
+	const m = minStr ? Number(minStr) : 0;
+	if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+	return h * 60 + m;
+}
+
+/**
+ * Parse a freeform 24h journal ("08:30-11:00 giải 3 bài dãy số Giải tích, 14h-15h lướt tiktok...")
+ * deterministically at 0 tokens into structured `JournalActivityEntry[]`.
+ */
+export function parseJournalTextLocal(
+	journalText: string,
+	date: string,
+	knownSubjects: readonly string[] = [],
+): JournalActivityEntry[] {
+	const rawLines = journalText
+		.split(/\r?\n|;+/)
+		.map((l) => l.trim())
+		.filter(Boolean)
+		.slice(0, 60);
+	const out: JournalActivityEntry[] = [];
+	let rollingCursorMin = 8 * 60;
+
+	rawLines.forEach((line, idx) => {
+		const rangeMatch = line.match(/(\d{1,2})\s*(?::|h)\s*(\d{2})?\s*(?:-|–|—|to|den|đến)\s*(\d{1,2})\s*(?::|h)\s*(\d{2})?/i);
+		let startMin: number | null = null;
+		let endMin: number | null = null;
+		let durationMin = 45;
+		let cleanTitle = line;
+
+		if (rangeMatch) {
+			startMin = parseFlexibleTimeToken(rangeMatch[1]!, rangeMatch[2]);
+			endMin = parseFlexibleTimeToken(rangeMatch[3]!, rangeMatch[4]);
+			if (startMin !== null && endMin !== null) {
+				if (endMin <= startMin) endMin += 1440;
+				durationMin = clamp(endMin - startMin, 5, 720);
+				rollingCursorMin = endMin;
+				cleanTitle = line.replace(rangeMatch[0], "").replace(/^[\s:,\-–—]+|[\s:,\-–—]+$/g, "").trim();
+			}
+		} else {
+			const durHourMatch = line.match(/(\d+(?:[.,]\d+)?)\s*(?:h|gio|giờ|hours?)\b/i);
+			const durMinMatch = line.match(/(\d+)\s*(?:m|p|phut|phút|mins?)\b/i);
+			if (durHourMatch || durMinMatch) {
+				const hrs = durHourMatch ? Number(durHourMatch[1]!.replace(",", ".")) : 0;
+				const mins = durMinMatch ? Number(durMinMatch[1]!) : 0;
+				durationMin = clamp(Math.round(hrs * 60 + mins), 5, 720);
+			}
+			startMin = rollingCursorMin;
+			endMin = startMin + durationMin;
+			rollingCursorMin = endMin;
+		}
+
+		if (startMin === null || endMin === null) return;
+		const { category, subject } = classifyJournalLine(cleanTitle || line, knownSubjects);
+		out.push({
+			id: `jl_${date}_${idx}`,
+			startTime: formatClockMin(startMin),
+			endTime: formatClockMin(endMin),
+			category,
+			...(subject ? { subject } : {}),
+			title: (cleanTitle || line).slice(0, 140),
+			minutes: durationMin,
+			source: "parsed_text",
+		});
+	});
+
+	return out;
+}
+
+/**
+ * Deterministic (0-token) Plan-vs-Actual compliance evaluator comparing today's
+ * planned study blocks & habits against the student's 24h journal + check-in log,
+ * outputting an adherence score and smoothed EWMA capacity factor.
+ */
+export function evaluatePlanVsActualLocal(opts: {
+	date: string;
+	plan?: DailyStudyPlan;
+	log?: DailyHabitLog;
+	config: PlannerConfig;
+	journalText?: string;
+	manualEntries?: readonly JournalActivityEntry[];
+	knownSubjects?: readonly string[];
+	now?: number;
+}): {
+	report: PlanComplianceReport;
+	parsedEntries: JournalActivityEntry[];
+	suggestedRealismFactor: number;
+} {
+	const { date, plan, log, config } = opts;
+	const known = opts.knownSubjects && opts.knownSubjects.length > 0
+		? opts.knownSubjects
+		: [
+			...config.milestones.map((m) => m.subject),
+			...(plan?.quotas.map((q) => q.subject) ?? []),
+		];
+
+	const journalStr = (opts.journalText ?? log?.journalText ?? "").trim();
+	const parsedFromText = journalStr ? parseJournalTextLocal(journalStr, date, known) : [];
+	const manual = (opts.manualEntries ?? log?.actualEntries ?? []).filter((e) => e.source === "manual");
+	const combinedEntries = [...manual, ...parsedFromText.filter((p) => !manual.some((m) => m.id === p.id))];
+
+	const plannedStudyBlocks = (plan?.blocks ?? []).filter((b) => b.type === "study");
+	const plannedStudyMin =
+		plannedStudyBlocks.length > 0
+			? plannedStudyBlocks.reduce((a, b) => a + b.durationMin, 0)
+			: Math.round((plan?.plannedStudyHours ?? 0) * 60);
+
+	const journalStudyMin = combinedEntries
+		.filter((e) => e.category === "study")
+		.reduce((a, e) => a + e.minutes, 0);
+	const loggedMapMin = Object.values(log?.loggedStudyMinBySubject ?? {}).reduce((a, b) => a + b, 0);
+	const actualStudyMin = Math.max(journalStudyMin, loggedMapMin);
+
+	const completedBlockCount = (log?.completedBlockIds ?? []).filter((id) =>
+		plannedStudyBlocks.some((b) => b.id === id),
+	).length;
+	const distractionMin = combinedEntries
+		.filter((e) => e.category === "distraction")
+		.reduce((a, e) => a + e.minutes, 0);
+
+	const denom = Math.max(30, plannedStudyMin);
+	const volumeScore = Math.min(1.08, actualStudyMin / denom);
+	const blockScore = plannedStudyBlocks.length > 0 ? completedBlockCount / plannedStudyBlocks.length : volumeScore;
+	const distractionPenalty = distractionMin > 45 ? Math.min(0.22, (distractionMin - 45) / 300) : 0;
+	const habitBonus = (log?.mealsOk ? 0.04 : 0) + (log?.hobbyDone ? 0.04 : 0);
+	const rawAdherence = (volumeScore * 0.58 + Math.max(blockScore, volumeScore * 0.85) * 0.42 - distractionPenalty + habitBonus) * 100;
+	const adherencePct = clamp(Math.round(rawAdherence), 0, 100);
+
+	const observedRealism = clamp(actualStudyMin / denom, 0.4, 1.35);
+	const prevRealism = config.realismFactor ?? 1.0;
+	const suggestedRealismFactor = clamp(Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100, 0.65, 1.25);
+
+	const strengths: string[] = [];
+	const frictionPoints: string[] = [];
+
+	if (actualStudyMin >= plannedStudyMin * 0.85 && actualStudyMin > 0) {
+		strengths.push(`Met study volume: ${(actualStudyMin / 60).toFixed(1)}h actual vs ${(plannedStudyMin / 60).toFixed(1)}h planned.`);
+	} else if (actualStudyMin > 0) {
+		frictionPoints.push(`Shortfall of ${Math.max(0, plannedStudyMin - actualStudyMin)}m compared to ${(plannedStudyMin / 60).toFixed(1)}h target.`);
+	} else {
+		frictionPoints.push("No study minutes logged or detected in journal yet.");
+	}
+
+	if (distractionMin >= 45) {
+		frictionPoints.push(`Distraction window totaled ${distractionMin}m — guard peak focus hours or trim target.`);
+	}
+	if (log?.hobbyDone) strengths.push("Protected recharge / hobby rest.");
+	if (log?.mealsOk) strengths.push("Kept regular meal timing.");
+
+	const nextDayAdvice =
+		observedRealism < 0.75
+			? `Plan was slightly ambitious (${Math.round(observedRealism * 100)}% completed). Tomorrow's adaptive cap scales smoothly to ${(suggestedRealismFactor * 100).toFixed(0)}% capacity.`
+			: observedRealism > 1.15
+				? "Strong momentum! You exceeded today's target cleanly without overreaching."
+				: "Balanced pacing — keep alternating peak deep blocks with deliberate breaks.";
+
+	return {
+		report: {
+			date,
+			evaluatedAt: new Date(opts.now ?? Date.now()).toISOString(),
+			evaluatedBy: "local",
+			adherencePct,
+			plannedStudyMin,
+			actualStudyMin,
+			realismRatio: Math.round(observedRealism * 100) / 100,
+			summary: `Adherence ${adherencePct}% · ${(actualStudyMin / 60).toFixed(1)}h studied vs ${(plannedStudyMin / 60).toFixed(1)}h planned${distractionMin > 0 ? ` · ${distractionMin}m distraction` : ""}.`,
+			strengths,
+			frictionPoints,
+			nextDayAdvice,
+		},
+		parsedEntries: combinedEntries,
+		suggestedRealismFactor,
+	};
+}
+
+/**
+ * Persist a 24h journal evaluation (local or AI) back into `config.logs[date]` and
+ * update `config.realismFactor` + subject logged minutes without double counting.
+ */
+export function applyJournalEvaluationToConfig(
+	config: PlannerConfig,
+	date: string,
+	opts: {
+		journalText?: string;
+		entries: JournalActivityEntry[];
+		report: PlanComplianceReport;
+		suggestedRealismFactor: number;
+		now?: number;
+	},
+): PlannerConfig {
+	const existing = config.logs[date] ?? {
+		date,
+		completedBlockIds: [],
+		completedChecklistIds: [],
+		loggedStudyMinBySubject: {},
+		hobbyDone: false,
+		mealsOk: false,
+	};
+	const loggedStudyMinBySubject = { ...existing.loggedStudyMinBySubject };
+	const journalMinBySubj: Record<string, number> = {};
+	for (const e of opts.entries) {
+		if (e.category === "study" && e.subject) {
+			journalMinBySubj[e.subject] = (journalMinBySubj[e.subject] ?? 0) + e.minutes;
+		}
+	}
+	for (const [subj, mins] of Object.entries(journalMinBySubj)) {
+		loggedStudyMinBySubject[subj] = Math.max(loggedStudyMinBySubject[subj] ?? 0, mins);
+	}
+	const hobbyFromJournal = opts.entries.some((e) => e.category === "hobby" && e.minutes >= 15);
+	const mealsFromJournal = opts.entries.filter((e) => e.category === "meal").length >= 2;
+
+	const nextLog: DailyHabitLog = {
+		...existing,
+		...(opts.journalText !== undefined ? { journalText: opts.journalText.trim().slice(0, 4000) } : {}),
+		actualEntries: sanitizeActualEntries(opts.entries, date),
+		compliance: sanitizeComplianceReport(opts.report, date),
+		loggedStudyMinBySubject,
+		hobbyDone: existing.hobbyDone || hobbyFromJournal,
+		mealsOk: existing.mealsOk || mealsFromJournal,
+		updatedAt: new Date(opts.now ?? Date.now()).toISOString(),
+	};
+
+	return sanitizePlannerConfig(
+		{
+			...config,
+			realismFactor: clamp(Math.round(opts.suggestedRealismFactor * 100) / 100, 0.65, 1.25),
+			logs: {
+				...config.logs,
+				[date]: nextLog,
+			},
+			updatedAt: new Date(opts.now ?? Date.now()).toISOString(),
+		},
+		config,
+	);
 }

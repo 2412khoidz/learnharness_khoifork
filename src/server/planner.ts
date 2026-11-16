@@ -8,14 +8,20 @@ import { PATHS } from "../../config.ts";
 import {
 	addDaysToDate,
 	applyHabitCheckIn,
+	applyJournalEvaluationToConfig,
 	applyLlmPlanOutput,
 	buildCompactPlannerDigest,
 	computeHabitStrengthSummary,
 	computeLocalPlannerPlan,
+	computePersonalizedMilestoneEstimate,
 	DEFAULT_PLANNER_CONFIG,
+	evaluatePlanVsActualLocal,
+	formatPlainMathPreview,
 	isValidDateString,
 	localDateString,
+	normalizeSubjectKey,
 	parseIcsWeeklyEvents,
+	parseJournalTextLocal,
 	parseLocalSyllabusOutline,
 	parseSimpleWeeklyText,
 	resolveActiveBlockStatus,
@@ -26,14 +32,19 @@ import {
 	type DailyStudyPlan,
 	type FixedWeeklyEvent,
 	type HabitCheckInPatch,
+	type JournalActivityEntry,
 	type LlmCoachPlanPayload,
+	type PersonalizedWorkloadEstimate,
+	type PlanComplianceReport,
 	type PlannerConfig,
 	type PlannerEngineMode,
 	type PlannerIntensity,
+	type PlannerLearningProfile,
 	type PlannerPersonalSignals,
 	type PlannerSessionSummary,
 	type PlannerSubjectSignal,
 	type StudyMilestone,
+	type SubjectLearningMetrics,
 	type SyllabusTopic,
 } from "../core/planner.ts";
 import type { ChatRecord } from "../core/contracts/chat.ts";
@@ -108,6 +119,10 @@ export interface PlannerPatch {
 	lifestyle?: PlannerConfig["lifestyle"];
 	dayOverrides?: PlannerConfig["dayOverrides"];
 	dismissedExamProfileIds?: string[];
+	mutedSubjects?: string[];
+	pinnedSubjects?: string[];
+	dailyMaxSubjects?: number;
+	realismFactor?: number;
 }
 
 export interface PlannerReadOptions {
@@ -148,6 +163,302 @@ function resolveChatsFallback(chatsDir?: string): PlannerSessionSummary[] {
 	}
 }
 
+const ROLE_DISPLAY_NAMES: Partial<Record<ModelRole, string>> = {
+	researcher: "Researcher",
+	prober: "Prober",
+	analyst: "Analyst",
+	sideQuestion: "Coach / Side Q&A",
+	visualMaker: "Vision / Diagram",
+	pdfReader: "PDF Reader",
+};
+
+function computeActiveSessionStudyMinutes(chat: ChatRecord): {
+	activeMin: number;
+	solvedCount: number;
+	hintsCount: number;
+	unsolvedCount: number;
+	problemDurationsMin: number[];
+} {
+	const msgs = Array.isArray(chat.messages) ? chat.messages : [];
+	let activeMs = 0;
+	let prevTs: number | null = null;
+	let lastProblemTs: number | null = null;
+	let solvedCount = 0;
+	let hintsCount = 0;
+	let unsolvedCount = 0;
+	const problemDurationsMin: number[] = [];
+
+	for (const m of msgs as Array<Record<string, unknown>>) {
+		const ts = typeof m.timestamp === "number" && Number.isFinite(m.timestamp) ? m.timestamp : null;
+		if (ts !== null && prevTs !== null) {
+			const delta = ts - prevTs;
+			if (delta > 0) activeMs += Math.min(delta, 25 * 60_000);
+		}
+		if (ts !== null) prevTs = ts;
+
+		const blocks = Array.isArray(m.content) ? m.content : [];
+		for (const blk of blocks as Array<Record<string, unknown>>) {
+			if (blk.type !== "toolCall") continue;
+			const name = typeof blk.name === "string" ? blk.name : "";
+			const args = (blk.arguments && typeof blk.arguments === "object" ? blk.arguments : {}) as Record<string, unknown>;
+			if (name === "problem") {
+				if (ts !== null) lastProblemTs = ts;
+			} else if (name === "conclude") {
+				const outcome = typeof args.outcome === "string" ? args.outcome : "";
+				if (outcome === "solved") solvedCount++;
+				else if (outcome === "solvedWithHints") hintsCount++;
+				else if (outcome === "movedOn" || outcome === "surrendered") unsolvedCount++;
+				if (ts !== null && lastProblemTs !== null && ts > lastProblemTs) {
+					const durMin = Math.round(Math.min(ts - lastProblemTs, 90 * 60_000) / 60_000);
+					if (durMin >= 2) problemDurationsMin.push(durMin);
+					lastProblemTs = null;
+				}
+			}
+		}
+	}
+
+	const turnCount = Array.isArray(chat.turns) ? chat.turns.length : msgs.length;
+	const fallbackMin = Math.min(120, Math.max(5, turnCount * 4));
+	const activeMin = activeMs > 0 ? Math.max(5, Math.round(activeMs / 60_000)) : fallbackMin;
+	return { activeMin, solvedCount, hintsCount, unsolvedCount, problemDurationsMin };
+}
+
+function buildPlannerLearningProfile(opts: {
+	config: PlannerConfig;
+	subjectSignals: readonly PlannerSubjectSignal[];
+	flashcards: ReturnType<typeof readFlashcardsSnapshot> | null;
+	propIdToSubject: Map<string, string>;
+	sessions: readonly PlannerSessionSummary[];
+	chatsDir?: string;
+}): PlannerLearningProfile {
+	const { config, subjectSignals, flashcards, propIdToSubject, sessions, chatsDir } = opts;
+	const buckets = new Map<string, {
+		subject: string;
+		clusterId?: string;
+		fsrsReviews: number;
+		fsrsPasses: number;
+		fsrsLapses: number;
+		diffSum: number;
+		stabSum: number;
+		trackedNodes: number;
+		practiceSessions: number;
+		teachSessions: number;
+		solvedCount: number;
+		hintsCount: number;
+		unsolvedCount: number;
+		problemMins: number[];
+		sessionMins: number[];
+		loggedMinutes: number;
+	}>();
+
+	const ensureBucket = (subject: string, clusterId?: string) => {
+		const key = normalizeSubjectKey(subject);
+		let b = buckets.get(key);
+		if (!b) {
+			b = {
+				subject,
+				...(clusterId ? { clusterId } : {}),
+				fsrsReviews: 0,
+				fsrsPasses: 0,
+				fsrsLapses: 0,
+				diffSum: 0,
+				stabSum: 0,
+				trackedNodes: 0,
+				practiceSessions: 0,
+				teachSessions: 0,
+				solvedCount: 0,
+				hintsCount: 0,
+				unsolvedCount: 0,
+				problemMins: [],
+				sessionMins: [],
+				loggedMinutes: 0,
+			};
+			buckets.set(key, b);
+		}
+		return b;
+	};
+
+	for (const sig of subjectSignals) ensureBucket(sig.label, sig.clusterId);
+	for (const ms of config.milestones) ensureBucket(ms.subject);
+
+	let totalFsrsReviews = 0;
+	let totalFsrsPasses = 0;
+	const rawReviews = Array.isArray(flashcards?.reviews) ? flashcards!.reviews : [];
+	for (const r of rawReviews as Array<Record<string, unknown>>) {
+		const rating = Number(r.rating);
+		if (!Number.isFinite(rating) || rating < 1 || rating > 4) continue;
+		totalFsrsReviews++;
+		if (rating >= 3) totalFsrsPasses++;
+		const propId = typeof r.propositionId === "string" ? r.propositionId : "";
+		const subj = propId ? propIdToSubject.get(propId) : undefined;
+		if (subj) {
+			const b = ensureBucket(subj);
+			b.fsrsReviews++;
+			if (rating >= 3) b.fsrsPasses++;
+			if (rating === 1) b.fsrsLapses++;
+		}
+	}
+
+	if (flashcards?.propositions) {
+		for (const [propId, entry] of Object.entries(flashcards.propositions)) {
+			const sched = entry?.schedule;
+			if (!sched || !sched.reps) continue;
+			const subj = propIdToSubject.get(propId);
+			if (!subj) continue;
+			const b = ensureBucket(subj);
+			b.trackedNodes++;
+			if (typeof sched.difficulty === "number") b.diffSum += sched.difficulty;
+			if (typeof sched.stability === "number") b.stabSum += sched.stability;
+		}
+	}
+
+	let totalPracticeSessions = 0;
+	let totalTeachSessions = 0;
+	let totalSolved = 0;
+	let totalProblemsConcluded = 0;
+	const allProblemMins: number[] = [];
+	const allTeachMins: number[] = [];
+
+	const matchSubjectForTitle = (title: string): string | undefined => {
+		const normTitle = normalizeSubjectKey(title);
+		if (!normTitle) return undefined;
+		let best: string | undefined;
+		let bestLen = 0;
+		for (const b of buckets.values()) {
+			const bk = normalizeSubjectKey(b.subject);
+			if (bk.length >= 2 && (normTitle.includes(bk) || bk.includes(normTitle)) && bk.length > bestLen) {
+				best = b.subject;
+				bestLen = bk.length;
+			}
+		}
+		return best;
+	};
+
+	for (const s of sessions.slice(0, 24)) {
+		const chat = readChatSafe(s.id, chatsDir);
+		if (!chat) continue;
+		const stats = computeActiveSessionStudyMinutes(chat);
+		const isPractice = (chat.kind ?? s.kind) === "practice" || stats.solvedCount + stats.hintsCount + stats.unsolvedCount > 0;
+		if (isPractice) totalPracticeSessions++;
+		else {
+			totalTeachSessions++;
+			allTeachMins.push(stats.activeMin);
+		}
+		totalSolved += stats.solvedCount;
+		totalProblemsConcluded += stats.solvedCount + stats.hintsCount + stats.unsolvedCount;
+		allProblemMins.push(...stats.problemDurationsMin);
+
+		const matchedSubj = matchSubjectForTitle(chat.title || s.title);
+		if (matchedSubj) {
+			const b = ensureBucket(matchedSubj);
+			if (isPractice) b.practiceSessions++;
+			else b.teachSessions++;
+			b.solvedCount += stats.solvedCount;
+			b.hintsCount += stats.hintsCount;
+			b.unsolvedCount += stats.unsolvedCount;
+			b.problemMins.push(...stats.problemDurationsMin);
+			b.sessionMins.push(stats.activeMin);
+		}
+	}
+
+	let loggedStudyDays = 0;
+	const dailyHoursList: number[] = [];
+	for (const log of Object.values(config.logs)) {
+		const loggedSum = Object.values(log.loggedStudyMinBySubject).reduce((a, b) => a + b, 0);
+		const journalStudy = (log.actualEntries ?? [])
+			.filter((e) => e.category === "study")
+			.reduce((a, b) => a + b.minutes, 0);
+		const dayMin = Math.max(loggedSum, journalStudy);
+		if (dayMin >= 15) {
+			loggedStudyDays++;
+			dailyHoursList.push(dayMin / 60);
+		}
+		for (const [subj, mins] of Object.entries(log.loggedStudyMinBySubject)) {
+			const b = ensureBucket(subj);
+			b.loggedMinutes += mins;
+		}
+	}
+
+	const sufficientData = totalFsrsReviews >= 8 && (totalPracticeSessions + totalTeachSessions >= 2 || loggedStudyDays >= 2);
+	const sufficiencyReason = sufficientData
+		? `Calibrated from ${totalFsrsReviews} FSRS reviews · ${totalPracticeSessions + totalTeachSessions} sessions · ${loggedStudyDays} logged day(s)`
+		: `Baseline only: need ≥8 FSRS reviews and ≥2 sessions or logged days (currently ${totalFsrsReviews} FSRS reviews, ${totalPracticeSessions + totalTeachSessions} sessions, ${loggedStudyDays} logged days)`;
+
+	const bySubject: Record<string, SubjectLearningMetrics> = {};
+	for (const b of buckets.values()) {
+		const retentionRatePct = b.fsrsReviews > 0 ? Math.round((b.fsrsPasses / b.fsrsReviews) * 100) : null;
+		const lapseRatePct = b.fsrsReviews > 0 ? Math.round((b.fsrsLapses / b.fsrsReviews) * 100) : null;
+		const avgDifficulty = b.trackedNodes > 0 ? Math.round((b.diffSum / b.trackedNodes) * 10) / 10 : null;
+		const avgStabilityDays = b.trackedNodes > 0 ? Math.round((b.stabSum / b.trackedNodes) * 10) / 10 : null;
+		const totalProb = b.solvedCount + b.hintsCount + b.unsolvedCount;
+		const practiceSolveRatePct = totalProb > 0 ? Math.round((b.solvedCount / totalProb) * 100) : null;
+		const avgMinutesPerProblem =
+			b.problemMins.length > 0
+				? Math.round(b.problemMins.reduce((a, v) => a + v, 0) / b.problemMins.length)
+				: null;
+		const avgMinutesPerSession =
+			b.sessionMins.length > 0
+				? Math.round(b.sessionMins.reduce((a, v) => a + v, 0) / b.sessionMins.length)
+				: null;
+
+		let paceFactor = 1.0;
+		if (sufficientData && (b.fsrsReviews >= 4 || totalProb >= 2)) {
+			const diffAdjust = avgDifficulty !== null ? (avgDifficulty - 5.2) * 0.045 : 0;
+			const solveAdjust = practiceSolveRatePct !== null ? (72 - practiceSolveRatePct) * 0.004 : 0;
+			const lapseAdjust = lapseRatePct !== null ? Math.max(0, lapseRatePct - 15) * 0.004 : 0;
+			paceFactor = Math.min(1.65, Math.max(0.75, Math.round((1 + diffAdjust + solveAdjust + lapseAdjust) * 100) / 100));
+		}
+
+		bySubject[b.subject] = {
+			subject: b.subject,
+			...(b.clusterId ? { clusterId: b.clusterId } : {}),
+			fsrsReviews: b.fsrsReviews,
+			fsrsTrackedNodes: b.trackedNodes,
+			retentionRatePct,
+			lapseRatePct,
+			avgDifficulty,
+			avgStabilityDays,
+			practiceSessions: b.practiceSessions,
+			practiceSolvedCount: b.solvedCount,
+			practiceHintsCount: b.hintsCount,
+			practiceUnsolvedCount: b.unsolvedCount,
+			practiceSolveRatePct,
+			avgMinutesPerProblem,
+			avgMinutesPerSession,
+			teachSessions: b.teachSessions,
+			loggedPlannerMinutes: b.loggedMinutes,
+			paceFactor,
+		};
+	}
+
+	const overallRetentionPct = totalFsrsReviews > 0 ? Math.round((totalFsrsPasses / totalFsrsReviews) * 100) : null;
+	const overallSolveRatePct = totalProblemsConcluded > 0 ? Math.round((totalSolved / totalProblemsConcluded) * 100) : null;
+	const avgMinutesPerProblem =
+		allProblemMins.length > 0 ? Math.round(allProblemMins.reduce((a, v) => a + v, 0) / allProblemMins.length) : null;
+	const avgMinutesPerTopic =
+		allTeachMins.length > 0 ? Math.round(allTeachMins.reduce((a, v) => a + v, 0) / allTeachMins.length) : null;
+	const sustainableDailyHours =
+		dailyHoursList.length >= 2
+			? Math.round((dailyHoursList.reduce((a, v) => a + v, 0) / dailyHoursList.length) * 10) / 10
+			: null;
+
+	return {
+		sufficientData,
+		sufficiencyReason,
+		totalFsrsReviews,
+		totalPracticeSessions,
+		totalTeachSessions,
+		loggedStudyDays,
+		overallRetentionPct,
+		overallSolveRatePct,
+		avgMinutesPerProblem,
+		avgMinutesPerTopic,
+		sustainableDailyHours,
+		realismFactor: config.realismFactor ?? 1.0,
+		bySubject,
+	};
+}
+
 export function buildPlannerPersonalSignals(
 	config: PlannerConfig,
 	opts?: PlannerReadOptions & { chatsDir?: string; date?: string },
@@ -168,10 +479,13 @@ export function buildPlannerPersonalSignals(
 
 	// Per-cluster detailed graph + FSRS metrics (compact metadata only)
 	const subjectSignals: PlannerSubjectSignal[] = [];
+	const propIdToSubject = new Map<string, string>();
+	let loadedFlashcards: ReturnType<typeof readFlashcardsSnapshot> | null = null;
 	try {
 		const isolatedTestMode = Boolean(opts?.plannerFile && !opts.flashcardsFile);
 		const graph = isolatedTestMode ? { propositions: [], chains: [], clusters: [], sessions: {} } : graphView();
 		const flashcards = isolatedTestMode ? null : readFlashcardsSnapshot(opts?.flashcardsFile);
+		loadedFlashcards = flashcards;
 
 		if (graph.propositions.length > 0 && examPrep.availableScopes.length > 0) {
 			const nodesById = new Map(graph.propositions.map((n) => [n.id, n]));
@@ -181,6 +495,9 @@ export function buildPlannerPersonalSignals(
 			for (const scope of examPrep.availableScopes) {
 				const explicitCluster = clusterLookup.get(scope.id);
 				const memberIds = explicitCluster?.members ?? birthLookup.get(scope.id) ?? [];
+				for (const nid of memberIds) {
+					if (!propIdToSubject.has(nid)) propIdToSubject.set(nid, scope.label);
+				}
 				const memberNodes = memberIds
 					.map((id) => nodesById.get(id))
 					.filter((n): n is NonNullable<typeof n> => Boolean(n));
@@ -287,13 +604,30 @@ export function buildPlannerPersonalSignals(
 		}
 	}
 
+	const cleanedMistakeHints = examPrep.mistakeHints
+		? {
+			...examPrep.mistakeHints,
+			recentRules: examPrep.mistakeHints.recentRules.map((r) => formatPlainMathPreview(r, 170)).filter(Boolean),
+		}
+		: undefined;
+
+	const learningProfile = buildPlannerLearningProfile({
+		config,
+		subjectSignals,
+		flashcards: loadedFlashcards,
+		propIdToSubject,
+		sessions: opts?.plannerFile && !opts.chatsDir ? [] : sessions,
+		chatsDir: opts?.chatsDir,
+	});
+
 	return {
 		date,
 		examPrep,
 		subjectSignals,
-		mistakeHints: examPrep.mistakeHints,
+		...(cleanedMistakeHints ? { mistakeHints: cleanedMistakeHints } : {}),
 		recentSessions: sessions,
 		autoTrackedStudyMinBySubject,
+		learningProfile,
 		habitTrend: {
 			loggedDays: recentLogs.length,
 			avgEnergy,
@@ -312,6 +646,7 @@ export interface PlannerSnapshotResponse {
 		coach: { available: boolean; modelLabel: string | null };
 		vision: { available: boolean; modelLabel: string | null };
 		research: { available: boolean; modelLabel: string | null; webSearch: boolean };
+		availableRoles: Array<{ role: ModelRole; label: string; modelLabel: string }>;
 	};
 }
 
@@ -321,14 +656,18 @@ interface ResolvedPlannerEngine {
 	engine: PiEngine;
 }
 
-export function resolvePlannerEngine(kind: "coach" | "vision" | "research"): ResolvedPlannerEngine | null {
+export function resolvePlannerEngine(
+	kind: "coach" | "vision" | "research",
+	preferredRole?: ModelRole,
+): ResolvedPlannerEngine | null {
 	const settings = stores.settingsStore.readSettings();
-	const roleOrder: ModelRole[] =
+	const defaultOrder: ModelRole[] =
 		kind === "vision"
 			? ["visualMaker", "pdfReader", "prober", "researcher", "analyst"]
 			: kind === "research"
 				? ["researcher", "prober", "analyst"]
 				: ["prober", "sideQuestion", "researcher", "analyst"];
+	const roleOrder: ModelRole[] = preferredRole ? [preferredRole, ...defaultOrder.filter((r) => r !== preferredRole)] : defaultOrder;
 
 	for (const role of roleOrder) {
 		const spec = resolveRoleSpec(role, settings);
@@ -344,6 +683,22 @@ export function resolvePlannerEngine(kind: "coach" | "vision" | "research"): Res
 	return null;
 }
 
+export function listAvailablePlannerRoles(): Array<{ role: ModelRole; label: string; modelLabel: string }> {
+	const settings = stores.settingsStore.readSettings();
+	const roles: ModelRole[] = ["researcher", "prober", "analyst", "sideQuestion", "visualMaker", "pdfReader"];
+	const out: Array<{ role: ModelRole; label: string; modelLabel: string }> = [];
+	for (const role of roles) {
+		const spec = resolveRoleSpec(role, settings);
+		if (!spec || !providerKeyPresent(spec.provider)) continue;
+		out.push({
+			role,
+			label: ROLE_DISPLAY_NAMES[role] ?? role,
+			modelLabel: `${spec.provider}:${spec.id}`,
+		});
+	}
+	return out;
+}
+
 export function getPlannerAiAvailability() {
 	const coach = resolvePlannerEngine("coach");
 	const vision = resolvePlannerEngine("vision");
@@ -356,6 +711,7 @@ export function getPlannerAiAvailability() {
 			modelLabel: research?.modelLabel ?? null,
 			webSearch: searchAvailable(),
 		},
+		availableRoles: listAvailablePlannerRoles(),
 	};
 }
 
@@ -501,6 +857,10 @@ export function patchPlannerConfig(
 		...(patch.milestones !== undefined ? { milestones: patch.milestones } : {}),
 		...(patch.lifestyle !== undefined ? { lifestyle: patch.lifestyle } : {}),
 		...(patch.dayOverrides !== undefined ? { dayOverrides: patch.dayOverrides } : {}),
+		...(patch.mutedSubjects !== undefined ? { mutedSubjects: patch.mutedSubjects } : {}),
+		...(patch.pinnedSubjects !== undefined ? { pinnedSubjects: patch.pinnedSubjects } : {}),
+		...(patch.dailyMaxSubjects !== undefined ? { dailyMaxSubjects: patch.dailyMaxSubjects } : {}),
+		...(patch.realismFactor !== undefined ? { realismFactor: patch.realismFactor } : {}),
 		dismissedExamProfileIds,
 		updatedAt: new Date(now).toISOString(),
 	});
@@ -517,6 +877,10 @@ export function patchPlannerConfig(
 		patch.milestones !== undefined ||
 		patch.lifestyle !== undefined ||
 		patch.dayOverrides !== undefined ||
+		patch.mutedSubjects !== undefined ||
+		patch.pinnedSubjects !== undefined ||
+		patch.dailyMaxSubjects !== undefined ||
+		patch.realismFactor !== undefined ||
 		synced.changed;
 
 	if (scheduleInputsChanged || !resolvedNext.plans[date]) {
@@ -1048,6 +1412,15 @@ const examSyllabusSchema = Type.Object({
 	sourceSummary: Type.String({ description: "Brief note on competition format / syllabus scope / citations." }),
 });
 
+export interface ResearchTraceStep {
+	id: string;
+	phase: "linked_context" | "web_search" | "web_fetch" | "synthesizing" | "done" | "error";
+	message: string;
+	detail?: string;
+	urls?: string[];
+	timestamp: string;
+}
+
 export async function researchExamSyllabus(opts: {
 	title: string;
 	kind?: StudyMilestone["kind"];
@@ -1057,11 +1430,13 @@ export async function researchExamSyllabus(opts: {
 	examProfileId?: string;
 	pullOnly?: boolean;
 	preferLocal?: boolean;
+	preferredRole?: ModelRole;
 	examPrepFile?: string;
 	flashcardsFile?: string;
 	chatsDir?: string;
 	engineOverride?: PiEngine;
 	signal?: AbortSignal;
+	onStep?: (step: ResearchTraceStep) => void;
 }): Promise<{
 	subject: string;
 	cognitiveLoad: CognitiveLoad;
@@ -1072,7 +1447,19 @@ export async function researchExamSyllabus(opts: {
 	pulledContext?: string;
 	modelLabel: string;
 	usedWebSearch: boolean;
+	trace: ResearchTraceStep[];
 }> {
+	const trace: ResearchTraceStep[] = [];
+	const pushStep = (step: Omit<ResearchTraceStep, "id" | "timestamp">) => {
+		const entry: ResearchTraceStep = {
+			...step,
+			id: `tr_${Date.now()}_${trace.length}`,
+			timestamp: new Date().toISOString(),
+		};
+		trace.push(entry);
+		opts.onStep?.(entry);
+	};
+
 	const linked = buildLinkedClusterContext({
 		clusterIds: opts.clusterIds,
 		examProfileId: opts.examProfileId,
@@ -1081,6 +1468,14 @@ export async function researchExamSyllabus(opts: {
 		chatsDir: opts.chatsDir,
 	});
 	const title = opts.title.trim() || linked.resolvedSubject || "Study Milestone";
+
+	pushStep({
+		phase: "linked_context",
+		message: linked.linkedLabels.length > 0
+			? `Probed ${linked.linkedLabels.length} linked graph/session cluster(s): ${linked.linkedLabels.join(", ")}`
+			: `Prepared prompt context for "${title}"`,
+		...(linked.topicHints.length > 0 ? { detail: `Found ${linked.topicHints.length} topic hints from Graph & PlanTree` } : {}),
+	});
 
 	if (opts.pullOnly) {
 		const manualParsed = opts.materialsText?.trim() ? parseLocalSyllabusOutline(opts.materialsText) : { syllabusTopics: [], estimatedHours: 0 };
@@ -1093,6 +1488,7 @@ export async function researchExamSyllabus(opts: {
 			}
 		}
 		const sumH = Math.max(1, Math.round(combinedTopics.reduce((a, t) => a + t.estHours, 0) * 10) / 10);
+		pushStep({ phase: "done", message: `Pulled ${combinedTopics.length} linked topics (~${sumH}h) with 0 tokens.` });
 		return {
 			subject: (linked.resolvedSubject || title).slice(0, 80),
 			cognitiveLoad: opts.kind === "competition" ? "heavy" : "medium",
@@ -1105,18 +1501,20 @@ export async function researchExamSyllabus(opts: {
 			pulledContext: linked.summaryText,
 			modelLabel: "local:linked-context",
 			usedWebSearch: false,
+			trace,
 		};
 	}
 
 	const combinedMaterial = [linked.summaryText, opts.materialsText?.trim()].filter(Boolean).join("\n\n");
 	const resolved = opts.engineOverride
 		? { role: "researcher" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
-		: resolvePlannerEngine("research");
+		: resolvePlannerEngine("research", opts.preferredRole);
 	if (opts.preferLocal || (!resolved && combinedMaterial)) {
 		const parsed = parseLocalSyllabusOutline(opts.materialsText?.trim() || title);
 		const topics = parsed.syllabusTopics.length > 0 && opts.materialsText?.trim() ? parsed.syllabusTopics : linked.topicHints;
 		const finalTopics = topics.length > 0 ? topics : parsed.syllabusTopics;
 		const sumH = Math.max(1, Math.round(finalTopics.reduce((a, t) => a + t.estHours, 0) * 10) / 10);
+		pushStep({ phase: "done", message: `Parsed outline locally into ${finalTopics.length} topics (~${sumH}h).` });
 		return {
 			subject: (linked.resolvedSubject || title).slice(0, 80),
 			cognitiveLoad: opts.kind === "competition" ? "heavy" : "medium",
@@ -1128,6 +1526,7 @@ export async function researchExamSyllabus(opts: {
 				: "Parsed outline locally (0 tokens).",
 			modelLabel: "local:outline-parser",
 			usedWebSearch: false,
+			trace,
 		};
 	}
 	if (!resolved) {
@@ -1135,7 +1534,56 @@ export async function researchExamSyllabus(opts: {
 	}
 
 	const canSearch = !opts.engineOverride && searchAvailable();
-	const extraTools = canSearch ? createWebTools(() => searchProvider()) : undefined;
+	const rawTools = canSearch ? createWebTools(() => searchProvider()) : undefined;
+	const extraTools: Record<string, AgentTool<any, any>> | undefined = rawTools
+		? Object.fromEntries(
+			Object.entries(rawTools).map(([toolName, tool]) => {
+				const origExecute = tool.execute.bind(tool) as AgentTool<any, any>["execute"];
+				const wrapped: AgentTool<any, any> = {
+					...tool,
+					execute: async (toolCallId, params, signal, onUpdate) => {
+						const p = (params ?? {}) as Record<string, unknown>;
+						if (toolName === "web_search") {
+							const q = typeof p?.query === "string" ? p.query : "";
+							pushStep({ phase: "web_search", message: `Searching web: "${q}"` });
+						} else if (toolName === "web_fetch") {
+							const u = typeof p?.url === "string" ? p.url : "";
+							pushStep({ phase: "web_fetch", message: `Reading webpage: ${u}`, urls: u ? [u] : undefined });
+						}
+						const result = await origExecute(toolCallId, params, signal, onUpdate);
+						try {
+							const txt =
+								result && typeof result === "object" && "content" in result && Array.isArray((result as { content: unknown[] }).content)
+									? ((result as { content: Array<{ text?: string }> }).content.map((c) => c.text ?? "").join(" "))
+									: String(result ?? "");
+							if (toolName === "web_search") {
+								const urlMatches = [...txt.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)].map((m) => m[0]).slice(0, 4);
+								pushStep({
+									phase: "web_search",
+									message: `Web search returned results${urlMatches.length > 0 ? ` (${urlMatches.length} source URLs)` : ""}`,
+									...(urlMatches.length > 0 ? { urls: urlMatches, detail: urlMatches.join(" · ") } : {}),
+								});
+							} else if (toolName === "web_fetch") {
+								pushStep({
+									phase: "web_fetch",
+									message: `Extracted readable page content (${txt.length} chars)`,
+								});
+							}
+						} catch {
+							// Trace logging must never abort tool execution
+						}
+						return result;
+					},
+				};
+				return [toolName, wrapped];
+			}),
+		)
+		: undefined;
+
+	pushStep({
+		phase: "synthesizing",
+		message: `Running ${resolved.modelLabel}${canSearch ? " with Web Search & Page Reader" : " (offline/context mode)"}...`,
+	});
 
 	const systemPrompt = `You are an Academic Competition & Exam Syllabus Estimator.
 Given an exam/competition/project name (for example "Olympic Toán Giải tích Sinh viên", "ICPC Regional", "OS Midterm") and any linked Knowledge Graph / chat session context / uploaded PDF/notes, produce a realistic structured study breakdown and hour estimate, then call submit_exam_syllabus ONCE.
@@ -1186,15 +1634,289 @@ Break down into 5-10 concrete syllabus topics with realistic estHours whose sum 
 		done: false,
 	}));
 	const sumHours = topics.reduce((a, t) => a + t.estHours, 0);
+	const estimatedHours = Math.max(1, Math.round((Number(res.estimatedHours) || sumHours) * 10) / 10);
+
+	pushStep({
+		phase: "done",
+		message: `Synthesized ${topics.length} syllabus topics (~${estimatedHours}h total) via ${resolved.modelLabel}.`,
+	});
 
 	return {
 		subject: res.subject.trim().slice(0, 80),
 		cognitiveLoad: res.cognitiveLoad,
 		priority: res.priority,
-		estimatedHours: Math.max(1, Math.round((Number(res.estimatedHours) || sumHours) * 10) / 10),
+		estimatedHours,
 		syllabusTopics: topics,
 		sourceSummary: res.sourceSummary.trim().slice(0, 600),
 		modelLabel: resolved.modelLabel,
 		usedWebSearch: canSearch,
+		trace,
+	};
+}
+
+// ─── Personalized Workload Estimator & 24h Plan-vs-Actual Compliance Evaluator ─
+
+const workloadEstimateSchema = Type.Object({
+	estimatedHours: Type.Number(),
+	recommendedDailyHours: Type.Number(),
+	reasoning: Type.String(),
+});
+
+export async function estimateMilestoneWorkloadServer(
+	opts: PlannerReadOptions & {
+		chatsDir?: string;
+		title: string;
+		subject?: string;
+		kind?: StudyMilestone["kind"];
+		dueDate?: string;
+		baseHours?: number;
+		syllabusTopics?: SyllabusTopic[];
+		clusterIds?: string[];
+		useAi?: boolean;
+		preferredRole?: ModelRole;
+		engineOverride?: PiEngine;
+		signal?: AbortSignal;
+	},
+): Promise<PersonalizedWorkloadEstimate & { modelLabel: string }> {
+	const now = opts.now ?? Date.now();
+	const date = localDateString(now);
+	const config = readPlannerConfig(opts.plannerFile);
+	const signals = buildPlannerPersonalSignals(config, { ...opts, date, now });
+	const localEstimate = computePersonalizedMilestoneEstimate({
+		title: opts.title,
+		subject: opts.subject || opts.title,
+		kind: opts.kind,
+		dueDate: opts.dueDate,
+		todayDate: date,
+		baseHours: opts.baseHours,
+		syllabusTopics: opts.syllabusTopics,
+		clusterIds: opts.clusterIds,
+		signals,
+	});
+
+	if (!opts.useAi) {
+		return { ...localEstimate, modelLabel: "local:learning-profile" };
+	}
+
+	const resolved = opts.engineOverride
+		? { role: "analyst" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
+		: resolvePlannerEngine("coach", opts.preferredRole);
+	if (!resolved) {
+		throw new PlannerAiUnavailable("No model is configured for AI workload estimation.");
+	}
+
+	const prompt = JSON.stringify({
+		target: { title: opts.title, subject: opts.subject, kind: opts.kind, dueDate: opts.dueDate },
+		localBaseline: localEstimate,
+		learningProfile: signals.learningProfile,
+	});
+
+	const aiRes = await runPlannerSubmit<{
+		estimatedHours: number;
+		recommendedDailyHours: number;
+		reasoning: string;
+	}>({
+		role: resolved.role,
+		engine: resolved.engine,
+		systemPrompt: "Calibrate realistic study workload hours using the learner's measured FSRS retention, Practice solve rate, problem solve speed, and remaining days. Call submit_workload_estimate once.",
+		promptText: prompt,
+		toolName: "submit_workload_estimate",
+		toolDescription: "Submit calibrated workload hours and daily study target.",
+		parameters: workloadEstimateSchema,
+		signal: opts.signal,
+		fill: (raw) => raw as { estimatedHours: number; recommendedDailyHours: number; reasoning: string },
+		validate: (v) => (Number.isFinite(v.estimatedHours) && v.estimatedHours > 0 ? null : "Invalid estimatedHours."),
+	});
+
+	return {
+		...localEstimate,
+		estimatedHours: Math.max(1, Math.round(aiRes.estimatedHours * 2) / 2),
+		recommendedDailyHours: Math.max(0.5, Math.round(aiRes.recommendedDailyHours * 10) / 10),
+		breakdownReasons: [...localEstimate.breakdownReasons, aiRes.reasoning.trim().slice(0, 260)],
+		modelLabel: resolved.modelLabel,
+	};
+}
+
+const journalEvaluationSchema = Type.Object({
+	adherencePct: Type.Number(),
+	actualStudyMin: Type.Number(),
+	summary: Type.String(),
+	strengths: Type.Array(Type.String()),
+	frictionPoints: Type.Array(Type.String()),
+	nextDayAdvice: Type.String(),
+	entries: Type.Array(
+		Type.Object({
+			startTime: Type.String(),
+			endTime: Type.String(),
+			category: Type.Union([
+				Type.Literal("study"),
+				Type.Literal("class"),
+				Type.Literal("sleep"),
+				Type.Literal("meal"),
+				Type.Literal("hobby"),
+				Type.Literal("rest"),
+				Type.Literal("distraction"),
+				Type.Literal("other"),
+			]),
+			subject: Type.Optional(Type.String()),
+			title: Type.String(),
+			minutes: Type.Number(),
+		}),
+	),
+});
+
+export async function evaluateDailyJournalServer(
+	opts: PlannerReadOptions & {
+		chatsDir?: string;
+		date?: string;
+		journalText?: string;
+		manualEntries?: JournalActivityEntry[];
+		mode?: "local" | "llm";
+		preferredRole?: ModelRole;
+		engineOverride?: PiEngine;
+		signal?: AbortSignal;
+	},
+): Promise<{
+	snapshot: PlannerSnapshotResponse;
+	report: PlanComplianceReport;
+	parsedEntries: JournalActivityEntry[];
+	modelLabel: string;
+}> {
+	const now = opts.now ?? Date.now();
+	const date = isValidDateString(opts.date) ? opts.date : localDateString(now);
+	const filePath = opts.plannerFile ?? defaultPlannerPath();
+	const current = readPlannerConfig(filePath);
+	const signals = buildPlannerPersonalSignals(current, { ...opts, date, now });
+	const plan = current.plans[date] ?? computeLocalPlannerPlan(current, signals, now);
+	const log = current.logs[date];
+	const knownSubjects = [
+		...current.milestones.map((m) => m.subject),
+		...plan.quotas.map((q) => q.subject),
+		...signals.subjectSignals.map((s) => s.label),
+	];
+
+	const localEval = evaluatePlanVsActualLocal({
+		date,
+		plan,
+		log,
+		config: current,
+		journalText: opts.journalText,
+		manualEntries: opts.manualEntries,
+		knownSubjects,
+		now,
+	});
+
+	if ((opts.mode ?? "local") === "local") {
+		const updated = applyJournalEvaluationToConfig(current, date, {
+			journalText: opts.journalText,
+			entries: localEval.parsedEntries,
+			report: localEval.report,
+			suggestedRealismFactor: localEval.suggestedRealismFactor,
+			now,
+		});
+		savePlannerConfig(updated, filePath);
+		return {
+			snapshot: readPlannerSnapshot({ ...opts, date, now }),
+			report: localEval.report,
+			parsedEntries: localEval.parsedEntries,
+			modelLabel: "local:journal-auditor",
+		};
+	}
+
+	const resolved = opts.engineOverride
+		? { role: "analyst" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
+		: resolvePlannerEngine("coach", opts.preferredRole);
+	if (!resolved) {
+		throw new PlannerAiUnavailable("No model is configured for AI journal evaluation.");
+	}
+
+	const journalBody = (opts.journalText ?? log?.journalText ?? "").trim();
+	const prompt = JSON.stringify({
+		date,
+		plannedStudyHours: plan.plannedStudyHours,
+		plannedQuotas: plan.quotas.map((q) => ({ subject: q.subject, targetMin: q.targetMin })),
+		plannedBlocks: plan.blocks.map((b) => `${b.startTime}-${b.endTime} [${b.type}] ${b.title}`),
+		checkedBlocksCount: log?.completedBlockIds.length ?? 0,
+		manualEntries: opts.manualEntries ?? log?.actualEntries ?? [],
+		journalText: journalBody.slice(0, 3500),
+		knownSubjects,
+	});
+
+	interface AiJournalEvalOut {
+		adherencePct: number;
+		actualStudyMin: number;
+		summary: string;
+		strengths: string[];
+		frictionPoints: string[];
+		nextDayAdvice: string;
+		entries: Array<{
+			startTime: string;
+			endTime: string;
+			category: JournalActivityEntry["category"];
+			subject?: string;
+			title: string;
+			minutes: number;
+		}>;
+	}
+
+	const aiOut = await runPlannerSubmit<AiJournalEvalOut>({
+		role: resolved.role,
+		engine: resolved.engine,
+		systemPrompt: "You are a candid Student Study Auditor. Parse the student's 24h freeform journal against today's planned schedule, score honest adherencePct (0-100), extract structured activity entries with realistic minutes, note strengths & distractions/friction, and give concise next-day adjustment advice. Call submit_journal_evaluation once.",
+		promptText: prompt,
+		toolName: "submit_journal_evaluation",
+		toolDescription: "Submit 24h Plan vs Actual compliance evaluation and extracted timeline.",
+		parameters: journalEvaluationSchema,
+		signal: opts.signal,
+		fill: (raw) => raw as AiJournalEvalOut,
+		validate: (v) => (v.summary?.trim() ? null : "Provide evaluation summary."),
+	});
+
+	const aiEntries: JournalActivityEntry[] = (aiOut.entries.length > 0 ? aiOut.entries : localEval.parsedEntries).map((e, i) => ({
+		id: `jai_${date}_${i}`,
+		startTime: typeof e.startTime === "string" && e.startTime.trim() ? e.startTime.trim().slice(0, 8) : "08:00",
+		endTime: typeof e.endTime === "string" && e.endTime.trim() ? e.endTime.trim().slice(0, 8) : "09:00",
+		category: e.category,
+		...(typeof e.subject === "string" && e.subject.trim() ? { subject: e.subject.trim().slice(0, 80) } : {}),
+		title: String(e.title || "Logged activity").trim().slice(0, 140),
+		minutes: Math.max(5, Math.min(720, Math.round(Number(e.minutes) || 30))),
+		source: "ai_extracted",
+	}));
+
+	const plannedStudyMin = Math.max(30, localEval.report.plannedStudyMin);
+	const actualStudyMin = Math.max(0, Math.min(960, Math.round(Number(aiOut.actualStudyMin) || 0)));
+	const observedRealism = Math.max(0.4, Math.min(1.35, actualStudyMin / plannedStudyMin));
+	const prevRealism = current.realismFactor ?? 1.0;
+	const suggestedRealismFactor = Math.max(0.65, Math.min(1.25, Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100));
+
+	const report: PlanComplianceReport = {
+		date,
+		evaluatedAt: new Date(now).toISOString(),
+		evaluatedBy: "llm",
+		modelLabel: resolved.modelLabel,
+		adherencePct: Math.max(0, Math.min(100, Math.round(Number(aiOut.adherencePct) || 0))),
+		plannedStudyMin: localEval.report.plannedStudyMin,
+		actualStudyMin,
+		realismRatio: Math.round(observedRealism * 100) / 100,
+		summary: aiOut.summary.trim().slice(0, 600),
+		strengths: aiOut.strengths.slice(0, 6).map((s) => String(s).trim().slice(0, 180)).filter(Boolean),
+		frictionPoints: aiOut.frictionPoints.slice(0, 6).map((s) => String(s).trim().slice(0, 180)).filter(Boolean),
+		nextDayAdvice: aiOut.nextDayAdvice.trim().slice(0, 260),
+	};
+
+	const updated = applyJournalEvaluationToConfig(current, date, {
+		journalText: opts.journalText,
+		entries: aiEntries,
+		report,
+		suggestedRealismFactor,
+		now,
+	});
+	savePlannerConfig(updated, filePath);
+
+	return {
+		snapshot: readPlannerSnapshot({ ...opts, date, now }),
+		report,
+		parsedEntries: aiEntries,
+		modelLabel: resolved.modelLabel,
 	};
 }

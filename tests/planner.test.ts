@@ -19,13 +19,17 @@ import {
 	computeHabitStrengthSummary,
 	computeLocalPlannerPlan,
 	computeLoopHabitStep,
+	computePersonalizedMilestoneEstimate,
 	computeSleepAnchorForDate,
 	computeSubjectPaceMultiplier,
 	DEFAULT_EXAM_PREP_CONFIG,
 	DEFAULT_PLANNER_CONFIG,
 	emptyGraphFsrsSummary,
+	evaluatePlanVsActualLocal,
+	formatPlainMathPreview,
 	optimizeSlotAssignments,
 	parseIcsWeeklyEvents,
+	parseJournalTextLocal,
 	parseLocalSyllabusOutline,
 	parseSimpleWeeklyText,
 	resolveActiveBlockStatus,
@@ -37,9 +41,12 @@ import type { PiEngine } from "../src/agent/models.ts";
 import { buildMobileHtml } from "../src/server/phone-mobile-ui.ts";
 import {
 	buildLinkedClusterContext,
+	buildPlannerPersonalSignals,
 	checkInPlannerHabit,
 	closePhoneUploadSession,
 	createPhoneUploadSession,
+	estimateMilestoneWorkloadServer,
+	evaluateDailyJournalServer,
 	extractPlannerMaterialFile,
 	generatePlannerSchedule,
 	getMobileCompanionState,
@@ -743,5 +750,371 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		// Material extractor handles Markdown text cleanly
 		const mdExtracted = await extractPlannerMaterialFile("syllabus.md", Buffer.from("# Chương 1\n- Tích phân"));
 		assert.ok(mdExtracted.text.includes("Chương 1"));
+	});
+
+	it("sanitizes raw/truncated LaTeX in checklists and prevents 6-subject background overload", () => {
+		const formatted = formatPlainMathPreview(
+			"Gặp $0\\cdot\\infty$ với dãy truy hồi, đổi nghịch đảo $\\frac{1}{x_{n+1}}-\\f",
+			140,
+		);
+		assert.ok(!formatted.includes("$"));
+		assert.ok(!formatted.endsWith("\\f"));
+		assert.ok(formatted.includes("0·∞"));
+
+		const config: PlannerConfig = {
+			...DEFAULT_PLANNER_CONFIG,
+			intensity: "balanced",
+			dailyMaxSubjects: 2,
+			mutedSubjects: ["Lập trình xử lý dữ liệu"],
+			milestones: [
+				{
+					id: "ms_gt",
+					kind: "competition",
+					title: "Olympic Giải tích",
+					subject: "Giải tích",
+					dueDate: "2026-12-05",
+					priority: 3,
+					cognitiveLoad: "heavy",
+					clusterIds: ["c_gt"],
+					estimatedHours: 25,
+					completedHours: 2,
+					syllabusTopics: [],
+					notes: "",
+				},
+				{
+					id: "ms_ds",
+					kind: "competition",
+					title: "Olympic Đại số",
+					subject: "Đại số",
+					dueDate: "2026-12-10",
+					priority: 2,
+					cognitiveLoad: "heavy",
+					clusterIds: ["c_ds"],
+					estimatedHours: 18,
+					completedHours: 0,
+					syllabusTopics: [],
+					notes: "",
+				},
+			],
+		};
+		const signals: PlannerPersonalSignals = {
+			...sampleSignals("2026-11-16"),
+			subjectSignals: [
+				{
+					clusterId: "c_gt",
+					label: "Giải tích",
+					nodeCount: 20,
+					trackedCount: 10,
+					dueCount: 2,
+					weakCount: 1,
+					untrackedCount: 8,
+					readinessPct: 50,
+					dueSampleNames: [],
+					weakSampleNames: [],
+					recentChatTitles: [],
+					lastStudiedAt: null,
+				},
+				{
+					clusterId: "c_ds",
+					label: "Đại số",
+					nodeCount: 15,
+					trackedCount: 8,
+					dueCount: 1,
+					weakCount: 0,
+					untrackedCount: 7,
+					readinessPct: 60,
+					dueSampleNames: [],
+					weakSampleNames: [],
+					recentChatTitles: [],
+					lastStudiedAt: null,
+				},
+				{
+					clusterId: "c_ltxl",
+					label: "Lập trình xử lý dữ liệu",
+					nodeCount: 12,
+					trackedCount: 2,
+					dueCount: 0,
+					weakCount: 0,
+					untrackedCount: 10,
+					readinessPct: 25,
+					dueSampleNames: [],
+					weakSampleNames: [],
+					recentChatTitles: [],
+					lastStudiedAt: null,
+				},
+				{
+					clusterId: "c_xstk",
+					label: "XSTK",
+					nodeCount: 10,
+					trackedCount: 2,
+					dueCount: 0,
+					weakCount: 0,
+					untrackedCount: 8,
+					readinessPct: 30,
+					dueSampleNames: [],
+					weakSampleNames: [],
+					recentChatTitles: [],
+					lastStudiedAt: null,
+				},
+			],
+			mistakeHints: {
+				totalCount: 1,
+				recurringPattern: "careless",
+				recentRules: ["Gặp $0\\cdot\\infty$ với dãy truy hồi, tính $\\frac{1}{x_{n+1}}-\\f"],
+			},
+		};
+
+		const plan = computeLocalPlannerPlan(config, signals, new Date("2026-11-16T08:00:00Z").getTime());
+		assert.ok(plan.quotas.length <= 2);
+		assert.ok(!plan.quotas.some((q) => q.subject.includes("Lập trình xử lý dữ liệu")));
+		assert.ok(!plan.quotas.some((q) => q.subject === "XSTK"));
+		assert.ok(plan.plannedStudyHours <= 5.5);
+		assert.ok(plan.weeklyForecast?.every((d) => Array.isArray(d.subjects) && d.subjects.length >= 1));
+		for (const q of plan.quotas) {
+			for (const c of q.checklist) {
+				assert.ok(!c.text.includes("$"));
+			}
+		}
+
+		// Solo focus day override emphasizes Đại số on demand
+		const focused = computeLocalPlannerPlan(
+			{
+				...config,
+				dayOverrides: {
+					"2026-11-16": {
+						date: "2026-11-16",
+						focusSubjects: ["Đại số"],
+						wakeTime: "08:30",
+					},
+				},
+			},
+			signals,
+			new Date("2026-11-16T08:00:00Z").getTime(),
+		);
+		assert.equal(focused.todayWakeTime, "08:30");
+		assert.equal(focused.quotas[0]?.subject, "Đại số");
+
+		// Custom block timeline override is honored authoritatively
+		const customized = computeLocalPlannerPlan(
+			{
+				...config,
+				dayOverrides: {
+					"2026-11-16": {
+						date: "2026-11-16",
+						customBlocks: [
+							{
+								id: "blk_c1",
+								date: "2026-11-16",
+								startTime: "09:00",
+								endTime: "10:30",
+								startMin: 540,
+								endMin: 630,
+								durationMin: 90,
+								type: "study",
+								title: "Giải đề Olympic Giải tích",
+								subject: "Giải tích",
+							},
+						],
+					},
+				},
+			},
+			signals,
+			new Date("2026-11-16T08:00:00Z").getTime(),
+		);
+		assert.equal(customized.isCustomEdited, true);
+		assert.equal(customized.blocks.length, 1);
+		assert.equal(customized.plannedStudyHours, 1.5);
+	});
+
+	it("calibrates personalized workload from measured FSRS + Practice speed and honors sufficiency gating", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-learn-profile-"));
+		const plannerFile = path.join(dir, "planner.json");
+		const flashcardsFile = path.join(dir, "flashcards.json");
+		const chatsDir = path.join(dir, "chats");
+		fs.mkdirSync(chatsDir, { recursive: true });
+
+		// Fewer than 8 FSRS reviews -> baseline confidence only
+		fs.writeFileSync(flashcardsFile, JSON.stringify({ reviews: [{ propositionId: "n1", rating: 3, at: 1 }], propositions: {} }));
+		const baseline = await estimateMilestoneWorkloadServer({
+			plannerFile,
+			flashcardsFile,
+			chatsDir,
+			title: "Olympic Giải tích",
+			subject: "Giải tích",
+			baseHours: 20,
+			dueDate: "2026-12-05",
+		});
+		assert.equal(baseline.confidence, "baseline");
+		assert.equal(baseline.paceFactorApplied, 1);
+
+		// Add 10 FSRS reviews (several lapses) + 2 Practice chats with slow problem timing + 2 logged days
+		const reviews = Array.from({ length: 10 }, (_, i) => ({
+			propositionId: "n1",
+			rating: i % 3 === 0 ? 1 : 3,
+			at: 1_700_000_000_000 + i * 1000,
+		}));
+		fs.writeFileSync(
+			flashcardsFile,
+			JSON.stringify({
+				reviews,
+				propositions: { n1: { schedule: { state: 2, reps: 10, lapses: 4, difficulty: 7.4, stability: 4.5 } } },
+			}),
+		);
+		for (let idx = 1; idx <= 2; idx++) {
+			fs.writeFileSync(
+				path.join(chatsDir, `c_${idx}.json`),
+				JSON.stringify({
+					id: `c_${idx}`,
+					title: "Luyện tập Giải tích",
+					kind: "practice",
+					createdAt: "2026-11-10T08:00:00Z",
+					updatedAt: "2026-11-10T09:30:00Z",
+					messages: [
+						{ role: "assistant", timestamp: 1000, content: [{ type: "toolCall", id: "p1", name: "problem", arguments: {} }] },
+						{
+							role: "assistant",
+							timestamp: 1000 + 35 * 60_000,
+							content: [{ type: "toolCall", id: "c1", name: "conclude", arguments: { outcome: "solvedWithHints" } }],
+						},
+					],
+				}),
+			);
+		}
+		patchPlannerConfig(
+			{
+				milestones: [
+					{
+						id: "m_gt",
+						kind: "competition",
+						title: "Olympic Giải tích",
+						subject: "Giải tích",
+						dueDate: "2026-12-05",
+						priority: 3,
+						cognitiveLoad: "heavy",
+						clusterIds: [],
+						estimatedHours: 20,
+						completedHours: 0,
+						syllabusTopics: [],
+						notes: "",
+					},
+				],
+			},
+			{ plannerFile, flashcardsFile, chatsDir },
+		);
+		const signalsRich = buildPlannerPersonalSignals(sanitizePlannerConfig({}), { plannerFile, flashcardsFile, chatsDir, date: "2026-11-16" });
+		assert.equal(signalsRich.learningProfile?.sufficientData, true);
+		assert.equal(signalsRich.learningProfile?.overallSolveRatePct, 0);
+		assert.equal(signalsRich.learningProfile?.avgMinutesPerProblem, 35);
+
+		const personalized = computePersonalizedMilestoneEstimate({
+			title: "Olympic Giải tích",
+			subject: "Giải tích",
+			kind: "competition",
+			baseHours: 20,
+			dueDate: "2026-12-05",
+			todayDate: "2026-11-16",
+			signals: signalsRich,
+		});
+		assert.equal(personalized.confidence, "personalized");
+		assert.ok(personalized.estimatedHours > 20);
+	});
+
+	it("parses 24h journals, runs Plan-vs-Actual audits (local & AI), retains 100+ days, and streams research traces", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-journal-"));
+		const plannerFile = path.join(dir, "planner.json");
+
+		// Verify 365-day log retention (beyond previous 60-day cap)
+		const manyLogs: Record<string, unknown> = {};
+		for (let i = 0; i < 95; i++) {
+			const dt = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10);
+			manyLogs[dt] = { date: dt, completedBlockIds: [], completedChecklistIds: [], loggedStudyMinBySubject: { "Giải tích": 60 }, hobbyDone: false, mealsOk: true };
+		}
+		const sanitized = sanitizePlannerConfig({ logs: manyLogs });
+		assert.equal(Object.keys(sanitized.logs).length, 95);
+
+		const parsed = parseJournalTextLocal(
+			"08:30-10:30 Giải bài tập Giải tích Olympic\n14:00-15:00 Lướt tiktok mệt\n20:00-21:00 Chạy bộ thể thao",
+			"2026-11-16",
+			["Giải tích"],
+		);
+		assert.equal(parsed.length, 3);
+		assert.equal(parsed[0]?.category, "study");
+		assert.equal(parsed[0]?.subject, "Giải tích");
+		assert.equal(parsed[1]?.category, "distraction");
+		assert.equal(parsed[2]?.category, "hobby");
+
+		patchPlannerConfig(
+			{
+				milestones: [
+					{
+						id: "m1",
+						kind: "competition",
+						title: "Olympic Giải tích",
+						subject: "Giải tích",
+						dueDate: "2026-11-26",
+						priority: 3,
+						cognitiveLoad: "heavy",
+						clusterIds: [],
+						estimatedHours: 20,
+						completedHours: 0,
+						syllabusTopics: [],
+						notes: "",
+					},
+				],
+			},
+			{ plannerFile },
+		);
+
+		const localAudit = await evaluateDailyJournalServer({
+			plannerFile,
+			date: "2026-11-16",
+			journalText: "09:00-11:00 Giải bài Giải tích\n15:00-16:30 Lướt youtube sao nhãng",
+			mode: "local",
+		});
+		assert.equal(localAudit.report.evaluatedBy, "local");
+		assert.ok(localAudit.report.actualStudyMin >= 120);
+		assert.ok(localAudit.snapshot.config.logs["2026-11-16"]?.compliance?.adherencePct !== undefined);
+
+		const aiEvalEngine = fakeSubmitEngine("submit_journal_evaluation", {
+			adherencePct: 82,
+			actualStudyMin: 180,
+			summary: "Completed solid proof session with minor afternoon phone drift.",
+			strengths: ["Morning Olympiad problems"],
+			frictionPoints: ["1h afternoon YouTube scroll"],
+			nextDayAdvice: "Move heavy proofs to 08:30 sharp.",
+			entries: [
+				{ startTime: "08:30", endTime: "11:30", category: "study", subject: "Giải tích", title: "Proof set", minutes: 180 },
+			],
+		});
+		const llmAudit = await evaluateDailyJournalServer({
+			plannerFile,
+			date: "2026-11-16",
+			journalText: "08:30-11:30 Học Giải tích",
+			mode: "llm",
+			engineOverride: aiEvalEngine,
+		});
+		assert.equal(llmAudit.report.evaluatedBy, "llm");
+		assert.equal(llmAudit.report.adherencePct, 82);
+
+		// Research trace callback records linked_context, synthesizing, and done phases
+		const steps: string[] = [];
+		const researchEngine = fakeSubmitEngine("submit_exam_syllabus", {
+			subject: "Giải tích",
+			cognitiveLoad: "heavy",
+			priority: 3,
+			estimatedHours: 24,
+			syllabusTopics: [{ title: "Dãy số & Giới hạn", estHours: 8 }, { title: "Tích phân suy rộng", estHours: 16 }],
+			sourceSummary: "Verified via custom faux engine.",
+		});
+		const researched = await researchExamSyllabus({
+			title: "Olympic Toán Giải tích Sinh viên",
+			engineOverride: researchEngine,
+			onStep: (s) => steps.push(s.phase),
+		});
+		assert.ok(steps.includes("linked_context"));
+		assert.ok(steps.includes("synthesizing"));
+		assert.ok(steps.includes("done"));
+		assert.equal(researched.modelLabel, "custom");
+		assert.ok(researched.trace.length >= 3);
 	});
 });

@@ -7,6 +7,11 @@ import {
 	buildMonthGridDates,
 	computeLocalPlannerPlan,
 	daysBetweenDates,
+	formatClockMin,
+	formatPlainMathPreview,
+	normalizeSubjectKey,
+	parseClockMin,
+	resolveSubjectMaxDailyCap,
 	WEEKDAY_LABELS,
 	WEEKDAYS,
 	type CognitiveLoad,
@@ -16,9 +21,13 @@ import {
 	type DayOverride,
 	type FixedEventCategory,
 	type FixedWeeklyEvent,
+	type JournalActivityCategory,
+	type JournalActivityEntry,
 	type LifestyleConfig,
 	type MilestoneKind,
 	type PeakFocusWindow,
+	type PersonalizedWorkloadEstimate,
+	type PlanComplianceReport,
 	type PlannedBlock,
 	type PlannerConfig,
 	type PlannerEngineMode,
@@ -27,6 +36,7 @@ import {
 	type StudyMilestone,
 	type SyllabusTopic,
 	type Weekday,
+	type WeeklyForecastDay,
 } from "@/src/core";
 import { TopBar } from "@/components/top-bar";
 import { BrailleSpinner } from "@/components/braille-spinner";
@@ -34,6 +44,7 @@ import { useServerEvent } from "@/components/server-events";
 import { cn } from "@/lib/utils";
 import {
 	ArrowUpRightIcon,
+	BookOpenIcon,
 	CalendarClockIcon,
 	CheckCircle2Icon,
 	ChevronLeftIcon,
@@ -46,13 +57,20 @@ import {
 	ImagePlusIcon,
 	Link2Icon,
 	MoonIcon,
+	PauseIcon,
 	PencilIcon,
+	PinIcon,
 	PlusIcon,
 	RefreshCwIcon,
+	RotateCcwIcon,
+	SaveIcon,
 	ScaleIcon,
+	SearchIcon,
+	SlidersHorizontalIcon,
 	SparklesIcon,
 	TrashIcon,
 	WandSparklesIcon,
+	XIcon,
 } from "lucide-react";
 
 interface PlannerSnapshot {
@@ -63,10 +81,11 @@ interface PlannerSnapshot {
 		coach: { available: boolean; modelLabel: string | null };
 		vision: { available: boolean; modelLabel: string | null };
 		research: { available: boolean; modelLabel: string | null; webSearch: boolean };
+		availableRoles?: Array<{ role: string; label: string; modelLabel: string }>;
 	};
 }
 
-type PlannerTab = "today" | "milestones" | "tkb" | "lifestyle";
+type PlannerTab = "today" | "milestones" | "tkb" | "lifestyle" | "journal";
 
 const KIND_BADGE: Record<MilestoneKind, string> = {
 	competition: "border-warning/40 bg-warning/10 text-warning",
@@ -88,10 +107,6 @@ const MONTH_NAMES = [
 	"Jan", "Feb", "Mar", "Apr", "May", "Jun",
 	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ] as const;
-
-function stripInlineLatex(text: string): string {
-	return text.replace(/\$+([^$]*)\$+/g, "$1").replace(/\s+/g, " ").trim();
-}
 
 function formatMinCompact(min: number): string {
 	const h = Math.floor(min / 60);
@@ -305,12 +320,23 @@ export function PlannerPage() {
 											</span>
 										</span>
 									</div>
-									<div className="mt-1.5 flex items-baseline gap-2">
+									<div className="mt-1.5 flex flex-wrap items-baseline gap-2">
 										<span className="text-2xl font-semibold tracking-tight">{snap.plan.minDailyStudyHours}h+</span>
 										<span className="text-xs text-muted-foreground">
 											planned {snap.plan.plannedStudyHours}h · free {snap.plan.freeHoursTotal}h
 										</span>
+										{snap.plan.realismApplied !== undefined && snap.plan.realismApplied !== 1 && (
+											<span
+												className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0 text-[10px] tabular-nums text-primary"
+												title="EWMA learned capacity ratio from past journal/habit audits"
+											>
+												Realism {Math.round(snap.plan.realismApplied * 100)}%
+											</span>
+										)}
 									</div>
+									{snap.plan.carryoverNote && (
+										<p className="mt-1 text-[11px] text-primary">{snap.plan.carryoverNote}</p>
+									)}
 									<div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-xs">
 										<button
 											type="button"
@@ -401,9 +427,35 @@ export function PlannerPage() {
 												? `${snap.signals.subjectSignals.reduce((a, s) => a + s.dueCount, 0)} FSRS cards due · ${snap.signals.subjectSignals.reduce((a, s) => a + s.weakCount, 0)} weak foundations tracked.`
 												: "Add exams, competitions, or weekly fixed events to tailor your study quotas."}
 											{snap.signals.mistakeHints?.recentRules[0]
-												? ` Top mistake rule: "${stripInlineLatex(snap.signals.mistakeHints.recentRules[0])}"`
+												? ` Top mistake rule: "${formatPlainMathPreview(snap.signals.mistakeHints.recentRules[0], 140)}"`
 												: ""}
 										</p>
+									)}
+									{snap.signals.learningProfile && (
+										<div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+											<span
+												className={cn(
+													"rounded border px-1.5 py-0.5",
+													snap.signals.learningProfile.sufficientData
+														? "border-success/40 bg-success/10 text-success"
+														: "border-border bg-muted/40",
+												)}
+												title={snap.signals.learningProfile.sufficiencyReason}
+											>
+												{snap.signals.learningProfile.sufficientData
+													? `Lực học calibrated · Solve ${snap.signals.learningProfile.overallSolveRatePct ?? "—"}% · FSRS ${snap.signals.learningProfile.overallRetentionPct ?? "—"}%`
+													: `Calibrating tốc độ (${snap.signals.learningProfile.totalFsrsReviews}/8 FSRS reviews)`}
+											</span>
+											{todayLog?.compliance && (
+												<button
+													type="button"
+													onClick={() => setTab("journal")}
+													className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-primary hover:underline"
+												>
+													Today audit: {todayLog.compliance.adherencePct}%
+												</button>
+											)}
+										</div>
 									)}
 									{snap.config.engineMode === "llm" && (
 										<div className="mt-2 flex gap-1.5">
@@ -427,6 +479,7 @@ export function PlannerPage() {
 										{ id: "milestones", label: `Milestones & Exams (${snap.config.milestones.length})` },
 										{ id: "tkb", label: `Weekly TKB (${snap.config.fixedEvents.length})` },
 										{ id: "lifestyle", label: "Habits, Hobbies & Sleep" },
+										{ id: "journal", label: "24h Journal & Audit" },
 									] as const
 								).map((t) => (
 									<button
@@ -447,7 +500,13 @@ export function PlannerPage() {
 							</div>
 
 							{tab === "today" && (
-								<TodayQuotasTab snap={snap} todayLog={todayLog} onCheckIn={checkIn} />
+								<TodayQuotasTab
+									snap={snap}
+									todayLog={todayLog}
+									busy={busy}
+									onCheckIn={checkIn}
+									onPatch={patchPlanner}
+								/>
 							)}
 							{tab === "milestones" && (
 								<MilestonesTab
@@ -472,6 +531,15 @@ export function PlannerPage() {
 									onSaveLifestyle={(lifestyle) => patchPlanner({ lifestyle })}
 								/>
 							)}
+							{tab === "journal" && (
+								<JournalAuditTab
+									snap={snap}
+									busy={busy}
+									onCheckIn={checkIn}
+									onSnapshotUpdate={setSnap}
+									onError={setErrorMsg}
+								/>
+							)}
 						</>
 					)}
 				</div>
@@ -483,18 +551,198 @@ export function PlannerPage() {
 function TodayQuotasTab({
 	snap,
 	todayLog,
+	busy,
 	onCheckIn,
+	onPatch,
 }: {
 	snap: PlannerSnapshot;
 	todayLog: DailyHabitLog | undefined;
+	busy: boolean;
 	onCheckIn: (payload: Record<string, unknown>) => Promise<void>;
+	onPatch: (patch: Partial<PlannerConfig>) => Promise<void>;
 }) {
+	const date = snap.plan.date;
+	const todayOverride = snap.config.dayOverrides?.[date];
+	const focusSubjects = todayOverride?.focusSubjects ?? [];
+	const mutedSubjects = snap.config.mutedSubjects ?? [];
+	const pinnedSubjects = snap.config.pinnedSubjects ?? [];
+	const dailyMaxCap = resolveSubjectMaxDailyCap(snap.config);
+
+	const [selectedForecastDay, setSelectedForecastDay] = useState<string | null>(null);
+	const [showOtherSubjects, setShowOtherSubjects] = useState(false);
+	const [customizing, setCustomizing] = useState(false);
+
+	// Direct today routine overrides (wake / bed / meals)
+	const [wakeDraft, setWakeDraft] = useState(todayOverride?.wakeTime ?? snap.plan.todayWakeTime);
+	const [bedDraft, setBedDraft] = useState(todayOverride?.bedTime ?? snap.plan.recommendedBedtime);
+	const [mealsDraft, setMealsDraft] = useState(() =>
+		(todayOverride?.meals && todayOverride.meals.length > 0 ? todayOverride.meals : snap.config.lifestyle.meals).map((m) => ({ ...m })),
+	);
+
+	// New custom block draft
+	const [newBlkStart, setNewBlkStart] = useState("19:00");
+	const [newBlkEnd, setNewBlkEnd] = useState("20:00");
+	const [newBlkType, setNewBlkType] = useState<PlannedBlock["type"]>("study");
+	const [newBlkSubject, setNewBlkSubject] = useState(snap.plan.quotas[0]?.subject ?? "");
+	const [newBlkTitle, setNewBlkTitle] = useState("");
+	const [editingBlkId, setEditingBlkId] = useState<string | null>(null);
+	const [blkDraft, setBlkDraft] = useState<PlannedBlock | null>(null);
+
+	useEffect(() => {
+		const ov = snap.config.dayOverrides?.[date];
+		setWakeDraft(ov?.wakeTime ?? snap.plan.todayWakeTime);
+		setBedDraft(ov?.bedTime ?? snap.plan.recommendedBedtime);
+		setMealsDraft((ov?.meals && ov.meals.length > 0 ? ov.meals : snap.config.lifestyle.meals).map((m) => ({ ...m })));
+	}, [date, snap.config.dayOverrides, snap.config.lifestyle.meals, snap.plan.todayWakeTime, snap.plan.recommendedBedtime]);
+
 	const completedBlocks = new Set(todayLog?.completedBlockIds ?? []);
 	const completedChecks = new Set(todayLog?.completedChecklistIds ?? []);
 	const loggedBySubj = todayLog?.loggedStudyMinBySubject ?? {};
 	const autoPendingEntries = Object.entries(snap.signals.autoTrackedStudyMinBySubject ?? {})
 		.map(([subj, autoMin]) => ({ subj, delta: autoMin - (loggedBySubj[subj] ?? 0) }))
 		.filter((item) => item.delta >= 5);
+
+	const activeQuotaKeys = new Set(snap.plan.quotas.map((q) => normalizeSubjectKey(q.subject)));
+	const allKnownSubjects = useMemo(() => {
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const m of snap.config.milestones) {
+			const k = normalizeSubjectKey(m.subject);
+			if (!seen.has(k)) {
+				seen.add(k);
+				out.push(m.subject);
+			}
+		}
+		for (const sig of snap.signals.subjectSignals) {
+			const k = normalizeSubjectKey(sig.label);
+			if (!seen.has(k)) {
+				seen.add(k);
+				out.push(sig.label);
+			}
+		}
+		return out;
+	}, [snap.config.milestones, snap.signals.subjectSignals]);
+
+	const toggleMuteSubject = async (subj: string) => {
+		const key = normalizeSubjectKey(subj);
+		const exists = mutedSubjects.some((m) => normalizeSubjectKey(m) === key);
+		const nextMuted = exists
+			? mutedSubjects.filter((m) => normalizeSubjectKey(m) !== key)
+			: [...mutedSubjects, subj];
+		await onPatch({ mutedSubjects: nextMuted });
+	};
+
+	const togglePinSubject = async (subj: string) => {
+		const key = normalizeSubjectKey(subj);
+		const exists = pinnedSubjects.some((p) => normalizeSubjectKey(p) === key);
+		const nextPinned = exists
+			? pinnedSubjects.filter((p) => normalizeSubjectKey(p) !== key)
+			: [...pinnedSubjects, subj];
+		const nextMuted = mutedSubjects.filter((m) => normalizeSubjectKey(m) !== key);
+		await onPatch({ pinnedSubjects: nextPinned, mutedSubjects: nextMuted });
+	};
+
+	const toggleFocusSubjectToday = async (subj: string | null) => {
+		const prevOverrides = snap.config.dayOverrides ?? {};
+		const cur = prevOverrides[date] ?? { date };
+		let nextFocus: string[] = [];
+		if (subj !== null) {
+			const key = normalizeSubjectKey(subj);
+			const exists = focusSubjects.some((f) => normalizeSubjectKey(f) === key);
+			nextFocus = exists ? focusSubjects.filter((f) => normalizeSubjectKey(f) !== key) : [subj];
+		}
+		const updatedOv: DayOverride = {
+			...cur,
+			date,
+			focusSubjects: nextFocus.length > 0 ? nextFocus : undefined,
+			customBlocks: undefined, // Clear custom lock so focus change regenerates timeline
+		};
+		await onPatch({ dayOverrides: { ...prevOverrides, [date]: updatedOv } });
+	};
+
+	const saveTodayRoutineOverride = async () => {
+		const prevOverrides = snap.config.dayOverrides ?? {};
+		const cur = prevOverrides[date] ?? { date };
+		await onPatch({
+			dayOverrides: {
+				...prevOverrides,
+				[date]: {
+					...cur,
+					date,
+					wakeTime: wakeDraft,
+					bedTime: bedDraft,
+					meals: mealsDraft,
+					customBlocks: undefined,
+				},
+			},
+		});
+	};
+
+	const saveCustomBlocksList = async (blocks: PlannedBlock[]) => {
+		const prevOverrides = snap.config.dayOverrides ?? {};
+		const cur = prevOverrides[date] ?? { date };
+		await onPatch({
+			dayOverrides: {
+				...prevOverrides,
+				[date]: {
+					...cur,
+					date,
+					customBlocks: blocks.length > 0 ? blocks : undefined,
+				},
+			},
+		});
+	};
+
+	const handleSaveEditedBlock = async () => {
+		if (!blkDraft) return;
+		const sMin = parseClockMin(blkDraft.startTime) ?? blkDraft.startMin;
+		let eMin = parseClockMin(blkDraft.endTime) ?? blkDraft.endMin;
+		if (eMin <= sMin) eMin += 1440;
+		const updated: PlannedBlock = {
+			...blkDraft,
+			startMin: sMin,
+			endMin: eMin,
+			startTime: formatClockMin(sMin),
+			endTime: formatClockMin(eMin),
+			durationMin: Math.max(5, eMin - sMin),
+		};
+		const nextBlocks = snap.plan.blocks.map((b) => (b.id === updated.id ? updated : b));
+		setEditingBlkId(null);
+		setBlkDraft(null);
+		await saveCustomBlocksList(nextBlocks);
+	};
+
+	const handleAddCustomBlock = async () => {
+		const sMin = parseClockMin(newBlkStart);
+		let eMin = parseClockMin(newBlkEnd);
+		if (sMin === null || eMin === null) return;
+		if (eMin <= sMin) eMin += 1440;
+		const subjTrim = newBlkSubject.trim();
+		const titleTrim = newBlkTitle.trim() || (subjTrim || "Custom block");
+		const nextBlk: PlannedBlock = {
+			id: `blk_custom_${Date.now()}`,
+			date,
+			startTime: formatClockMin(sMin),
+			endTime: formatClockMin(eMin),
+			startMin: sMin,
+			endMin: eMin,
+			durationMin: Math.max(5, eMin - sMin),
+			type: newBlkType,
+			title: titleTrim,
+			...(subjTrim ? { subject: subjTrim } : {}),
+			reason: "Custom block",
+		};
+		setNewBlkTitle("");
+		await saveCustomBlocksList([...snap.plan.blocks, nextBlk]);
+	};
+
+	const handleDeleteBlock = async (id: string) => {
+		await saveCustomBlocksList(snap.plan.blocks.filter((b) => b.id !== id));
+	};
+
+	const inspectedForecast: WeeklyForecastDay | undefined = snap.plan.weeklyForecast?.find(
+		(d) => d.date === (selectedForecastDay ?? snap.plan.date),
+	);
 
 	return (
 		<div className="grid gap-4 lg:grid-cols-12">
@@ -503,27 +751,176 @@ function TodayQuotasTab({
 				{snap.plan.weeklyForecast && snap.plan.weeklyForecast.length > 0 && (
 					<div className="rounded-xl border bg-card p-3">
 						<div className="mb-2 flex items-center justify-between text-[11px] text-muted-foreground">
-							<span>7-Day Workload Forecast</span>
+							<span>7-Day Workload Forecast (click a day to inspect)</span>
 							<span>Free vs Target</span>
 						</div>
 						<div className="grid grid-cols-7 gap-1 text-center text-[10px]">
-							{snap.plan.weeklyForecast.map((day) => (
-								<div
-									key={day.date}
-									className={cn(
-										"rounded-md border px-1 py-1",
-										day.date === snap.plan.date && "border-primary bg-primary/5",
-										day.loadLevel === "heavy" && "border-warning/40 bg-warning/10",
-									)}
-									title={day.milestoneTitles.length > 0 ? `Due: ${day.milestoneTitles.join(", ")}` : `${day.freeHours}h free`}
-								>
-									<div className="font-medium text-muted-foreground">{WEEKDAY_LABELS[day.weekday]}</div>
-									<div className="mt-0.5 tabular-nums font-semibold text-foreground">{day.plannedHours}h</div>
-								</div>
-							))}
+							{snap.plan.weeklyForecast.map((day) => {
+								const isSelected = inspectedForecast?.date === day.date;
+								return (
+									<button
+										key={day.date}
+										type="button"
+										onClick={() => setSelectedForecastDay(isSelected && selectedForecastDay ? null : day.date)}
+										className={cn(
+											"rounded-md border px-1 py-1 transition-colors hover:bg-accent/60",
+											day.date === snap.plan.date && "border-primary/60 bg-primary/5",
+											day.loadLevel === "heavy" && "border-warning/40 bg-warning/10",
+											isSelected && "ring-1 ring-primary",
+										)}
+										title={day.milestoneTitles.length > 0 ? `Due: ${day.milestoneTitles.join(", ")}` : `${day.freeHours}h free`}
+									>
+										<div className="font-medium text-muted-foreground">{WEEKDAY_LABELS[day.weekday]}</div>
+										<div className="mt-0.5 tabular-nums font-semibold text-foreground">{day.plannedHours}h</div>
+									</button>
+								);
+							})}
 						</div>
+						{inspectedForecast && (
+							<div className="mt-2.5 rounded-lg border bg-muted/25 p-2.5 text-[11px]">
+								<div className="flex items-center justify-between gap-2">
+									<span className="font-medium text-foreground">
+										{WEEKDAY_LABELS[inspectedForecast.weekday]} {inspectedForecast.date} · {inspectedForecast.plannedHours}h study / {inspectedForecast.freeHours}h free
+									</span>
+									{inspectedForecast.carryoverInMinutes && inspectedForecast.carryoverInMinutes > 0 && (
+										<span className="text-primary">+{inspectedForecast.carryoverInMinutes}m carryover</span>
+									)}
+								</div>
+								{inspectedForecast.milestoneTitles.length > 0 && (
+									<div className="mt-1 font-medium text-warning">
+										Milestone due: {inspectedForecast.milestoneTitles.join(", ")}
+									</div>
+								)}
+								{inspectedForecast.subjects && inspectedForecast.subjects.length > 0 ? (
+									<ul className="mt-1.5 space-y-1 text-muted-foreground">
+										{inspectedForecast.subjects.map((sub) => (
+											<li key={sub.subject} className="flex items-start justify-between gap-2">
+												<span className="min-w-0 truncate">
+													<span className="font-medium text-foreground">{sub.subject}</span>
+													{sub.focusHint ? ` — ${formatPlainMathPreview(sub.focusHint, 70)}` : ""}
+												</span>
+												<span className="shrink-0 tabular-nums">{formatMinCompact(sub.plannedMinutes)}</span>
+											</li>
+										))}
+									</ul>
+								) : (
+									<div className="mt-1 text-muted-foreground">Light/open recovery day.</div>
+								)}
+							</div>
+						)}
 					</div>
 				)}
+
+				{/* Subject Focus / Max-Per-Day / Paused Background Filter */}
+				<div className="rounded-xl border bg-card p-3 text-xs">
+					<div className="flex flex-wrap items-center justify-between gap-2">
+						<span className="font-medium text-foreground">Focus Today & Subject Filter</span>
+						<div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+							<label>Max subjects/day:</label>
+							<select
+								value={dailyMaxCap}
+								disabled={busy}
+								onChange={(e) => void onPatch({ dailyMaxSubjects: Number(e.target.value) })}
+								className="rounded border bg-background px-1.5 py-0.5 text-[11px] text-foreground"
+							>
+								{[1, 2, 3, 4, 5].map((n) => (
+									<option key={n} value={n}>{n}</option>
+								))}
+							</select>
+						</div>
+					</div>
+					<div className="mt-2 flex flex-wrap items-center gap-1">
+						<button
+							type="button"
+							disabled={busy}
+							onClick={() => void toggleFocusSubjectToday(null)}
+							className={cn(
+								"rounded-md border px-2 py-0.5 text-[11px] transition-colors",
+								focusSubjects.length === 0 ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent",
+							)}
+						>
+							Balanced Rotation
+						</button>
+						{allKnownSubjects.slice(0, 6).map((subj) => {
+							const activeFocus = focusSubjects.some((f) => normalizeSubjectKey(f) === normalizeSubjectKey(subj));
+							const isMuted = mutedSubjects.some((m) => normalizeSubjectKey(m) === normalizeSubjectKey(subj));
+							return (
+								<button
+									key={subj}
+									type="button"
+									disabled={busy}
+									onClick={() => void toggleFocusSubjectToday(subj)}
+									title={activeFocus ? "Click to clear today's solo focus" : `Focus today mainly on ${subj}`}
+									className={cn(
+										"max-w-[170px] truncate rounded-md border px-2 py-0.5 text-[11px] transition-colors",
+										activeFocus
+											? "border-primary bg-primary/15 font-medium text-primary"
+											: isMuted
+												? "border-dashed text-muted-foreground/60 line-through hover:bg-accent"
+												: "text-muted-foreground hover:bg-accent",
+									)}
+								>
+									{subj}
+								</button>
+							);
+						})}
+						{allKnownSubjects.length > 0 && (
+							<button
+								type="button"
+								onClick={() => setShowOtherSubjects((v) => !v)}
+								className="ml-auto text-[11px] text-primary hover:underline"
+							>
+								{showOtherSubjects ? "Hide pool" : "Manage muted/background →"}
+							</button>
+						)}
+					</div>
+					{showOtherSubjects && (
+						<div className="mt-2 rounded-lg border bg-muted/25 p-2 text-[11px]">
+							<div className="mb-1 text-muted-foreground">
+								Background Graph clusters stay out of daily overload unless pinned or prioritized by an exam:
+							</div>
+							<div className="flex flex-col gap-1">
+								{allKnownSubjects.map((subj) => {
+									const isMuted = mutedSubjects.some((m) => normalizeSubjectKey(m) === normalizeSubjectKey(subj));
+									const isPinned = pinnedSubjects.some((p) => normalizeSubjectKey(p) === normalizeSubjectKey(subj));
+									const inToday = activeQuotaKeys.has(normalizeSubjectKey(subj));
+									return (
+										<div key={subj} className="flex items-center justify-between gap-2 rounded px-1.5 py-0.5 hover:bg-background/60">
+											<span className={cn("min-w-0 truncate", isMuted && "text-muted-foreground line-through")}>
+												{subj} {inToday ? "• in today" : ""}
+											</span>
+											<div className="flex shrink-0 items-center gap-1">
+												<button
+													type="button"
+													disabled={busy}
+													onClick={() => void togglePinSubject(subj)}
+													className={cn(
+														"rounded border px-1.5 py-0.5 text-[10px]",
+														isPinned ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent",
+													)}
+												>
+													{isPinned ? "Pinned" : "Pin"}
+												</button>
+												<button
+													type="button"
+													disabled={busy}
+													onClick={() => void toggleMuteSubject(subj)}
+													className={cn(
+														"rounded border px-1.5 py-0.5 text-[10px]",
+														isMuted ? "border-warning/40 bg-warning/10 text-warning" : "text-muted-foreground hover:bg-accent",
+													)}
+												>
+													{isMuted ? "Unpause" : "Pause"}
+												</button>
+											</div>
+										</div>
+									);
+								})}
+							</div>
+						</div>
+					)}
+				</div>
+
 				{autoPendingEntries.length > 0 && (
 					<div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-primary/30 bg-primary/5 px-3 py-2 text-[11px]">
 						<span className="text-muted-foreground">Session activity today:</span>
@@ -541,12 +938,13 @@ function TodayQuotasTab({
 				)}
 				<div className="flex items-center justify-between">
 					<h2 className="text-sm font-medium">Daily Quotas & Checklist</h2>
-					<span className="text-xs text-muted-foreground">{snap.plan.quotas.length} active subjects</span>
+					<span className="text-xs text-muted-foreground">{snap.plan.quotas.length} active today</span>
 				</div>
 				{snap.plan.quotas.map((q) => {
 					const doneMin = loggedBySubj[q.subject] ?? 0;
 					const pct = Math.min(100, Math.round((doneMin / Math.max(1, q.targetMin)) * 100));
 					const studyTopic = encodeURIComponent(`${q.subject}: ${q.checklist[0]?.text ?? "focused review"}`);
+					const isFocused = focusSubjects.some((f) => normalizeSubjectKey(f) === normalizeSubjectKey(q.subject));
 					return (
 						<div key={q.id} className="rounded-xl border bg-card p-3.5">
 							<div className="flex items-start justify-between gap-2">
@@ -556,7 +954,7 @@ function TodayQuotasTab({
 										{q.paceMultiplier && q.paceMultiplier !== 1 && (
 											<span
 												className="rounded border border-primary/30 bg-primary/10 px-1 py-0 text-[10px] tabular-nums text-primary"
-												title="DueCue adaptive pace multiplier from past study logs"
+												title="Adaptive pace multiplier calibrated from past sessions & FSRS"
 											>
 												Pace ×{q.paceMultiplier}
 											</span>
@@ -566,12 +964,35 @@ function TodayQuotasTab({
 										<div className="mt-0.5 text-[11px] text-muted-foreground">{q.weaknessSummary}</div>
 									)}
 								</div>
-								<Link
-									href={`/chat/new?topic=${studyTopic}`}
-									className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px] text-foreground transition-colors hover:bg-accent"
-								>
-									Study <ArrowUpRightIcon className="size-3" />
-								</Link>
+								<div className="flex shrink-0 items-center gap-1">
+									<button
+										type="button"
+										disabled={busy}
+										onClick={() => void toggleFocusSubjectToday(q.subject)}
+										title={isFocused ? "Clear solo focus" : "Focus today only on this subject"}
+										className={cn(
+											"rounded-md border p-1 transition-colors",
+											isFocused ? "border-primary bg-primary/15 text-primary" : "text-muted-foreground hover:bg-accent",
+										)}
+									>
+										<PinIcon className="size-3" />
+									</button>
+									<button
+										type="button"
+										disabled={busy}
+										onClick={() => void toggleMuteSubject(q.subject)}
+										title="Pause / hide this subject from future schedules"
+										className="rounded-md border p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-warning"
+									>
+										<PauseIcon className="size-3" />
+									</button>
+									<Link
+										href={`/chat/new?topic=${studyTopic}`}
+										className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] text-foreground transition-colors hover:bg-accent"
+									>
+										Study <ArrowUpRightIcon className="size-3" />
+									</Link>
+								</div>
 							</div>
 							<div className="mt-2.5 flex items-center gap-2 text-xs text-muted-foreground">
 								<div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
@@ -599,7 +1020,7 @@ function TodayQuotasTab({
 												) : (
 													<CircleIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
 												)}
-												<span>{item.text}</span>
+												<span>{formatPlainMathPreview(item.text, 160)}</span>
 											</button>
 										</li>
 									);
@@ -610,16 +1031,238 @@ function TodayQuotasTab({
 				})}
 			</div>
 
-			{/* Chronological Time-blocks */}
+			{/* Chronological Time-blocks + Direct Today Routine/Block Customizer */}
 			<div className="flex flex-col gap-2.5 lg:col-span-7">
-				<div className="flex items-center justify-between">
-					<h2 className="text-sm font-medium">Today's Time-Blocked Schedule</h2>
-					<span className="text-xs text-muted-foreground">Soft-strict subject switch enabled</span>
+				<div className="flex flex-wrap items-center justify-between gap-2">
+					<div className="flex items-center gap-2">
+						<h2 className="text-sm font-medium">Today's Time-Blocked Schedule</h2>
+						{snap.plan.isCustomEdited && (
+							<span className="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+								Custom Edited
+							</span>
+						)}
+					</div>
+					<div className="flex items-center gap-1.5 text-xs">
+						{snap.plan.isCustomEdited && (
+							<button
+								type="button"
+								disabled={busy}
+								onClick={() => void saveCustomBlocksList([])}
+								className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+								title="Revert custom edits back to adaptive auto-schedule"
+							>
+								<RotateCcwIcon className="size-3" /> Reset Auto
+							</button>
+						)}
+						<button
+							type="button"
+							onClick={() => setCustomizing((v) => !v)}
+							className={cn(
+								"inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors",
+								customizing ? "border-primary bg-primary text-primary-foreground" : "hover:bg-accent",
+							)}
+						>
+							<SlidersHorizontalIcon className="size-3" /> {customizing ? "Done Editing" : "Customize Schedule & Routine"}
+						</button>
+					</div>
 				</div>
+
+				{customizing && (
+					<div className="flex flex-col gap-3 rounded-xl border bg-card p-3.5 text-xs">
+						<div>
+							<div className="mb-1.5 flex items-center justify-between">
+								<span className="font-medium text-foreground">Today's Wake, Sleep & Meal Times Override</span>
+								<button
+									type="button"
+									disabled={busy}
+									onClick={() => void saveTodayRoutineOverride()}
+									className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+								>
+									<SaveIcon className="size-3" /> Apply Routine & Recompute
+								</button>
+							</div>
+							<div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+								<div>
+									<label className="mb-0.5 block text-[10px] text-muted-foreground">Wake today</label>
+									<input
+										type="time"
+										value={wakeDraft}
+										onChange={(e) => setWakeDraft(e.target.value)}
+										className="w-full rounded border bg-background px-2 py-1"
+									/>
+								</div>
+								<div>
+									<label className="mb-0.5 block text-[10px] text-muted-foreground">Sleep tonight</label>
+									<input
+										type="time"
+										value={bedDraft}
+										onChange={(e) => setBedDraft(e.target.value)}
+										className="w-full rounded border bg-background px-2 py-1"
+									/>
+								</div>
+								{mealsDraft.slice(0, 2).map((meal, idx) => (
+									<div key={meal.id}>
+										<label className="mb-0.5 block truncate text-[10px] text-muted-foreground">{meal.label}</label>
+										<input
+											type="time"
+											value={meal.startTime}
+											onChange={(e) =>
+												setMealsDraft((prev) =>
+													prev.map((m, i) => (i === idx ? { ...m, startTime: e.target.value } : m)),
+												)
+											}
+											className="w-full rounded border bg-background px-2 py-1"
+										/>
+									</div>
+								))}
+							</div>
+							{mealsDraft.length > 2 && (
+								<div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+									{mealsDraft.slice(2).map((meal, idx) => (
+										<div key={meal.id}>
+											<label className="mb-0.5 block truncate text-[10px] text-muted-foreground">
+												{meal.label} ({meal.durationMin}m)
+											</label>
+											<input
+												type="time"
+												value={meal.startTime}
+												onChange={(e) =>
+													setMealsDraft((prev) =>
+														prev.map((m, i) => (i === idx + 2 ? { ...m, startTime: e.target.value } : m)),
+													)
+												}
+												className="w-full rounded border bg-background px-2 py-1"
+											/>
+										</div>
+									))}
+								</div>
+							)}
+						</div>
+
+						<div className="border-t pt-2.5">
+							<div className="mb-1.5 font-medium text-foreground">+ Add Block to Today's Timeline</div>
+							<div className="grid grid-cols-2 gap-1.5 sm:grid-cols-6">
+								<input
+									type="time"
+									value={newBlkStart}
+									onChange={(e) => setNewBlkStart(e.target.value)}
+									className="rounded border bg-background px-2 py-1"
+								/>
+								<input
+									type="time"
+									value={newBlkEnd}
+									onChange={(e) => setNewBlkEnd(e.target.value)}
+									className="rounded border bg-background px-2 py-1"
+								/>
+								<select
+									value={newBlkType}
+									onChange={(e) => setNewBlkType(e.target.value as PlannedBlock["type"])}
+									className="rounded border bg-background px-2 py-1"
+								>
+									<option value="study">Study</option>
+									<option value="hobby">Hobby / Rest</option>
+									<option value="break">Break</option>
+									<option value="meal">Meal</option>
+									<option value="fixed">Fixed Busy</option>
+								</select>
+								<input
+									type="text"
+									value={newBlkSubject}
+									onChange={(e) => setNewBlkSubject(e.target.value)}
+									placeholder="Subject..."
+									className="rounded border bg-background px-2 py-1"
+								/>
+								<input
+									type="text"
+									value={newBlkTitle}
+									onChange={(e) => setNewBlkTitle(e.target.value)}
+									placeholder="Task title..."
+									className="rounded border bg-background px-2 py-1"
+								/>
+								<button
+									type="button"
+									disabled={busy}
+									onClick={() => void handleAddCustomBlock()}
+									className="inline-flex items-center justify-center gap-1 rounded bg-primary px-2.5 py-1 font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+								>
+									<PlusIcon className="size-3" /> Add
+								</button>
+							</div>
+						</div>
+					</div>
+				)}
+
 				<div className="flex flex-col gap-2">
 					{snap.plan.blocks.map((blk) => {
 						const isDone = completedBlocks.has(blk.id);
 						const canToggle = blk.type === "study" || blk.type === "hobby" || blk.type === "sleep";
+						const isEditingThis = editingBlkId === blk.id && blkDraft;
+						if (isEditingThis) {
+							return (
+								<div key={blk.id} className="flex flex-col gap-2 rounded-xl border border-primary bg-card p-3 text-xs">
+									<div className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
+										<input
+											type="time"
+											value={blkDraft.startTime}
+											onChange={(e) => setBlkDraft({ ...blkDraft, startTime: e.target.value })}
+											className="rounded border bg-background px-2 py-1"
+										/>
+										<input
+											type="time"
+											value={blkDraft.endTime}
+											onChange={(e) => setBlkDraft({ ...blkDraft, endTime: e.target.value })}
+											className="rounded border bg-background px-2 py-1"
+										/>
+										<select
+											value={blkDraft.type}
+											onChange={(e) => setBlkDraft({ ...blkDraft, type: e.target.value as PlannedBlock["type"] })}
+											className="rounded border bg-background px-2 py-1"
+										>
+											<option value="study">Study</option>
+											<option value="hobby">Hobby / Rest</option>
+											<option value="break">Break</option>
+											<option value="meal">Meal</option>
+											<option value="fixed">Fixed</option>
+											<option value="sleep">Sleep</option>
+										</select>
+										<input
+											type="text"
+											value={blkDraft.subject ?? ""}
+											onChange={(e) => setBlkDraft({ ...blkDraft, subject: e.target.value || undefined })}
+											placeholder="Subject"
+											className="rounded border bg-background px-2 py-1"
+										/>
+										<input
+											type="text"
+											value={blkDraft.title}
+											onChange={(e) => setBlkDraft({ ...blkDraft, title: e.target.value })}
+											placeholder="Title"
+											className="rounded border bg-background px-2 py-1"
+										/>
+									</div>
+									<div className="flex justify-end gap-1.5">
+										<button
+											type="button"
+											onClick={() => {
+												setEditingBlkId(null);
+												setBlkDraft(null);
+											}}
+											className="rounded border px-2 py-1 text-muted-foreground hover:bg-accent"
+										>
+											Cancel
+										</button>
+										<button
+											type="button"
+											disabled={busy}
+											onClick={() => void handleSaveEditedBlock()}
+											className="rounded bg-primary px-2.5 py-1 font-medium text-primary-foreground hover:opacity-90"
+										>
+											Save Block
+										</button>
+									</div>
+								</div>
+							);
+						}
 						return (
 							<div
 								key={blk.id}
@@ -647,7 +1290,31 @@ function TodayQuotasTab({
 										</div>
 									)}
 								</div>
-								<div className="flex shrink-0 items-center gap-1.5">
+								<div className="flex shrink-0 items-center gap-1">
+									{customizing && (
+										<>
+											<button
+												type="button"
+												onClick={() => {
+													setEditingBlkId(blk.id);
+													setBlkDraft({ ...blk });
+												}}
+												aria-label={`Edit ${blk.title}`}
+												className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+											>
+												<PencilIcon className="size-3.5" />
+											</button>
+											<button
+												type="button"
+												disabled={busy}
+												onClick={() => void handleDeleteBlock(blk.id)}
+												aria-label={`Delete ${blk.title}`}
+												className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-error"
+											>
+												<TrashIcon className="size-3.5" />
+											</button>
+										</>
+									)}
 									{blk.type === "study" && (
 										<Link
 											href={`/chat/new?topic=${encodeURIComponent(blk.actionTopic || blk.subject || blk.title)}`}
@@ -706,6 +1373,17 @@ function MilestonesTab({
 	const [clusterIds, setClusterIds] = useState<string[]>([]);
 	const [researching, setResearching] = useState(false);
 	const [extractingFile, setExtractingFile] = useState(false);
+	const [selectedResearchRole, setSelectedResearchRole] = useState<string>("");
+	const [researchTrace, setResearchTrace] = useState<Array<{
+		id: string;
+		phase: string;
+		message: string;
+		detail?: string;
+		urls?: string[];
+	}>>([]);
+	const [researchModelUsed, setResearchModelUsed] = useState<string | null>(null);
+	const [estimatingWorkload, setEstimatingWorkload] = useState(false);
+	const [workloadEstimate, setWorkloadEstimate] = useState<(PersonalizedWorkloadEstimate & { modelLabel?: string }) | null>(null);
 
 	// Interactive Google-Calendar-style Month / Year view & selected day inspector
 	const [calView, setCalView] = useState<"month" | "year">("month");
@@ -772,7 +1450,12 @@ function MilestonesTab({
 		if (!effectiveTitle && !opts.pullOnly && !exId && cids.length === 0) {
 			return onError("Enter an exam/competition title, paste syllabus notes, or link a Graph cluster/Exam profile first.");
 		}
+		const useStream = !opts.pullOnly && !opts.preferLocal;
 		setResearching(true);
+		if (useStream) {
+			setResearchTrace([]);
+			setResearchModelUsed(null);
+		}
 		try {
 			const res = await fetch("/api/planner/research-exam", {
 				method: "POST",
@@ -786,9 +1469,11 @@ function MilestonesTab({
 					examProfileId: exId,
 					pullOnly: Boolean(opts.pullOnly),
 					preferLocal: Boolean(opts.preferLocal),
+					...(selectedResearchRole ? { preferredRole: selectedResearchRole } : {}),
+					stream: useStream,
 				}),
 			});
-			const body = (await res.json()) as {
+			type ResearchPayload = {
 				error?: string;
 				subject?: string;
 				cognitiveLoad?: CognitiveLoad;
@@ -797,8 +1482,50 @@ function MilestonesTab({
 				syllabusTopics?: SyllabusTopic[];
 				sourceSummary?: string;
 				pulledContext?: string;
+				modelLabel?: string;
+				trace?: Array<{ id: string; phase: string; message: string; detail?: string; urls?: string[] }>;
 			};
-			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+			let body: ResearchPayload | null = null;
+			const contentType = res.headers.get("content-type") ?? "";
+			if (contentType.includes("application/x-ndjson") && res.body) {
+				const reader = res.body.getReader();
+				const decoder = new TextDecoder();
+				let buf = "";
+				while (true) {
+					const { value, done } = await reader.read();
+					if (done) break;
+					buf += decoder.decode(value, { stream: true });
+					let nlIdx = buf.indexOf("\n");
+					while (nlIdx >= 0) {
+						const line = buf.slice(0, nlIdx).trim();
+						buf = buf.slice(nlIdx + 1);
+						if (line) {
+							try {
+								const ev = JSON.parse(line) as { type: string; step?: { id: string; phase: string; message: string; detail?: string; urls?: string[] }; data?: ResearchPayload; error?: string };
+								if (ev.type === "step" && ev.step) {
+									setResearchTrace((prev) => [...prev, ev.step!]);
+								} else if (ev.type === "result" && ev.data) {
+									body = ev.data;
+								} else if (ev.type === "error") {
+									throw new Error(ev.error || "Research failed");
+								}
+							} catch (parseErr) {
+								if (parseErr instanceof Error && !parseErr.message.includes("JSON")) throw parseErr;
+							}
+						}
+						nlIdx = buf.indexOf("\n");
+					}
+				}
+			} else {
+				body = (await res.json()) as ResearchPayload;
+				if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+			}
+			if (!body) throw new Error("Empty research response.");
+			if (body.modelLabel) setResearchModelUsed(body.modelLabel);
+			if (body.trace && body.trace.length > 0) {
+				const traceRows = body.trace;
+				setResearchTrace((prev) => (prev.length > 0 ? prev : traceRows));
+			}
 			if (body.subject && !subject.trim()) setSubject(body.subject);
 			else if (!opts.pullOnly && body.subject) setSubject(body.subject);
 			if (body.cognitiveLoad && !opts.pullOnly) setLoad(body.cognitiveLoad);
@@ -819,6 +1546,40 @@ function MilestonesTab({
 			onError(e instanceof Error ? e.message : "Syllabus research failed.");
 		} finally {
 			setResearching(false);
+		}
+	};
+
+	const callEstimateWorkload = async (useAi: boolean) => {
+		const effectiveTitle = title.trim() || subject.trim();
+		if (!effectiveTitle) {
+			return onError("Enter a title or subject before estimating workload.");
+		}
+		setEstimatingWorkload(true);
+		try {
+			const res = await fetch("/api/planner/estimate-workload", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					title: effectiveTitle,
+					subject: subject.trim() || effectiveTitle,
+					kind,
+					dueDate,
+					baseHours: hours > 0 ? hours : undefined,
+					syllabusTopics: topics,
+					clusterIds,
+					useAi,
+					...(selectedResearchRole ? { preferredRole: selectedResearchRole } : {}),
+				}),
+			});
+			const data = (await res.json()) as PersonalizedWorkloadEstimate & { modelLabel?: string; error?: string };
+			if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+			setWorkloadEstimate(data);
+			setHours(data.estimatedHours);
+			if (data.topicEstimates && data.topicEstimates.length > 0) setTopics(data.topicEstimates);
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to estimate personalized workload.");
+		} finally {
+			setEstimatingWorkload(false);
 		}
 	};
 
@@ -1517,17 +2278,58 @@ function MilestonesTab({
 							/>
 						</div>
 						<div>
-							<label className="mb-1 block text-muted-foreground">Est. Workload (hours)</label>
+							<div className="mb-1 flex items-center justify-between gap-1">
+								<label className="text-muted-foreground">Est. Workload (hours)</label>
+								<span className="flex items-center gap-1 text-[10px]">
+									<button
+										type="button"
+										disabled={estimatingWorkload || (!title.trim() && !subject.trim())}
+										onClick={() => void callEstimateWorkload(false)}
+										className="text-primary hover:underline disabled:opacity-40"
+										title="Calculate from FSRS stability, Practice speed & Graph gaps (0 tokens)"
+									>
+										{estimatingWorkload ? "..." : "Calibrate (Lực học · 0t)"}
+									</button>
+									{snap.aiAvailability.coach.available && (
+										<button
+											type="button"
+											disabled={estimatingWorkload || (!title.trim() && !subject.trim())}
+											onClick={() => void callEstimateWorkload(true)}
+											className="text-muted-foreground hover:text-primary hover:underline disabled:opacity-40"
+										>
+											· AI
+										</button>
+									)}
+								</span>
+							</div>
 							<input
 								type="number"
 								min={1}
 								max={500}
+								step={0.5}
 								value={hours}
 								onChange={(e) => setHours(Number(e.target.value) || 1)}
 								className="w-full rounded-md border bg-background px-2.5 py-1.5"
 							/>
 						</div>
 					</div>
+					{workloadEstimate && (
+						<div className="rounded-lg border bg-muted/30 p-2 text-[11px]">
+							<div className="flex items-center justify-between gap-2 font-medium text-foreground">
+								<span>
+									{workloadEstimate.confidence === "personalized"
+										? `Personalized Pace ×${workloadEstimate.paceFactorApplied}`
+										: "Baseline Estimate (Insufficient history)"}
+								</span>
+								<span className="tabular-nums text-primary">~{workloadEstimate.recommendedDailyHours}h/day needed</span>
+							</div>
+							<ul className="mt-1 space-y-0.5 text-muted-foreground">
+								{workloadEstimate.breakdownReasons.map((r, i) => (
+									<li key={i}>• {r}</li>
+								))}
+							</ul>
+						</div>
+					)}
 					<div className="grid grid-cols-2 gap-2">
 						<div>
 							<label className="mb-1 block text-muted-foreground">Cognitive Load</label>
@@ -1571,6 +2373,41 @@ function MilestonesTab({
 							className="w-full rounded-md border bg-background px-2.5 py-1.5"
 						/>
 					</div>
+					<div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/25 px-2.5 py-1.5 text-[11px]">
+						<div className="flex min-w-0 items-center gap-1.5">
+							<span className="shrink-0 text-muted-foreground">Model:</span>
+							{snap.aiAvailability.availableRoles && snap.aiAvailability.availableRoles.length > 0 ? (
+								<select
+									value={selectedResearchRole}
+									onChange={(e) => setSelectedResearchRole(e.target.value)}
+									className="max-w-[200px] truncate rounded border bg-background px-1.5 py-0.5 text-[11px]"
+								>
+									<option value="">
+										Auto ({snap.aiAvailability.research.modelLabel ?? "not set"})
+									</option>
+									{snap.aiAvailability.availableRoles.map((r) => (
+										<option key={r.role} value={r.role}>
+											{r.label}: {r.modelLabel}
+										</option>
+									))}
+								</select>
+							) : (
+								<span className="truncate text-muted-foreground">
+									{snap.aiAvailability.research.modelLabel ?? "No AI key configured"}
+								</span>
+							)}
+						</div>
+						<span
+							className={cn(
+								"shrink-0 rounded border px-1.5 py-0 text-[10px]",
+								snap.aiAvailability.research.webSearch
+									? "border-success/40 bg-success/10 text-success"
+									: "border-border text-muted-foreground",
+							)}
+						>
+							Web Search: {snap.aiAvailability.research.webSearch ? "ON" : "OFF (Local/Context)"}
+						</span>
+					</div>
 					<div className="grid grid-cols-2 gap-2 pt-1">
 						<button
 							type="button"
@@ -1590,6 +2427,32 @@ function MilestonesTab({
 							Auto-Research (AI)
 						</button>
 					</div>
+					{(researching || researchTrace.length > 0) && (
+						<div className="rounded-lg border bg-muted/30 p-2 text-[11px]">
+							<div className="mb-1 flex items-center justify-between font-medium text-foreground">
+								<span className="inline-flex items-center gap-1">
+									<SearchIcon className="size-3 text-primary" /> Research Trace
+								</span>
+								{researchModelUsed && (
+									<span className="truncate text-[10px] text-muted-foreground">{researchModelUsed}</span>
+								)}
+							</div>
+							<ul className="max-h-36 space-y-1 overflow-y-auto text-muted-foreground">
+								{researchTrace.map((st) => (
+									<li key={st.id} className="leading-snug">
+										<span className="font-medium uppercase text-[10px] text-primary">[{st.phase}]</span>{" "}
+										<span className="text-foreground">{st.message}</span>
+										{st.detail && <div className="pl-2 text-[10px] text-muted-foreground">{st.detail}</div>}
+									</li>
+								))}
+								{researching && (
+									<li className="inline-flex items-center gap-1.5 text-primary">
+										<BrailleSpinner /> Probing & synthesizing...
+									</li>
+								)}
+							</ul>
+						</div>
+					)}
 					<button
 						type="button"
 						disabled={busy || !title.trim()}
@@ -2219,6 +3082,404 @@ function LifestyleTab({
 								</div>
 							);
 						})}
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
+function JournalAuditTab({
+	snap,
+	busy,
+	onCheckIn,
+	onSnapshotUpdate,
+	onError,
+}: {
+	snap: PlannerSnapshot;
+	busy: boolean;
+	onCheckIn: (payload: Record<string, unknown>) => Promise<void>;
+	onSnapshotUpdate: (next: PlannerSnapshot) => void;
+	onError: (msg: string | null) => void;
+}) {
+	const [selectedDate, setSelectedDate] = useState(snap.plan.date);
+	const [historySearch, setHistorySearch] = useState("");
+	const activeLog = snap.config.logs[selectedDate];
+
+	const [journalText, setJournalText] = useState(activeLog?.journalText ?? "");
+	const [manualEntries, setManualEntries] = useState<JournalActivityEntry[]>(() =>
+		(activeLog?.actualEntries ?? []).filter((e) => e.source === "manual"),
+	);
+	const [auditMode, setAuditMode] = useState<"local" | "llm">("local");
+	const [preferredRole, setPreferredRole] = useState("");
+	const [evaluating, setEvaluating] = useState(false);
+
+	// Manual activity add bar
+	const [actStart, setActStart] = useState("08:30");
+	const [actEnd, setActEnd] = useState("10:00");
+	const [actCat, setActCat] = useState<JournalActivityCategory>("study");
+	const [actSubj, setActSubj] = useState(snap.plan.quotas[0]?.subject ?? "");
+	const [actTitle, setActTitle] = useState("");
+
+	useEffect(() => {
+		const log = snap.config.logs[selectedDate];
+		setJournalText(log?.journalText ?? "");
+		setManualEntries((log?.actualEntries ?? []).filter((e) => e.source === "manual"));
+	}, [selectedDate, snap.config.logs]);
+
+	const historyDates = useMemo(() => {
+		const needle = historySearch.trim().toLowerCase();
+		const dates = new Set<string>([snap.plan.date, ...Object.keys(snap.config.logs)]);
+		return [...dates]
+			.sort((a, b) => b.localeCompare(a))
+			.filter((d) => {
+				if (!needle) return true;
+				const log = snap.config.logs[d];
+				const hay = `${d} ${log?.journalText ?? ""} ${log?.compliance?.summary ?? ""} ${Object.keys(log?.loggedStudyMinBySubject ?? {}).join(" ")}`.toLowerCase();
+				return hay.includes(needle);
+			});
+	}, [snap.plan.date, snap.config.logs, historySearch]);
+
+	const addManualEntry = () => {
+		const sMin = parseClockMin(actStart);
+		let eMin = parseClockMin(actEnd);
+		if (sMin === null || eMin === null) return;
+		if (eMin <= sMin) eMin += 1440;
+		const titleTrim = actTitle.trim() || actSubj.trim() || "Logged activity";
+		const entry: JournalActivityEntry = {
+			id: `jm_${selectedDate}_${Date.now()}`,
+			startTime: formatClockMin(sMin),
+			endTime: formatClockMin(eMin),
+			category: actCat,
+			...(actSubj.trim() && (actCat === "study" || actCat === "class") ? { subject: actSubj.trim() } : {}),
+			title: titleTrim,
+			minutes: Math.max(5, eMin - sMin),
+			source: "manual",
+		};
+		setManualEntries((prev) => [...prev, entry]);
+		setActTitle("");
+	};
+
+	const removeManualEntry = (id: string) => {
+		setManualEntries((prev) => prev.filter((e) => e.id !== id));
+	};
+
+	const saveDraftOnly = async () => {
+		await onCheckIn({
+			date: selectedDate,
+			journalText,
+			actualEntries: [
+				...manualEntries,
+				...(activeLog?.actualEntries ?? []).filter((e) => e.source !== "manual"),
+			],
+		});
+	};
+
+	const runAudit = async () => {
+		setEvaluating(true);
+		onError(null);
+		try {
+			const res = await fetch("/api/planner/evaluate-day", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					date: selectedDate,
+					journalText,
+					manualEntries,
+					mode: auditMode,
+					...(auditMode === "llm" && preferredRole ? { preferredRole } : {}),
+				}),
+			});
+			const data = (await res.json()) as {
+				snapshot?: PlannerSnapshot;
+				report?: PlanComplianceReport;
+				error?: string;
+			};
+			if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+			if (data.snapshot) onSnapshotUpdate(data.snapshot);
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Failed to audit 24h journal.");
+		} finally {
+			setEvaluating(false);
+		}
+	};
+
+	const compliance = activeLog?.compliance;
+	const displayEntries = activeLog?.actualEntries && activeLog.actualEntries.length > 0 ? activeLog.actualEntries : manualEntries;
+	const dayPlan = snap.config.plans[selectedDate] ?? (selectedDate === snap.plan.date ? snap.plan : undefined);
+
+	return (
+		<div className="grid gap-4 lg:grid-cols-12 text-xs">
+			{/* Left: Date Selector + Long-Term 365-Day History Browser */}
+			<div className="flex flex-col gap-3 rounded-xl border bg-card p-3.5 lg:col-span-4">
+				<div className="flex items-center justify-between gap-2">
+					<span className="inline-flex items-center gap-1.5 text-sm font-medium">
+						<BookOpenIcon className="size-4 text-primary" /> 24h History ({historyDates.length}d)
+					</span>
+					<input
+						type="date"
+						value={selectedDate}
+						onChange={(e) => e.target.value && setSelectedDate(e.target.value)}
+						className="rounded border bg-background px-2 py-1 text-[11px]"
+					/>
+				</div>
+				<div className="relative">
+					<SearchIcon className="pointer-events-none absolute top-2 left-2.5 size-3.5 text-muted-foreground" />
+					<input
+						type="text"
+						value={historySearch}
+						onChange={(e) => setHistorySearch(e.target.value)}
+						placeholder="Search past logs, subjects, notes..."
+						className="w-full rounded-md border bg-background py-1.5 pr-2 pl-8 text-xs"
+					/>
+				</div>
+				<div className="flex max-h-[380px] flex-col gap-1.5 overflow-y-auto">
+					{historyDates.map((d) => {
+						const l = snap.config.logs[d];
+						const mins = Object.values(l?.loggedStudyMinBySubject ?? {}).reduce((a, b) => a + b, 0);
+						const adh = l?.compliance?.adherencePct;
+						return (
+							<button
+								key={d}
+								type="button"
+								onClick={() => setSelectedDate(d)}
+								className={cn(
+									"flex items-center justify-between rounded-lg border px-2.5 py-2 text-left transition-colors hover:bg-accent/50",
+									selectedDate === d ? "border-primary bg-primary/5" : "bg-muted/20",
+								)}
+							>
+								<div className="min-w-0">
+									<div className="font-medium text-foreground">
+										{d} {d === snap.plan.date ? "(Today)" : ""}
+									</div>
+									<div className="truncate text-[10px] text-muted-foreground">
+										{l?.journalText ? l.journalText.slice(0, 42) : l?.note ? l.note.slice(0, 42) : "No journal yet"}
+									</div>
+								</div>
+								<div className="shrink-0 text-right">
+									<div className="font-medium tabular-nums">{formatMinCompact(mins)}</div>
+									{adh !== undefined && (
+										<span
+											className={cn(
+												"inline-block rounded px-1 text-[10px] tabular-nums",
+												adh >= 75 ? "bg-success/10 text-success" : adh >= 45 ? "bg-warning/10 text-warning" : "bg-error/10 text-error",
+											)}
+										>
+											{adh}%
+										</span>
+									)}
+								</div>
+							</button>
+						);
+					})}
+				</div>
+			</div>
+
+			{/* Right: 24h Freeform Diary + Structured Entries + Plan-vs-Actual Compliance Audit */}
+			<div className="flex flex-col gap-3 rounded-xl border bg-card p-3.5 lg:col-span-8">
+				<div className="flex flex-wrap items-center justify-between gap-2">
+					<div>
+						<h3 className="text-sm font-medium">24h Reality Journal — {selectedDate}</h3>
+						<p className="text-[11px] text-muted-foreground">
+							{dayPlan
+								? `Planned: ${dayPlan.plannedStudyHours}h (${dayPlan.quotas.map((q) => q.subject).join(", ") || "open"})`
+								: "Record your actual day; audited adherence gently tunes future realism capacity."}
+							{snap.config.realismFactor !== undefined && snap.config.realismFactor !== 1
+								? ` · Current EWMA capacity: ${Math.round(snap.config.realismFactor * 100)}%`
+								: ""}
+						</p>
+					</div>
+					<div className="flex items-center gap-1 rounded-lg border bg-background p-0.5 text-[11px]">
+						<button
+							type="button"
+							onClick={() => setAuditMode("local")}
+							className={cn(
+								"rounded-md px-2 py-1 transition-colors",
+								auditMode === "local" ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+							)}
+						>
+							Local · 0 tokens
+						</button>
+						<button
+							type="button"
+							disabled={!snap.aiAvailability.coach.available}
+							onClick={() => setAuditMode("llm")}
+							title={snap.aiAvailability.coach.available ? `AI model: ${snap.aiAvailability.coach.modelLabel}` : "Configure model key in Settings first"}
+							className={cn(
+								"inline-flex items-center gap-1 rounded-md px-2 py-1 transition-colors disabled:opacity-40",
+								auditMode === "llm" ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+							)}
+						>
+							<SparklesIcon className="size-3" /> AI Auditor
+						</button>
+					</div>
+				</div>
+
+				{auditMode === "llm" && snap.aiAvailability.availableRoles && snap.aiAvailability.availableRoles.length > 0 && (
+					<div className="flex items-center justify-between gap-2 rounded-md border bg-muted/25 px-2.5 py-1.5 text-[11px]">
+						<span className="text-muted-foreground">Auditor Model:</span>
+						<select
+							value={preferredRole}
+							onChange={(e) => setPreferredRole(e.target.value)}
+							className="rounded border bg-background px-2 py-0.5 text-[11px]"
+						>
+							<option value="">Auto ({snap.aiAvailability.coach.modelLabel ?? "coach"})</option>
+							{snap.aiAvailability.availableRoles.map((r) => (
+								<option key={r.role} value={r.role}>
+									{r.label}: {r.modelLabel}
+								</option>
+							))}
+						</select>
+					</div>
+				)}
+
+				<textarea
+					rows={5}
+					value={journalText}
+					onChange={(e) => setJournalText(e.target.value)}
+					placeholder={"Write freely what actually happened across 24h (one per line or timestamps), e.g.:\n08:30-11:00 Giải 3 bài dãy số Giải tích Olympic\n12:00-13:00 Ăn trưa + nghỉ\n14:00-15:00 Mệt nên lướt điện thoại / chợp mắt\n20:00-21:45 Ôn FSRS Đại số + sửa mistake rule"}
+					className="w-full rounded-lg border bg-background p-2.5 text-xs leading-relaxed"
+				/>
+
+				{/* Quick structured log row */}
+				<div className="rounded-lg border bg-muted/20 p-2.5">
+					<div className="mb-1.5 text-[11px] font-medium text-muted-foreground">+ Add Explicit Timeline Entry (Optional)</div>
+					<div className="grid grid-cols-2 gap-1.5 sm:grid-cols-6">
+						<input type="time" value={actStart} onChange={(e) => setActStart(e.target.value)} className="rounded border bg-background px-2 py-1" />
+						<input type="time" value={actEnd} onChange={(e) => setActEnd(e.target.value)} className="rounded border bg-background px-2 py-1" />
+						<select
+							value={actCat}
+							onChange={(e) => setActCat(e.target.value as JournalActivityCategory)}
+							className="rounded border bg-background px-1.5 py-1"
+						>
+							<option value="study">Study</option>
+							<option value="class">Class</option>
+							<option value="sleep">Sleep</option>
+							<option value="meal">Meal</option>
+							<option value="hobby">Hobby</option>
+							<option value="rest">Rest</option>
+							<option value="distraction">Distraction</option>
+						</select>
+						<input
+							type="text"
+							value={actSubj}
+							onChange={(e) => setActSubj(e.target.value)}
+							placeholder="Subject..."
+							className="rounded border bg-background px-2 py-1"
+						/>
+						<input
+							type="text"
+							value={actTitle}
+							onChange={(e) => setActTitle(e.target.value)}
+							placeholder="What you did..."
+							className="rounded border bg-background px-2 py-1"
+						/>
+						<button
+							type="button"
+							onClick={addManualEntry}
+							className="inline-flex items-center justify-center gap-1 rounded border bg-card px-2 py-1 font-medium hover:bg-accent"
+						>
+							<PlusIcon className="size-3" /> Add
+						</button>
+					</div>
+					{manualEntries.length > 0 && (
+						<div className="mt-2 flex flex-wrap gap-1">
+							{manualEntries.map((m) => (
+								<span key={m.id} className="inline-flex items-center gap-1 rounded border bg-card px-2 py-0.5 text-[11px]">
+									<span>{m.startTime}-{m.endTime} {m.category}: {m.title}</span>
+									<button type="button" onClick={() => removeManualEntry(m.id)} className="text-muted-foreground hover:text-error">
+										<XIcon className="size-3" />
+									</button>
+								</span>
+							))}
+						</div>
+					)}
+				</div>
+
+				<div className="flex flex-wrap items-center justify-end gap-2">
+					<button
+						type="button"
+						disabled={busy || evaluating}
+						onClick={() => void saveDraftOnly()}
+						className="rounded-md border px-3 py-1.5 font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+					>
+						Save Draft Only
+					</button>
+					<button
+						type="button"
+						disabled={busy || evaluating}
+						onClick={() => void runAudit()}
+						className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+					>
+						{evaluating ? <BrailleSpinner /> : <ScaleIcon className="size-3.5" />}
+						Save & Score Plan vs Actual ({auditMode === "llm" ? "AI" : "0 tokens"})
+					</button>
+				</div>
+
+				{compliance && (
+					<div className="rounded-xl border bg-muted/25 p-3">
+						<div className="flex flex-wrap items-center justify-between gap-2">
+							<div className="flex items-center gap-2">
+								<span className="text-sm font-semibold text-foreground">
+									Plan vs Actual Adherence: <span className="text-primary">{compliance.adherencePct}%</span>
+								</span>
+								<span className="rounded border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground">
+									{compliance.evaluatedBy === "llm" ? compliance.modelLabel ?? "AI Auditor" : "Local · 0 tokens"}
+								</span>
+							</div>
+							<span className="tabular-nums text-[11px] text-muted-foreground">
+								Actual {(compliance.actualStudyMin / 60).toFixed(1)}h / Planned {(compliance.plannedStudyMin / 60).toFixed(1)}h · Realism ×{compliance.realismRatio}
+							</span>
+						</div>
+						<p className="mt-1.5 text-foreground">{compliance.summary}</p>
+						<div className="mt-2 grid gap-2 sm:grid-cols-2">
+							{compliance.strengths.length > 0 && (
+								<div className="rounded-lg border bg-card p-2">
+									<div className="mb-1 text-[11px] font-medium text-success">Strengths</div>
+									<ul className="space-y-0.5 text-[11px] text-muted-foreground">
+										{compliance.strengths.map((s, i) => (
+											<li key={i}>• {s}</li>
+										))}
+									</ul>
+								</div>
+							)}
+							{compliance.frictionPoints.length > 0 && (
+								<div className="rounded-lg border bg-card p-2">
+									<div className="mb-1 text-[11px] font-medium text-warning">Friction & Distractions</div>
+									<ul className="space-y-0.5 text-[11px] text-muted-foreground">
+										{compliance.frictionPoints.map((f, i) => (
+											<li key={i}>• {f}</li>
+										))}
+									</ul>
+								</div>
+							)}
+						</div>
+						{compliance.nextDayAdvice && (
+							<div className="mt-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
+								<strong>Next-day calibration:</strong> {compliance.nextDayAdvice}
+							</div>
+						)}
+					</div>
+				)}
+
+				{displayEntries.length > 0 && (
+					<div className="rounded-xl border bg-muted/20 p-2.5">
+						<div className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+							Extracted 24h Reality Timeline ({displayEntries.length} entries)
+						</div>
+						<div className="grid gap-1 sm:grid-cols-2">
+							{displayEntries.map((ent) => (
+								<div key={ent.id} className="flex items-center justify-between gap-2 rounded border bg-card px-2 py-1 text-[11px]">
+									<span className="min-w-0 truncate">
+										<span className="font-medium tabular-nums text-muted-foreground">{ent.startTime}–{ent.endTime}</span>{" "}
+										<span className="rounded border px-1 py-0 text-[9px] uppercase">{ent.category}</span>{" "}
+										{ent.subject ? `[${ent.subject}] ` : ""}
+										{ent.title}
+									</span>
+									<span className="shrink-0 tabular-nums text-muted-foreground">{ent.minutes}m</span>
+								</div>
+							))}
+						</div>
 					</div>
 				)}
 			</div>

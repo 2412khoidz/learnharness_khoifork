@@ -98,7 +98,8 @@ function buildExamPrepMistakeHints(records: readonly MistakeRecord[]): ExamPrepM
 	const recentRules: string[] = [];
 	const seen = new Set<string>();
 	for (const rec of sortedReady) {
-		const rule = rec.analysis!.rule.replace(/\s+/g, " ").trim().slice(0, 120);
+		const rawRule = rec.analysis!.rule.replace(/\s+/g, " ").trim();
+		const rule = rawRule.length <= 220 ? rawRule : `${rawRule.slice(0, 219).trimEnd()}…`;
 		if (!rule || seen.has(rule)) continue;
 		seen.add(rule);
 		recentRules.push(rule);
