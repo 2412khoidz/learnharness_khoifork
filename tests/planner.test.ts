@@ -30,6 +30,7 @@ import {
 	evaluatePlanVsActualLocal,
 	formatPlainMathPreview,
 	optimizeSlotAssignments,
+	parseDoneChecklistInput,
 	parseIcsWeeklyEvents,
 	parseJournalTextLocal,
 	parseLocalSyllabusOutline,
@@ -1535,5 +1536,70 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 
 		const cleared = clearPlannerCoachChatServer({ plannerFile, chatsDir, flashcardsFile, mistakesFile, date: "2026-11-16" });
 		assert.equal(cleared.config.coachChat?.length ?? 0, 0);
+	});
+
+	it("supports Notion-style post-hoc /checklist Done-Log (✓/△/× + acronyms), auto-credits quotas, surfaces △ follow-ups, and handles explicit Restday", () => {
+		const parsed = parseDoneChecklistInput(
+			"110p DSTT (Giải 12.16) △ - NOTE: Cần xem lại định thức con cấp n-1",
+			["Đại số tuyến tính", "Olympic Giải tích"],
+		);
+		assert.equal(parsed.minutes, 110);
+		assert.equal(parsed.subject, "Đại số tuyến tính");
+		assert.equal(parsed.outcome, "partial");
+		assert.equal(parsed.category, "study");
+		assert.ok(parsed.note?.includes("định thức con"));
+
+		const parsedCounts = parseDoneChecklistInput("75p GT1 (Ross 1.1.24) ✓2 △1 ×0", ["Đại số tuyến tính", "Olympic Giải tích"]);
+		assert.equal(parsedCounts.minutes, 75);
+		assert.equal(parsedCounts.subject, "Olympic Giải tích");
+		assert.equal(parsedCounts.counts?.solved, 2);
+		assert.equal(parsedCounts.counts?.partial, 1);
+
+		const baseCfg: PlannerConfig = {
+			...DEFAULT_PLANNER_CONFIG,
+			milestones: [
+				{
+					id: "ms_dstt",
+					kind: "exam",
+					title: "Đại số tuyến tính",
+					subject: "Đại số tuyến tính",
+					dueDate: "2026-11-28",
+					priority: 3,
+					cognitiveLoad: "heavy",
+					clusterIds: [],
+					estimatedHours: 20,
+					completedHours: 0,
+					syllabusTopics: [],
+					notes: "",
+				},
+			],
+		};
+
+		const afterLog = applyHabitCheckIn(baseCfg, {
+			date: "2026-11-16",
+			addDoneEntry: { text: "45p DSTT Giải 12.6 △ - NOTE: Lệch dấu cofactor" },
+		});
+		const entries = afterLog.logs["2026-11-16"]?.doneEntries ?? [];
+		assert.equal(entries.length, 1);
+		assert.equal(afterLog.logs["2026-11-16"]?.loggedStudyMinBySubject["Đại số tuyến tính"], 45);
+		assert.equal(afterLog.milestones[0]?.completedHours, 0.75);
+
+		// Next day's focus pointers automatically surface unresolved △ item from /checklist Done-Log
+		const nextPlan = computeLocalPlannerPlan(afterLog, sampleSignals("2026-11-17"), new Date("2026-11-17T08:00:00Z").getTime());
+		const dsttQuota = nextPlan.quotas.find((q) => q.subject === "Đại số tuyến tính");
+		assert.ok(dsttQuota?.checklist.some((c) => c.text.includes("Revisit (△") && c.text.includes("12.6")));
+
+		// Cycling outcome updates badge cleanly and removing subtracts credited minutes
+		const cycled = applyHabitCheckIn(afterLog, { date: "2026-11-16", cycleDoneOutcomeId: entries[0]!.id });
+		assert.equal(cycled.logs["2026-11-16"]?.doneEntries?.[0]?.outcome, "stuck");
+		const removed = applyHabitCheckIn(cycled, { date: "2026-11-16", removeDoneEntryId: entries[0]!.id });
+		assert.equal(removed.logs["2026-11-16"]?.doneEntries?.length ?? 0, 0);
+		assert.equal(removed.logs["2026-11-16"]?.loggedStudyMinBySubject["Đại số tuyến tính"], 0);
+
+		// Explicit Restday suppresses mandatory study blocks cleanly
+		const restCfg = applyHabitCheckIn(baseCfg, { date: "2026-11-16", isRestDay: true });
+		const restPlan = computeLocalPlannerPlan(restCfg, sampleSignals("2026-11-16"), new Date("2026-11-16T08:00:00Z").getTime());
+		assert.equal(restPlan.plannedStudyHours, 0);
+		assert.ok(restPlan.examDeficitWarning?.includes("Restday"));
 	});
 });

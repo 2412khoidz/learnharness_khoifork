@@ -8,6 +8,7 @@ import {
 	clipPreservingLatex,
 	computeLocalPlannerPlan,
 	daysBetweenDates,
+	DEFAULT_PERSONAL_STUDY_RULES,
 	formatClockMin,
 	formatPlainMathPreview,
 	normalizeSubjectKey,
@@ -15,6 +16,7 @@ import {
 	resolveSubjectMaxDailyCap,
 	WEEKDAY_LABELS,
 	WEEKDAYS,
+	type ChecklistOutcome,
 	type CognitiveLoad,
 	type DailyHabitLog,
 	type DailyStudyPlan,
@@ -492,6 +494,17 @@ export function PlannerPage() {
 										>
 											{todayLog?.hobbyDone ? "✓ Hobby Done" : "Hobby / Rest"}
 										</button>
+										<button
+											type="button"
+											onClick={() => void checkIn({ date: snap.plan.date, isRestDay: !todayLog?.isRestDay })}
+											title="Mark today as an explicit recovery Restday instead of forcing low-energy study"
+											className={cn(
+												"rounded-md border px-2 py-1 transition-colors",
+												todayLog?.isRestDay ? "border-warning/40 bg-warning/10 text-warning" : "text-muted-foreground hover:bg-accent",
+											)}
+										>
+											{todayLog?.isRestDay ? "✓ Restday" : "Restday"}
+										</button>
 										<span className="ml-auto inline-flex items-center gap-0.5 text-[11px] text-muted-foreground">
 											Energy:
 											{([1, 2, 3, 4, 5] as const).map((lvl) => (
@@ -789,6 +802,11 @@ function TodayQuotasTab({
 	const [showOtherSubjects, setShowOtherSubjects] = useState(false);
 	const [customizing, setCustomizing] = useState(false);
 	const [coachQuickMsg, setCoachQuickMsg] = useState("");
+	const [doneLogInput, setDoneLogInput] = useState("");
+	const [doneLogOutcome, setDoneLogOutcome] = useState<ChecklistOutcome>("done");
+	const [doneLogMins, setDoneLogMins] = useState<string>("");
+	const [doneLogNote, setDoneLogNote] = useState("");
+	const [subjQuickMin, setSubjQuickMin] = useState<Record<string, string>>({});
 
 	// Direct today routine overrides (wake / bed / meals)
 	const [wakeDraft, setWakeDraft] = useState(todayOverride?.wakeTime ?? snap.plan.todayWakeTime);
@@ -1154,8 +1172,162 @@ function TodayQuotasTab({
 						))}
 					</div>
 				)}
+
+				{/* Post-hoc Notion-style /checklist Done-Log */}
+				<div className="rounded-xl border bg-card p-3.5 text-xs" data-testid="planner-done-log-card">
+					<div className="flex items-center justify-between gap-2">
+						<div>
+							<h2 className="text-sm font-medium text-foreground">/checklist · Done-Log (Xong việc mới ghi &amp; tick)</h2>
+							<p className="text-[11px] text-muted-foreground">
+								Ghi tên việc + số phút vừa làm (VD: &ldquo;45p DSTT Giải 12.6&rdquo;), hệ thống tự tick ✓ và cộng quota + Journal.
+							</p>
+						</div>
+						<span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+							{(todayLog?.doneEntries ?? []).length} logged
+						</span>
+					</div>
+
+					<form
+						className="mt-2.5 flex flex-col gap-1.5"
+						onSubmit={(e) => {
+							e.preventDefault();
+							const trimmed = doneLogInput.trim();
+							if (!trimmed) return;
+							const parsedMin = Number(doneLogMins);
+							setDoneLogInput("");
+							setDoneLogMins("");
+							setDoneLogNote("");
+							void onCheckIn({
+								date: snap.plan.date,
+								addDoneEntry: {
+									text: trimmed,
+									outcome: doneLogOutcome,
+									...(Number.isFinite(parsedMin) && parsedMin > 0 ? { minutes: parsedMin } : {}),
+									...(doneLogNote.trim() ? { note: doneLogNote.trim() } : {}),
+								},
+							});
+						}}
+					>
+						<div className="flex flex-wrap gap-1.5">
+							<input
+								type="text"
+								value={doneLogInput}
+								onChange={(e) => setDoneLogInput(e.target.value)}
+								placeholder="/checklist Việc vừa làm (VD: 45p DSTT Bài 12.6 ✓2 △1)..."
+								className="min-w-0 flex-1 rounded-md border bg-background px-2.5 py-1.5 text-xs"
+							/>
+							<input
+								type="number"
+								min={5}
+								max={360}
+								step={5}
+								value={doneLogMins}
+								onChange={(e) => setDoneLogMins(e.target.value)}
+								placeholder="phút"
+								title="Tùy chọn nhập riêng số phút (nếu đã ghi 45p trong tên thì để trống)"
+								className="w-16 rounded-md border bg-background px-2 py-1.5 text-xs"
+							/>
+							<button
+								type="submit"
+								disabled={!doneLogInput.trim()}
+								data-testid="planner-done-log-submit"
+								className="rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+							>
+								+ Log ✓
+							</button>
+						</div>
+						<div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+							<span className="text-muted-foreground">Trạng thái:</span>
+							{(
+								[
+									{ id: "done", label: "✓ Xong" },
+									{ id: "partial", label: "△ Có hướng / dở" },
+									{ id: "stuck", label: "× Chưa ra" },
+								] as const
+							).map((o) => (
+								<button
+									key={o.id}
+									type="button"
+									onClick={() => setDoneLogOutcome(o.id)}
+									className={cn(
+										"rounded border px-1.5 py-0.5 transition-colors",
+										doneLogOutcome === o.id
+											? o.id === "done"
+												? "border-success/40 bg-success/10 text-success font-medium"
+												: o.id === "partial"
+													? "border-warning/40 bg-warning/10 text-warning font-medium"
+													: "border-error/40 bg-error/10 text-error font-medium"
+											: "text-muted-foreground hover:bg-accent",
+									)}
+								>
+									{o.label}
+								</button>
+							))}
+							<input
+								type="text"
+								value={doneLogNote}
+								onChange={(e) => setDoneLogNote(e.target.value)}
+								placeholder="Ghi chú/ý tưởng rút ra (tùy chọn)..."
+								className="ml-auto min-w-[140px] flex-1 rounded border bg-background px-2 py-0.5 text-[11px]"
+							/>
+						</div>
+					</form>
+
+					{(todayLog?.doneEntries ?? []).length > 0 && (
+						<ul className="mt-2.5 flex flex-col gap-1 border-t pt-2">
+							{(todayLog?.doneEntries ?? []).map((entry) => {
+								const badgeSymbol = entry.outcome === "done" ? "✓" : entry.outcome === "partial" ? "△" : "×";
+								return (
+									<li key={entry.id} className="group flex items-start gap-2 rounded-md px-1.5 py-1 hover:bg-muted/40">
+										<CheckCircle2Icon className="mt-0.5 size-3.5 shrink-0 text-success" />
+										<div className="min-w-0 flex-1">
+											<div className="flex flex-wrap items-center gap-1.5">
+												<span className="tabular-nums font-medium text-primary">{entry.minutes}p</span>
+												{entry.subject && (
+													<span className="rounded border bg-muted/40 px-1 py-0 text-[10px] font-medium text-foreground">
+														{entry.subject}
+													</span>
+												)}
+												<span className={cn("text-xs", entry.outcome === "done" ? "text-muted-foreground line-through" : "text-foreground")}>
+													{entry.title}
+												</span>
+											</div>
+											{entry.note && (
+												<div className="mt-0.5 text-[11px] text-muted-foreground">Note: {entry.note}</div>
+											)}
+										</div>
+										<button
+											type="button"
+											onClick={() => void onCheckIn({ date: snap.plan.date, cycleDoneOutcomeId: entry.id })}
+											title="Bấm để đổi ✓ xong / △ có hướng / × chưa ra"
+											className={cn(
+												"shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium",
+												entry.outcome === "done"
+													? "border-success/40 bg-success/10 text-success"
+													: entry.outcome === "partial"
+														? "border-warning/40 bg-warning/10 text-warning"
+														: "border-error/40 bg-error/10 text-error",
+											)}
+										>
+											{badgeSymbol}
+										</button>
+										<button
+											type="button"
+											onClick={() => void onCheckIn({ date: snap.plan.date, removeDoneEntryId: entry.id })}
+											title="Xóa dòng log này"
+											className="shrink-0 rounded p-0.5 text-muted-foreground opacity-60 hover:text-error hover:opacity-100"
+										>
+											<TrashIcon className="size-3" />
+										</button>
+									</li>
+								);
+							})}
+						</ul>
+					)}
+				</div>
+
 				<div className="flex items-center justify-between">
-					<h2 className="text-sm font-medium">Daily Quotas & Checklist</h2>
+					<h2 className="text-sm font-medium">Focus Pointers &amp; Quotas (Gợi ý tự chọn)</h2>
 					<span className="text-xs text-muted-foreground">{snap.plan.quotas.length} active today</span>
 				</div>
 				{snap.plan.quotas.map((q) => {
@@ -1163,6 +1335,7 @@ function TodayQuotasTab({
 					const pct = Math.min(100, Math.round((doneMin / Math.max(1, q.targetMin)) * 100));
 					const studyTopic = encodeURIComponent(`${q.subject}: ${q.checklist[0]?.text ?? "focused review"}`);
 					const isFocused = focusSubjects.some((f) => normalizeSubjectKey(f) === normalizeSubjectKey(q.subject));
+					const quickDraft = subjQuickMin[q.subject] ?? "";
 					return (
 						<div key={q.id} className="rounded-xl border bg-card p-3.5">
 							<div className="flex items-start justify-between gap-2">
@@ -1244,6 +1417,48 @@ function TodayQuotasTab({
 									);
 								})}
 							</ul>
+							<form
+								className="mt-2 flex flex-wrap items-center gap-1 border-t pt-2 text-[10px]"
+								onSubmit={(e) => {
+									e.preventDefault();
+									const t = quickDraft.trim();
+									if (!t) return;
+									setSubjQuickMin((prev) => ({ ...prev, [q.subject]: "" }));
+									void onCheckIn({
+										date: snap.plan.date,
+										addDoneEntry: { text: t, subject: q.subject, category: "study" },
+									});
+								}}
+							>
+								<input
+									type="text"
+									value={quickDraft}
+									onChange={(e) => setSubjQuickMin((prev) => ({ ...prev, [q.subject]: e.target.value }))}
+									placeholder={`+ /checklist (${q.subject}): VD 45p bài 12.6...`}
+									className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-[11px]"
+								/>
+								{([15, 25, 45, 60] as const).map((m) => (
+									<button
+										key={m}
+										type="button"
+										onClick={() =>
+											void onCheckIn({
+												date: snap.plan.date,
+												addDoneEntry: {
+													text: quickDraft.trim() || `${m}p ${q.subject}`,
+													subject: q.subject,
+													minutes: m,
+													category: "study",
+												},
+											})
+										}
+										className="rounded border px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+										title={`Log ${m}p vừa xong cho ${q.subject}`}
+									>
+										+{m}p
+									</button>
+								))}
+							</form>
 						</div>
 					);
 				})}
@@ -3510,6 +3725,85 @@ function LifestyleTab({
 									</div>
 								</>
 							)}
+						</div>
+					</details>
+
+					{/* Personal Study Rules & Variable Bout Range */}
+					<details className="mt-3 rounded-lg border bg-muted/20 p-2.5">
+						<summary className="cursor-pointer font-medium text-muted-foreground hover:text-foreground">
+							Personal Study Rules &amp; Flexible Bouts (Post-hoc /checklist · 15–90m)
+						</summary>
+						<div className="mt-2.5 flex flex-col gap-2">
+							<div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+								<span className="text-muted-foreground">
+									AI Coach &amp; Local Planner follow your real workflow rules (1 rule per line):
+								</span>
+								<button
+									type="button"
+									onClick={() =>
+										setDraft({
+											...draft,
+											studyRules: [...DEFAULT_PERSONAL_STUDY_RULES],
+											boutMinRange: [15, 90],
+										})
+									}
+									className="rounded border bg-background px-2 py-0.5 text-[10px] font-medium hover:bg-accent"
+								>
+									Load Multi-Pass / 80-20 Defaults
+								</button>
+							</div>
+							<div className="grid grid-cols-2 gap-2 text-[11px]">
+								<div>
+									<label className="mb-0.5 block text-muted-foreground">Min Bout (min)</label>
+									<input
+										type="number"
+										min={5}
+										max={60}
+										step={5}
+										value={draft.boutMinRange?.[0] ?? 15}
+										onChange={(e) =>
+											setDraft({
+												...draft,
+												boutMinRange: [Number(e.target.value) || 15, draft.boutMinRange?.[1] ?? 90],
+											})
+										}
+										className="w-full rounded border bg-background px-2 py-1"
+									/>
+								</div>
+								<div>
+									<label className="mb-0.5 block text-muted-foreground">Max Bout (min)</label>
+									<input
+										type="number"
+										min={30}
+										max={180}
+										step={5}
+										value={draft.boutMinRange?.[1] ?? 90}
+										onChange={(e) =>
+											setDraft({
+												...draft,
+												boutMinRange: [draft.boutMinRange?.[0] ?? 15, Number(e.target.value) || 90],
+											})
+										}
+										className="w-full rounded border bg-background px-2 py-1"
+									/>
+								</div>
+							</div>
+							<textarea
+								rows={4}
+								value={(draft.studyRules ?? DEFAULT_PERSONAL_STUDY_RULES).join("\n")}
+								onChange={(e) =>
+									setDraft({
+										...draft,
+										studyRules: e.target.value
+											.split(/\r?\n/)
+											.map((l) => l.trim())
+											.filter(Boolean)
+											.slice(0, 12),
+									})
+								}
+								placeholder="One study rule per line..."
+								className="w-full rounded border bg-background px-2 py-1.5 text-[11px]"
+							/>
 						</div>
 					</details>
 

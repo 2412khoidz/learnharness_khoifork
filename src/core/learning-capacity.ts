@@ -505,6 +505,16 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 	// ── 6. Chronobiological Alignment & SRL Endurance ──────────────────────────
 	const allLogs = Object.values(config.logs);
 	const complianceLogs = allLogs.filter((l) => Boolean(l.compliance));
+	const allDoneEntries = allLogs.flatMap((l) => l.doneEntries ?? []).filter((e) => e.category === "study");
+	const restDayCount = allLogs.filter((l) => l.isRestDay).length;
+	const avgDoneBoutMin =
+		allDoneEntries.length > 0
+			? Math.round(allDoneEntries.reduce((a, e) => a + e.minutes, 0) / allDoneEntries.length)
+			: null;
+	const doneCompletePct =
+		allDoneEntries.length > 0
+			? Math.round((allDoneEntries.filter((e) => e.outcome === "done").length / allDoneEntries.length) * 100)
+			: null;
 	const avgAdherencePct =
 		complianceLogs.length > 0
 			? Math.round(complianceLogs.reduce((a, l) => a + (l.compliance?.adherencePct ?? 0), 0) / complianceLogs.length)
@@ -520,10 +530,10 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 	const circadianDriftMin = currentPlanHabit?.circadianDriftMin ?? 0;
 	const realismFactor = config.realismFactor ?? lp?.realismFactor ?? 1.0;
 
-	const chronoSamples = allLogs.length + complianceLogs.length;
+	const chronoSamples = allLogs.length + complianceLogs.length + allDoneEntries.length;
 	let chronoScore: number | null = null;
 	if (chronoSamples > 0 || config.realismFactor !== undefined) {
-		const adhPart = avgAdherencePct !== null ? avgAdherencePct * 0.45 : 32;
+		const adhPart = avgAdherencePct !== null ? avgAdherencePct * 0.45 : doneCompletePct !== null ? doneCompletePct * 0.4 : 32;
 		const energyPart = signals.habitTrend.avgEnergy !== null ? (signals.habitTrend.avgEnergy / 5) * 22 : 13;
 		const sleepPart = avgSleepHours !== null ? clamp(1 - Math.abs(avgSleepHours - 7.5) / 3.5, 0.2, 1) * 23 : 15;
 		const driftPen = Math.min(18, circadianDriftMin / 10);
@@ -545,9 +555,10 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			{ label: "Mean Energy", value: signals.habitTrend.avgEnergy !== null ? `${signals.habitTrend.avgEnergy}/5` : "—" },
 			{ label: "Mean Sleep", value: avgSleepHours !== null ? `${avgSleepHours}h` : "—" },
 			{ label: "Circadian Drift", value: `±${circadianDriftMin}m` },
-			{ label: "Early Waking Rate", value: earlyWakingPct !== null ? `${earlyWakingPct}%` : "—" },
+			{ label: "Done-Log Bouts", value: allDoneEntries.length > 0 ? `${allDoneEntries.length} (~${avgDoneBoutMin}m, ✓${doneCompletePct}%)` : "—" },
+			{ label: "Early Waking", value: earlyWakingPct !== null ? `${earlyWakingPct}%${restDayCount > 0 ? ` · ${restDayCount} restdays` : ""}` : "—" },
 		],
-		sampleCount: Math.max(allLogs.length, complianceLogs.length),
+		sampleCount: Math.max(allLogs.length, complianceLogs.length, allDoneEntries.length),
 		insight:
 			allLogs.length === 0
 				? "Chưa có log ngủ/học hàng ngày — check-in vài ngày để hệ thống học giờ tỉnh táo và sức bền thực tế."

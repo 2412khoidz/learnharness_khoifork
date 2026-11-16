@@ -1038,11 +1038,22 @@ export function checkInPlannerHabit(
 	opts?: PlannerReadOptions & { chatsDir?: string },
 ): PlannerSnapshotResponse {
 	const now = opts?.now ?? Date.now();
+	const date = isValidDateString(patch.date) ? patch.date.trim() : localDateString(now);
 	const filePath = opts?.plannerFile ?? defaultPlannerPath();
 	const current = readPlannerConfig(filePath);
-	const updated = applyHabitCheckIn(current, patch, now);
-	const saved = savePlannerConfig(updated, filePath);
-	return readPlannerSnapshot({ ...opts, date: patch.date ?? localDateString(now), now });
+	let updated = applyHabitCheckIn(current, { ...patch, date }, now);
+	if (patch.isRestDay !== undefined) {
+		const signals = buildPlannerPersonalSignals(updated, { ...opts, date, now });
+		updated = {
+			...updated,
+			plans: {
+				...updated.plans,
+				[date]: computeLocalPlannerPlan(updated, signals, now),
+			},
+		};
+	}
+	savePlannerConfig(updated, filePath);
+	return readPlannerSnapshot({ ...opts, date, now });
 }
 
 // ─── Shared Single-Submit Runner (supports optional vision images + extra tools) ───
@@ -1198,7 +1209,10 @@ STRICT RULES:
 5. Hobbies, Gaming & Discreet Wellness Guardrails: Check \`lifestyleBalance\`.
    - If \`gameBudgetMin > 0\`, schedule a clean bounded gaming slot STRICTLY BEFORE \`recommendedBedtime - gameCutoffBeforeBedMin\`.
    - If \`wellnessGuardrail.enabled\` is true, subtly protect the listed \`riskWindows\` (e.g. late night / idle afternoon / post-stress) by placing structured wind-down, physical walk, or offline reading blocks with **100% discreet, neutral labels** on the timeline (never mention sensitive biological details on visible block titles).
-6. Match the user's language (Vietnamese if subjects/milestones are Vietnamese). Max 11 dynamic blocks.`;
+6. Student's Own Working Style (\`studyStyle\`, \`doneLogToday\`, \`recentDoneLogs\`):
+   - This learner works in **flexible 15-90m bouts** and writes a **post-hoc \`/checklist\` Done-Log** AFTER finishing each bout (tagging outcomes as \`✓\` done, \`△\` partial/revisit, or \`×\` stuck).
+   - Treat \`quotas[].checklist\` strictly as **lightweight Focus Pointers / candidate problems** (NEVER robotic step-by-step chores). Check \`recentDoneLogs\` and \`doneLogToday\`: prioritize unresolved \`△\` or \`×\` problems/theorems the student actually got stuck on over inventing generic items. If \`studyStyle.isRestDayToday\` is true, schedule 0 mandatory study blocks and respect full recovery.
+7. Match the user's language (Vietnamese if subjects/milestones are Vietnamese). Max 11 dynamic blocks.`;
 
 	const promptText = [
 		"Compact student state digest:",
@@ -2750,6 +2764,9 @@ export async function chatWithPlannerCoachServer(
 			knowledgeSignals: digest.knowledgeSignals,
 			recentSessions: signals.recentSessions.slice(0, 8).map((s) => ({ title: s.title, kind: s.kind })),
 			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 4) ?? [],
+			studyStyle: digest.studyStyle,
+			doneLogToday: digest.doneLogToday,
+			recentDoneLogs: digest.recentDoneLogs,
 		},
 		recentSleepLogs: Object.values(current.logs)
 			.sort((a, b) => b.date.localeCompare(a.date))
@@ -2774,7 +2791,7 @@ OPERATING RULES:
    - For today's wake/sleep/meals/focus/blocks: put them in \`todayOverridePatch\` and set \`regenerateTodaySchedule: true\`. Only emit \`todayOverridePatch.blocks\` when they specifically want exact block placements; otherwise omit \`blocks\` so the constraint optimizer lays out a non-overlapping schedule around TKB & meals.
    - If the student reports today's actual energy, bedtime, wake time, or unintended 4-5 AM awakening: also update \`todayLogPatch\`.
    - If they want persistent habit changes (target bedtime, early waking care, midday nap preference, default meal times, hobbies, game budget/cutoff, discreet guardrails, muted/pinned subjects, intensity): update \`lifestylePatch\`.
-2. Strictly Grounded & Discreet: Cite the student's real subjects, attached files, open chapters, FSRS/Graph metrics, or mistake rules. Never invent nonexistent metrics. If adjusting \`wellnessGuardrail\`, keep visible block titles 100% neutral and discreet.
+2. Strictly Grounded, Respect Personal Style & Discreet: Cite the student's real subjects, attached files, open chapters, FSRS/Graph metrics, mistake rules, AND their real post-hoc \`/checklist\` Done-Log (\`doneLogToday\`, \`recentDoneLogs\` with \`✓\` done / \`△\` partial / \`×\` stuck) + \`studyStyle.rules\` (variable 15-90m bouts, 80/20 practice ratio, multi-pass 15m sweep). Do not force robotic chore lists — focus suggestions are optional pointers for what to pick next before logging \`/checklist\`. Never invent nonexistent metrics. If adjusting \`wellnessGuardrail\`, keep visible block titles 100% neutral and discreet.
 3. Pure Questions: If they only ask a question or ask for feedback without wanting edits, set \`shouldApplyChanges: false\`.`;
 
 	const payload = await runPlannerSubmit<CoachTurnOut>({
