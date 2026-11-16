@@ -11,7 +11,7 @@ import type {
 	PhoneUploadSessionInfo,
 } from "../core/attachments.ts";
 import type { ExamPrepPatch } from "../core/exam-prep.ts";
-import type { HabitCheckInPatch } from "../core/planner.ts";
+import type { MobilePlannerCheckInRequest } from "./phone-companion.ts";
 import { quoteFilePath } from "../core/file-paths.ts";
 import {
 	AttachmentError,
@@ -1046,8 +1046,8 @@ function handlePhoneRequest(session: InternalPhoneSession, req: http.IncomingMes
 		void (async () => {
 			try {
 				const bytes = await readRequestBytes(req, 64 * 1024);
-				const body = JSON.parse(bytes.toString("utf8")) as HabitCheckInPatch;
-				const result = updateMobileCompanionPlannerCheckIn(body, {
+				const body = JSON.parse(bytes.toString("utf8")) as MobilePlannerCheckInRequest;
+				const result = await updateMobileCompanionPlannerCheckIn(body, {
 					flashcardsFile: session.flashcardsFile,
 					examPrepFile: session.examPrepFile,
 					plannerFile: session.plannerFile,

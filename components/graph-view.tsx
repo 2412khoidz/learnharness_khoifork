@@ -63,12 +63,12 @@
  * camera never moves.
  */
 
-import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { NotesImportControl, NotesImportErrors, NotesImportNotices, useNotesImport } from "@/components/notes-import.tsx";
 import { PluginGraphActions } from "@/components/plugin-chrome";
 import { SettingsSlider as SettingSlider } from "@/components/settings/controls";
 import Link from "next/link";
-import { AlertTriangleIcon, FileTextIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, WaypointsIcon } from "lucide-react";
+import { AlertTriangleIcon, ChevronDownIcon, ChevronUpIcon, FileTextIcon, GripVerticalIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, WaypointsIcon } from "lucide-react";
 import { formatMathForPlainText, incrementalLayout, propositionSessionHref, wrapBareMathForDisplay, type GraphCostSummary, type GraphFsrsSummary, type GraphNode, type GraphSnapshot, type NodeFsrsInfo } from "@/src/core";
 import { planCostLabel } from "@/components/usage-format";
 import { CLUSTER_LIGHTNESS, GraphCanvasRenderer, type GraphRenderSettings } from "./graph-canvas.ts";
@@ -998,6 +998,82 @@ export function GraphView({
 	const [fsrsSummary, setFsrsSummary] = useState<GraphFsrsSummary | null>(null);
 	const [fsrsFilter, setFsrsFilter] = useState<FsrsGraphFilter>("heatmap");
 	const [fsrsFeedback, setFsrsFeedback] = useState<string | null>(null);
+	const [fsrsBarCollapsed, setFsrsBarCollapsed] = useState(false);
+	const [fsrsBarPos, setFsrsBarPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+	const fsrsBarDragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+	useEffect(() => {
+		try {
+			if (window.localStorage.getItem("lh:graph-fsrs-collapsed") === "1") setFsrsBarCollapsed(true);
+			const rawPos = window.localStorage.getItem("lh:graph-fsrs-pos");
+			if (rawPos) {
+				const parsed = JSON.parse(rawPos) as { x?: unknown; y?: unknown };
+				if (typeof parsed.x === "number" && Number.isFinite(parsed.x) && typeof parsed.y === "number" && Number.isFinite(parsed.y)) {
+					setFsrsBarPos({ x: parsed.x, y: parsed.y });
+				}
+			}
+		} catch {
+			// Ignore localStorage unavailability.
+		}
+	}, []);
+	const toggleFsrsBarCollapsed = useCallback(() => {
+		setFsrsBarCollapsed((prev) => {
+			const next = !prev;
+			try {
+				window.localStorage.setItem("lh:graph-fsrs-collapsed", next ? "1" : "0");
+			} catch {
+				// Ignore localStorage unavailability.
+			}
+			return next;
+		});
+	}, []);
+	const resetFsrsBarPos = useCallback(() => {
+		setFsrsBarPos({ x: 0, y: 0 });
+		try {
+			window.localStorage.removeItem("lh:graph-fsrs-pos");
+		} catch {
+			// Ignore localStorage unavailability.
+		}
+	}, []);
+	const handleFsrsDragPointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+		if (event.button !== 0) return;
+		event.preventDefault();
+		event.stopPropagation();
+		event.currentTarget.setPointerCapture(event.pointerId);
+		fsrsBarDragRef.current = {
+			startX: event.clientX,
+			startY: event.clientY,
+			origX: fsrsBarPos.x,
+			origY: fsrsBarPos.y,
+		};
+	}, [fsrsBarPos]);
+	const handleFsrsDragPointerMove = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+		const drag = fsrsBarDragRef.current;
+		if (!drag) return;
+		let nextX = drag.origX + (event.clientX - drag.startX);
+		let nextY = drag.origY + (event.clientY - drag.startY);
+		if (typeof window !== "undefined") {
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			nextX = Math.max(-(vw - 120), Math.min(vw - 120, nextX));
+			nextY = Math.max(-48, Math.min(vh - 96, nextY));
+		}
+		setFsrsBarPos({ x: nextX, y: nextY });
+	}, []);
+	const handleFsrsDragPointerUp = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+		if (!fsrsBarDragRef.current) return;
+		if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+			event.currentTarget.releasePointerCapture(event.pointerId);
+		}
+		fsrsBarDragRef.current = null;
+		setFsrsBarPos((latest) => {
+			try {
+				window.localStorage.setItem("lh:graph-fsrs-pos", JSON.stringify(latest));
+			} catch {
+				// Ignore localStorage unavailability.
+			}
+			return latest;
+		});
+	}, []);
 	const triggerFsrsFeedback = useCallback((message: string) => {
 		setFsrsFeedback(message);
 		window.setTimeout(() => {
@@ -1676,76 +1752,114 @@ export function GraphView({
 			{!isEmpty && fsrsSummary && (fsrsSummary.counts.tracked > 0 || fsrsSummary.counts.prereqRisk > 0 || Object.values(fsrsSummary.nodes).some((n) => n.isFoundation)) && (
 				<div
 					data-testid="graph-fsrs-bar"
-					className="flex flex-wrap items-center gap-1.5 rounded-xl border bg-card/85 px-2 py-1 text-[11px] shadow-lg backdrop-blur"
+					style={fsrsBarPos.x !== 0 || fsrsBarPos.y !== 0 ? { transform: `translate3d(${fsrsBarPos.x}px, ${fsrsBarPos.y}px, 0)` } : undefined}
+					className="lh-no-drag flex flex-wrap items-center gap-1 rounded-xl border bg-card/85 px-1.5 py-1 text-[11px] shadow-lg backdrop-blur"
 				>
+					<button
+						type="button"
+						data-testid="graph-fsrs-drag"
+						onPointerDown={handleFsrsDragPointerDown}
+						onPointerMove={handleFsrsDragPointerMove}
+						onPointerUp={handleFsrsDragPointerUp}
+						onPointerCancel={handleFsrsDragPointerUp}
+						onDoubleClick={resetFsrsBarPos}
+						className="inline-flex cursor-grab touch-none items-center rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground active:cursor-grabbing"
+						title="Drag to move · Double-click to reset"
+						aria-label="Drag FSRS toolbar"
+					>
+						<GripVerticalIcon className="size-3" />
+					</button>
 					<span className="flex items-center gap-1.5 pr-1 text-muted-foreground" title="FSRS-6 Flashcards Memory Status">
 						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-success" />{fsrsSummary.counts.strong}</span>
 						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-warning" />{fsrsSummary.counts.decaying}</span>
 						<span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-error" />{fsrsSummary.counts.overdue}</span>
 					</span>
-					{(() => {
-						const foundationCount = Object.values(fsrsSummary.nodes).filter((n) => n.isFoundation).length;
-						const untrackedCount = fsrsSummary.counts.untrackedFoundations ?? 0;
-						const items: Array<readonly [FsrsGraphFilter, string]> = [
-							["heatmap", "FSRS"],
-							["due", `Due (${fsrsSummary.counts.overdue + fsrsSummary.counts.decaying})`],
-							...(foundationCount > 0
-								? [[
-									"foundations",
-									untrackedCount > 0 ? `Foundations (${foundationCount} · ${untrackedCount} untracked)` : `Foundations (${foundationCount})`,
-								] as const]
-								: []),
-							...(fsrsSummary.counts.prereqRisk > 0 ? [["prereq", `Prereq (${fsrsSummary.counts.prereqRisk})`] as const] : []),
-							["off", "Off"],
-						];
-						return items.map(([mode, label]) => (
-							<button
-								key={mode}
-								type="button"
-								onClick={() => setFsrsFilter(mode)}
-								className={`rounded-md px-1.5 py-0.5 transition-colors ${
-									fsrsFilter === mode
-										? "bg-foreground text-background font-medium"
-										: "text-muted-foreground hover:bg-accent hover:text-foreground"
-								}`}
-							>
-								{label}
-							</button>
-						));
-					})()}
-					{onPracticeSelectionChange && (fsrsSummary.counts.overdue + fsrsSummary.counts.decaying + fsrsSummary.counts.prereqRisk) > 0 && (
+					{fsrsBarCollapsed ? (
 						<button
 							type="button"
-							data-testid="practice-weak-button"
-							onClick={() => {
-								if (!snapshot) return;
-								const weakIds = new Set<string>();
-								for (const info of Object.values(fsrsSummary.nodes)) {
-									if (info.memoryBand === "overdue" || info.memoryBand === "decaying") weakIds.add(info.id);
-									for (const pre of info.weakPrerequisites) weakIds.add(pre.id);
-								}
-								const pool = snapshot.propositions.length > 0 ? snapshot.propositions : snapshot.nodes;
-								const picked = pool
-									.filter((node) => weakIds.has(node.id))
-									.map((node) => ({ id: node.id, name: node.name, statement: node.statement }));
-								if (picked.length > 0) {
-									onPracticeSelectionChange(picked, { activatePractice: true });
-									triggerFsrsFeedback(`Ready in Practice: ${picked.length} weak node${picked.length === 1 ? "" : "s"}`);
-								} else {
-									triggerFsrsFeedback("No weak nodes matched");
-								}
-							}}
-							className="cursor-pointer rounded-md border border-primary/35 bg-primary/10 px-2 py-0.5 font-medium text-foreground transition-colors hover:bg-primary/20"
-							title="Select due, decaying, and weak prerequisite nodes and switch composer to Practice mode"
+							onClick={toggleFsrsBarCollapsed}
+							className="cursor-pointer rounded-md bg-accent/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-foreground hover:bg-accent"
+							title="Expand FSRS filter controls"
 						>
-							Practice weak
+							{fsrsFilter}
 						</button>
+					) : (
+						<>
+							{(() => {
+								const foundationCount = Object.values(fsrsSummary.nodes).filter((n) => n.isFoundation).length;
+								const untrackedCount = fsrsSummary.counts.untrackedFoundations ?? 0;
+								const items: Array<readonly [FsrsGraphFilter, string]> = [
+									["heatmap", "FSRS"],
+									["due", `Due (${fsrsSummary.counts.overdue + fsrsSummary.counts.decaying})`],
+									...(foundationCount > 0
+										? [[
+											"foundations",
+											untrackedCount > 0 ? `Foundations (${foundationCount} · ${untrackedCount} untracked)` : `Foundations (${foundationCount})`,
+										] as const]
+										: []),
+									...(fsrsSummary.counts.prereqRisk > 0 ? [["prereq", `Prereq (${fsrsSummary.counts.prereqRisk})`] as const] : []),
+									["off", "Off"],
+								];
+								return items.map(([mode, label]) => (
+									<button
+										key={mode}
+										type="button"
+										onClick={() => setFsrsFilter(mode)}
+										className={`rounded-md px-1.5 py-0.5 transition-colors ${
+											fsrsFilter === mode
+												? "bg-foreground text-background font-medium"
+												: "text-muted-foreground hover:bg-accent hover:text-foreground"
+										}`}
+									>
+										{label}
+									</button>
+								));
+							})()}
+							{onPracticeSelectionChange && (fsrsSummary.counts.overdue + fsrsSummary.counts.decaying + fsrsSummary.counts.prereqRisk) > 0 && (
+								<button
+									type="button"
+									data-testid="practice-weak-button"
+									onClick={() => {
+										if (!snapshot) return;
+										const weakIds = new Set<string>();
+										for (const info of Object.values(fsrsSummary.nodes)) {
+											if (info.memoryBand === "overdue" || info.memoryBand === "decaying") weakIds.add(info.id);
+											for (const pre of info.weakPrerequisites) weakIds.add(pre.id);
+										}
+										const pool = snapshot.propositions.length > 0 ? snapshot.propositions : snapshot.nodes;
+										const picked = pool
+											.filter((node) => weakIds.has(node.id))
+											.map((node) => ({ id: node.id, name: node.name, statement: node.statement }));
+										if (picked.length > 0) {
+											onPracticeSelectionChange(picked, { activatePractice: true });
+											triggerFsrsFeedback(`Ready in Practice: ${picked.length} weak node${picked.length === 1 ? "" : "s"}`);
+										} else {
+											triggerFsrsFeedback("No weak nodes matched");
+										}
+									}}
+									className="cursor-pointer rounded-md border border-primary/35 bg-primary/10 px-2 py-0.5 font-medium text-foreground transition-colors hover:bg-primary/20"
+									title="Select due, decaying, and weak prerequisite nodes and switch composer to Practice mode"
+								>
+									Practice weak
+								</button>
+							)}
+						</>
 					)}
 					{fsrsFeedback && (
 						<span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-foreground">
 							{fsrsFeedback}
 						</span>
 					)}
+					<button
+						type="button"
+						data-testid="graph-fsrs-collapse"
+						onClick={toggleFsrsBarCollapsed}
+						className="inline-flex cursor-pointer items-center rounded-md p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+						title={fsrsBarCollapsed ? "Expand FSRS bar" : "Minimize FSRS bar"}
+						aria-label={fsrsBarCollapsed ? "Expand FSRS bar" : "Minimize FSRS bar"}
+					>
+						{fsrsBarCollapsed ? <ChevronDownIcon className="size-3.5" /> : <ChevronUpIcon className="size-3.5" />}
+					</button>
 				</div>
 			)}
 			{costs && costs.runs.length > 0 && <GraphCostControl costs={costs} />}

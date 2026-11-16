@@ -31,8 +31,15 @@ import {
 } from "../core/question-core.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
 import { readExamPrepStatus, writeExamPrepConfig } from "./exam-prep.ts";
-import { checkInPlannerHabit, readPlannerSnapshot } from "./planner.ts";
-import { daysBetweenDates, type DailyHabitLog, type DailyStudyPlan, type HabitCheckInPatch } from "../core/planner.ts";
+import { checkInPlannerHabit, evaluateDailyJournalServer, patchPlannerConfig, readPlannerSnapshot } from "./planner.ts";
+import {
+	daysBetweenDates,
+	type DailyHabitLog,
+	type DailyStudyPlan,
+	type HabitCheckInPatch,
+	type MealSlot,
+	type PlannerIntensity,
+} from "../core/planner.ts";
 import { graphView } from "./graph.ts";
 import { defaultFlashcardsStorePath, loadFlashcardsScheduler, readFlashcardsSnapshot } from "./graph-fsrs.ts";
 import { effectiveSettings, stores } from "./stores.ts";
@@ -96,12 +103,23 @@ export interface MobileCompanionPlannerView {
 	intensity: string;
 	minDailyStudyHours: number;
 	plannedStudyHours: number;
+	freeHoursTotal: number;
 	recommendedBedtime: string;
+	todayWakeTime: string;
 	sleepShiftAdvice: string;
+	realismFactor: number;
+	meals: MealSlot[];
+	hobbies: string[];
 	todayLog: DailyHabitLog | null;
 	quotas: DailyStudyPlan["quotas"];
 	blocks: DailyStudyPlan["blocks"];
 	upcomingMilestones: Array<{ id: string; kind: string; title: string; dueDate: string; daysLeft: number }>;
+}
+
+export interface MobilePlannerCheckInRequest extends HabitCheckInPatch {
+	intensity?: PlannerIntensity;
+	evaluateJournal?: boolean;
+	taskNote?: string;
 }
 
 export interface MobileCompanionState {
@@ -303,8 +321,13 @@ export function buildMobileCompanionPlannerView(opts: MobileCompanionOptions = {
 		intensity: snap.plan.intensity,
 		minDailyStudyHours: snap.plan.minDailyStudyHours,
 		plannedStudyHours: snap.plan.plannedStudyHours,
+		freeHoursTotal: snap.plan.freeHoursTotal,
 		recommendedBedtime: snap.plan.recommendedBedtime,
+		todayWakeTime: snap.plan.todayWakeTime,
 		sleepShiftAdvice: snap.plan.sleepShiftAdvice,
+		realismFactor: snap.config.realismFactor ?? snap.plan.realismApplied ?? 1,
+		meals: snap.config.lifestyle.meals,
+		hobbies: snap.config.lifestyle.hobbies,
 		todayLog,
 		quotas: snap.plan.quotas,
 		blocks: snap.plan.blocks,
@@ -312,20 +335,70 @@ export function buildMobileCompanionPlannerView(opts: MobileCompanionOptions = {
 	};
 }
 
-export function updateMobileCompanionPlannerCheckIn(
-	patch: HabitCheckInPatch,
+function hasDirectHabitPatchFields(patch: HabitCheckInPatch): boolean {
+	return (
+		patch.toggleBlockId !== undefined ||
+		patch.toggleChecklistId !== undefined ||
+		patch.addStudyMin !== undefined ||
+		patch.actualBedtime !== undefined ||
+		patch.actualWakeTime !== undefined ||
+		patch.sleepQuality !== undefined ||
+		patch.wokeEarlyUnintended !== undefined ||
+		patch.energyScore !== undefined ||
+		patch.hobbyDone !== undefined ||
+		patch.mealsOk !== undefined ||
+		patch.sleepOnTarget !== undefined ||
+		patch.note !== undefined ||
+		patch.journalText !== undefined ||
+		patch.actualEntries !== undefined
+	);
+}
+
+export async function updateMobileCompanionPlannerCheckIn(
+	patch: MobilePlannerCheckInRequest,
 	opts: MobileCompanionOptions = {},
-): { ok: boolean; planner: MobileCompanionPlannerView } {
+): Promise<{ ok: boolean; planner: MobileCompanionPlannerView }> {
 	const resolvedPlannerFile =
 		opts.plannerFile ??
 		(opts.examPrepFile ? path.join(path.dirname(opts.examPrepFile), "planner.json") : undefined);
-	checkInPlannerHabit(patch, {
+	const plannerOpts = {
 		plannerFile: resolvedPlannerFile,
 		examPrepFile: opts.examPrepFile,
 		flashcardsFile: opts.flashcardsFile,
 		chatsDir: opts.chatsDir,
 		now: opts.now,
-	});
+	};
+	if (patch.intensity && (patch.intensity === "healthy" || patch.intensity === "balanced" || patch.intensity === "intensive")) {
+		patchPlannerConfig({ intensity: patch.intensity }, plannerOpts);
+	}
+	const { intensity: _intensity, evaluateJournal, taskNote, ...habitPatch } = patch;
+	const cleanedTaskNote = typeof taskNote === "string" ? taskNote.trim().slice(0, 240) : "";
+	if (cleanedTaskNote && habitPatch.journalText === undefined && !evaluateJournal) {
+		const before = readPlannerSnapshot(plannerOpts);
+		const targetDate = habitPatch.date ?? before.plan.date;
+		const existingJournal = (before.config.logs[targetDate]?.journalText ?? "").trim();
+		const prefix = habitPatch.addStudyMin?.subject
+			? `[+${Math.max(1, Math.round(habitPatch.addStudyMin.minutes || 15))}m ${habitPatch.addStudyMin.subject}] `
+			: "";
+		const line = `${prefix}${cleanedTaskNote}`;
+		habitPatch.journalText = existingJournal ? `${existingJournal}\n${line}` : line;
+	}
+	if (evaluateJournal) {
+		if (hasDirectHabitPatchFields({ ...habitPatch, journalText: undefined })) {
+			const { journalText: _jt, ...habitWithoutJournal } = habitPatch;
+			checkInPlannerHabit(habitWithoutJournal, plannerOpts);
+		}
+		await evaluateDailyJournalServer({
+			...plannerOpts,
+			date: habitPatch.date,
+			journalText: habitPatch.journalText,
+			manualEntries: habitPatch.actualEntries,
+			mode: "local",
+		});
+		emit("planner-changed", {});
+	} else if (hasDirectHabitPatchFields(habitPatch)) {
+		checkInPlannerHabit(habitPatch, plannerOpts);
+	}
 	return { ok: true, planner: buildMobileCompanionPlannerView(opts) };
 }
 

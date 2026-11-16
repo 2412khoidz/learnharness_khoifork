@@ -119,9 +119,13 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   .brand { font-family: var(--font-serif); font-size: 20px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.15; margin: 0; color: var(--fg); }
   .brand-sub { font-family: var(--font-mono); font-size: 10px; color: var(--muted); margin-top: 2px; letter-spacing: 0.03em; text-transform: uppercase; }
   .status-pill { font-family: var(--font-mono); font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); white-space: nowrap; }
-  .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 10px 12px; background: var(--card); border-bottom: 1px solid var(--border); }
-  .tab-btn { border: 1px solid transparent; background: transparent; color: var(--muted); border-radius: 9px; padding: 8px 6px; font-size: 12px; font-weight: 600; cursor: pointer; text-align: center; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+  .tabs { display: flex; gap: 4px; padding: 8px 10px; background: var(--card); border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab-btn { flex: 1 0 auto; border: 1px solid transparent; background: transparent; color: var(--muted); border-radius: 9px; padding: 7px 7px; font-size: 11.5px; font-weight: 600; cursor: pointer; text-align: center; white-space: nowrap; transition: background 0.15s, color 0.15s, border-color 0.15s; }
   .tab-btn.active { background: var(--bg); color: var(--fg); border-color: var(--border); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
+  .field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .chk-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); width: 100%; text-align: left; color: var(--fg); font-size: 12px; cursor: pointer; }
+  .chk-row.done { opacity: 0.6; }
   .panel { display: none; padding: 14px 14px 16px; min-width: 0; overflow-x: hidden; }
   .panel.active { display: block; }
   p { margin: 0 0 12px; font-size: 13px; line-height: 1.5; }
@@ -217,6 +221,8 @@ export function buildMobileHtml(uploadEndpoint: string): string {
     <nav class="tabs" role="tablist">
       <button type="button" class="tab-btn active" id="tab-photo">Photo</button>
       <button type="button" class="tab-btn" id="tab-cards">Cards <span id="tab-cards-count"></span></button>
+      <button type="button" class="tab-btn" id="tab-plan">Plan</button>
+      <button type="button" class="tab-btn" id="tab-log">Log</button>
       <button type="button" class="tab-btn" id="tab-exam">Exam &amp; Chat</button>
     </nav>
 
@@ -271,36 +277,125 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       </div>
     </section>
 
+    <section class="panel" id="panel-plan">
+      <div id="plan-error" class="hidden"></div>
+      <div class="subcard" id="planner-mobile-card">
+        <div class="row-between">
+          <span class="serif" style="font-size:16px;font-weight:700">Today&apos;s Study Plan</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="status-pill" id="planner-target-pill">--h min</span>
+            <button type="button" class="btn btn-sm btn-ghost" id="plan-refresh">Refresh</button>
+          </div>
+        </div>
+        <div id="planner-sleep-line" class="muted mono" style="font-size:11px;margin:6px 0 8px"></div>
+        <div class="muted mono" style="font-size:10px;text-transform:uppercase;margin-bottom:4px">Study Intensity</div>
+        <div class="seg-grid seg-grid-3" id="mob-intensity-strip">
+          <button type="button" class="pill-btn" data-intensity="healthy">Healthy</button>
+          <button type="button" class="pill-btn" data-intensity="balanced">Balanced</button>
+          <button type="button" class="pill-btn" data-intensity="intensive">Intensive</button>
+        </div>
+        <div id="planner-milestones" class="scope-strip" style="margin-top:4px"></div>
+      </div>
+
+      <div class="subcard" id="planner-quotas-card">
+        <div class="row-between" style="margin-bottom:8px">
+          <span class="serif" style="font-size:15px;font-weight:700">Subject Quotas &amp; Checklists</span>
+          <span class="muted mono" id="planner-quotas-summary" style="font-size:11px"></span>
+        </div>
+        <div id="planner-quotas-list" class="list" style="margin-top:0"></div>
+      </div>
+
+      <div class="subcard" id="planner-blocks-card">
+        <div class="row-between" style="margin-bottom:6px">
+          <span class="serif" style="font-size:15px;font-weight:700">Time-Blocked Schedule</span>
+          <span class="muted mono" style="font-size:10px">Tap block ✓</span>
+        </div>
+        <div id="planner-blocks" class="list" style="margin-top:4px"></div>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-log">
+      <div id="log-error" class="hidden"></div>
+      <div id="log-saved-pill" class="pulse hidden">Saved</div>
+
+      <div class="subcard">
+        <div class="row-between" style="margin-bottom:6px">
+          <span class="serif" style="font-size:16px;font-weight:700">Sleep &amp; Energy</span>
+          <button type="button" class="btn btn-sm btn-ghost" id="log-refresh">Refresh</button>
+        </div>
+        <div id="log-sleep-hint" class="muted mono" style="font-size:11px;margin-bottom:8px"></div>
+        <div class="field-row" style="margin-bottom:8px">
+          <label style="display:block;font-size:11px;color:var(--muted)">
+            <span class="mono">Slept at</span>
+            <input type="time" class="field" id="mob-bedtime" style="margin-top:3px;padding:6px 8px">
+          </label>
+          <label style="display:block;font-size:11px;color:var(--muted)">
+            <span class="mono">Woke at</span>
+            <input type="time" class="field" id="mob-waketime" style="margin-top:3px;padding:6px 8px">
+          </label>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <button type="button" class="pill-btn" id="mob-sleep-ok" style="border:1px solid var(--border)">Sleep on Target</button>
+          <button type="button" class="pill-btn" id="mob-woke-early" style="border:1px solid var(--border)">Woke Early (4-5 AM)</button>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:6px" id="mob-energy-strip">
+          <span class="muted mono" style="font-size:11px;margin-right:2px">Energy:</span>
+          <button type="button" class="pill-btn" data-energy="1" style="border:1px solid var(--border);padding:3px 8px">1</button>
+          <button type="button" class="pill-btn" data-energy="2" style="border:1px solid var(--border);padding:3px 8px">2</button>
+          <button type="button" class="pill-btn" data-energy="3" style="border:1px solid var(--border);padding:3px 8px">3</button>
+          <button type="button" class="pill-btn" data-energy="4" style="border:1px solid var(--border);padding:3px 8px">4</button>
+          <button type="button" class="pill-btn" data-energy="5" style="border:1px solid var(--border);padding:3px 8px">5</button>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap" id="mob-sleep-quality-strip">
+          <span class="muted mono" style="font-size:11px;margin-right:2px">Sleep Q:</span>
+          <button type="button" class="pill-btn" data-sleepq="1" style="border:1px solid var(--border);padding:3px 8px">1</button>
+          <button type="button" class="pill-btn" data-sleepq="2" style="border:1px solid var(--border);padding:3px 8px">2</button>
+          <button type="button" class="pill-btn" data-sleepq="3" style="border:1px solid var(--border);padding:3px 8px">3</button>
+          <button type="button" class="pill-btn" data-sleepq="4" style="border:1px solid var(--border);padding:3px 8px">4</button>
+          <button type="button" class="pill-btn" data-sleepq="5" style="border:1px solid var(--border);padding:3px 8px">5</button>
+        </div>
+      </div>
+
+      <div class="subcard">
+        <div class="serif" style="font-size:15px;font-weight:700;margin-bottom:4px">Meals, Hobbies &amp; Daily Note</div>
+        <div id="mob-meals-summary" class="muted mono" style="font-size:11px;margin-bottom:8px"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <button type="button" class="pill-btn" id="mob-meals-ok" style="border:1px solid var(--border)">Meals OK</button>
+          <button type="button" class="pill-btn" id="mob-hobby-ok" style="border:1px solid var(--border)">Hobby Done</button>
+        </div>
+        <div style="display:flex;gap:6px">
+          <input type="text" class="field" id="mob-daily-note" placeholder="Quick habit note (e.g. skipped dinner, tired)..." />
+          <button type="button" class="btn btn-sm" id="mob-note-save" style="flex-shrink:0">Save</button>
+        </div>
+      </div>
+
+      <div class="subcard">
+        <div class="serif" style="font-size:15px;font-weight:700;margin-bottom:6px">Log Completed Task / Study Bout</div>
+        <div class="field-row" style="margin-bottom:8px">
+          <select class="field" id="mob-task-subject"></select>
+          <input type="number" class="field" id="mob-task-min" min="1" max="600" value="30" placeholder="Minutes" />
+        </div>
+        <div style="display:flex;gap:6px">
+          <input type="text" class="field" id="mob-task-title" placeholder="Task finished (e.g. Solved 3 eigenvalue problems)..." />
+          <button type="button" class="btn btn-primary btn-sm" id="mob-task-log-btn" style="flex-shrink:0">+ Log</button>
+        </div>
+      </div>
+
+      <div class="subcard">
+        <div class="row-between" style="margin-bottom:6px">
+          <span class="serif" style="font-size:15px;font-weight:700">24h Reality Journal</span>
+          <span class="muted mono" style="font-size:10px">Calibrates realism</span>
+        </div>
+        <textarea class="field" id="mob-journal-text" rows="4" placeholder="Example: 08:00-09:15 Solved LP Ex 1-4; 12:00-13:00 Lunch; 14:30-16:00 Review Cauchy..."></textarea>
+        <button type="button" class="btn btn-primary btn-block" id="mob-journal-audit-btn" style="margin-top:8px">Save &amp; Score 24h Log (0 tokens)</button>
+        <div id="mob-compliance-box" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)"></div>
+      </div>
+    </section>
+
     <section class="panel" id="panel-exam">
       <div id="companion-error" class="hidden"></div>
 
       <div id="exam-home">
-        <div class="subcard" id="planner-mobile-card">
-          <div class="row-between">
-            <span class="serif" style="font-size:16px;font-weight:700">Today&apos;s Study Plan</span>
-            <span class="status-pill" id="planner-target-pill">--h min</span>
-          </div>
-          <div id="planner-sleep-line" class="muted mono" style="font-size:11px;margin:5px 0 8px"></div>
-          <div id="planner-milestones" class="scope-strip" style="margin-top:0;margin-bottom:8px"></div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
-            <button type="button" class="pill-btn" id="mob-meals-ok" style="border:1px solid var(--border)">Meals OK</button>
-            <button type="button" class="pill-btn" id="mob-hobby-ok" style="border:1px solid var(--border)">Hobby Done</button>
-            <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)">
-              <span>Slept</span>
-              <input type="time" id="mob-bedtime" style="border:1px solid var(--border);background:var(--bg);color:var(--ink);border-radius:8px;padding:3px 6px;font-size:11px">
-            </label>
-          </div>
-          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:8px" id="mob-energy-strip">
-            <span class="muted mono" style="font-size:11px;margin-right:2px">Energy:</span>
-            <button type="button" class="pill-btn" data-energy="1" style="border:1px solid var(--border);padding:3px 8px">1</button>
-            <button type="button" class="pill-btn" data-energy="2" style="border:1px solid var(--border);padding:3px 8px">2</button>
-            <button type="button" class="pill-btn" data-energy="3" style="border:1px solid var(--border);padding:3px 8px">3</button>
-            <button type="button" class="pill-btn" data-energy="4" style="border:1px solid var(--border);padding:3px 8px">4</button>
-            <button type="button" class="pill-btn" data-energy="5" style="border:1px solid var(--border);padding:3px 8px">5</button>
-          </div>
-          <div id="planner-blocks" class="list" style="margin-top:4px"></div>
-        </div>
-
         <div class="subcard">
           <div class="row-between">
             <span class="serif" style="font-size:16px;font-weight:700" id="exam-title-heading">Study Focus</span>
@@ -597,7 +692,7 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   }
 
   function activateTab(name) {
-    ["photo", "cards", "exam"].forEach(function (t) {
+    ["photo", "cards", "plan", "log", "exam"].forEach(function (t) {
       byId("tab-" + t).classList.toggle("active", t === name);
       byId("panel-" + t).classList.toggle("active", t === name);
     });
@@ -607,6 +702,8 @@ export function buildMobileHtml(uploadEndpoint: string): string {
 
   byId("tab-photo").addEventListener("click", function () { activateTab("photo"); });
   byId("tab-cards").addEventListener("click", function () { activateTab("cards"); });
+  byId("tab-plan").addEventListener("click", function () { activateTab("plan"); });
+  byId("tab-log").addEventListener("click", function () { activateTab("log"); });
   byId("tab-exam").addEventListener("click", function () { activateTab("exam"); });
 
   function renderHeaderBadge() {
@@ -762,6 +859,8 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   function loadCompanionState() {
     showErrorBox("companion-error", "", loadCompanionState);
     showErrorBox("cards-error", "", loadCompanionState);
+    showErrorBox("plan-error", "", loadCompanionState);
+    showErrorBox("log-error", "", loadCompanionState);
     return fetchJson(COMPANION_URL, {}, 12000)
       .then(function (data) {
         state.dueCards = data.dueCards || [];
@@ -781,24 +880,53 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         byId("recent-sessions").innerHTML = "<div class='item err'>" + escapeHtml(msg) + "</div>";
         showErrorBox("companion-error", msg, loadCompanionState);
         showErrorBox("cards-error", msg, loadCompanionState);
+        showErrorBox("plan-error", msg, loadCompanionState);
+        showErrorBox("log-error", msg, loadCompanionState);
       });
   }
 
-  function renderMobilePlanner() {
+  var logSaveTimer = null;
+  function flashLogSaved(msg) {
+    var pill = byId("log-saved-pill");
+    if (!pill) return;
+    pill.textContent = msg || "Saved";
+    pill.classList.remove("hidden");
+    if (logSaveTimer) clearTimeout(logSaveTimer);
+    logSaveTimer = setTimeout(function () {
+      pill.classList.add("hidden");
+    }, 2200);
+  }
+
+  function renderMobilePlan() {
     var pl = state.planner;
     var card = byId("planner-mobile-card");
+    var quotasCard = byId("planner-quotas-card");
+    var blocksCard = byId("planner-blocks-card");
     if (!card) return;
     if (!pl) {
       card.classList.add("hidden");
+      if (quotasCard) quotasCard.classList.add("hidden");
+      if (blocksCard) blocksCard.classList.add("hidden");
       return;
     }
     card.classList.remove("hidden");
+    if (quotasCard) quotasCard.classList.remove("hidden");
+    if (blocksCard) blocksCard.classList.remove("hidden");
+
     byId("planner-target-pill").textContent = (pl.minDailyStudyHours || 0) + "h min · " + (pl.plannedStudyHours || 0) + "h";
-    byId("planner-sleep-line").textContent = "Sleep target: " + (pl.recommendedBedtime || "--:--") + (pl.sleepShiftAdvice ? " · " + pl.sleepShiftAdvice : "");
+    byId("planner-sleep-line").textContent =
+      "Wake " + (pl.todayWakeTime || "--:--") +
+      " · Bed " + (pl.recommendedBedtime || "--:--") +
+      (typeof pl.freeHoursTotal === "number" ? (" · Free " + pl.freeHoursTotal + "h") : "") +
+      (pl.sleepShiftAdvice ? " · " + pl.sleepShiftAdvice : "");
+
+    Array.prototype.slice.call(document.querySelectorAll("#mob-intensity-strip [data-intensity]")).forEach(function (btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-intensity") === pl.intensity);
+    });
 
     var msEl = byId("planner-milestones");
     msEl.innerHTML = "";
-    (pl.upcomingMilestones || []).slice(0, 4).forEach(function (m) {
+    (pl.upcomingMilestones || []).slice(0, 6).forEach(function (m) {
       var chip = document.createElement("span");
       chip.className = "scope-chip";
       chip.textContent = m.title + " (" + (m.daysLeft >= 0 ? "D-" + m.daysLeft : "+" + Math.abs(m.daysLeft) + "d") + ")";
@@ -807,32 +935,111 @@ export function buildMobileHtml(uploadEndpoint: string): string {
 
     var log = pl.todayLog || {};
     var doneIds = log.completedBlockIds || [];
-    var mealsBtn = byId("mob-meals-ok");
-    var hobbyBtn = byId("mob-hobby-ok");
-    mealsBtn.classList.toggle("active", Boolean(log.mealsOk));
-    mealsBtn.textContent = log.mealsOk ? "Meals OK ✓" : "Meals OK";
-    hobbyBtn.classList.toggle("active", Boolean(log.hobbyDone));
-    hobbyBtn.textContent = log.hobbyDone ? "Hobby ✓" : "Hobby Done";
-    var bedInput = byId("mob-bedtime");
-    if (bedInput) {
-      bedInput.value = log.actualBedtime || pl.recommendedBedtime || "";
+    var doneChecklistIds = log.completedChecklistIds || [];
+    var loggedBySubject = log.loggedStudyMinBySubject || {};
+
+    var quotasEl = byId("planner-quotas-list");
+    var quotasSummary = byId("planner-quotas-summary");
+    if (quotasEl) {
+      quotasEl.innerHTML = "";
+      var quotas = pl.quotas || [];
+      var totalTarget = 0;
+      var totalLogged = 0;
+      quotas.forEach(function (q) {
+        totalTarget += (q.targetMin || 0);
+        totalLogged += (loggedBySubject[q.subject] || 0);
+      });
+      if (quotasSummary) {
+        quotasSummary.textContent = totalLogged + "m / " + totalTarget + "m";
+      }
+      if (!quotas.length) {
+        quotasEl.innerHTML = "<div class='item muted'>No active subject quotas today.</div>";
+      } else {
+        quotas.forEach(function (q) {
+          var logged = loggedBySubject[q.subject] || 0;
+          var pct = q.targetMin > 0 ? Math.min(100, Math.round((logged / q.targetMin) * 100)) : 0;
+          var wrap = document.createElement("div");
+          wrap.className = "item";
+
+          var head = document.createElement("div");
+          head.className = "row-between";
+          head.innerHTML =
+            "<strong style='font-size:13px'>" + escapeHtml(q.subject) + "</strong>" +
+            "<span class='mono " + (logged >= q.targetMin ? "ok" : "muted") + "' style='font-size:11px'>" + logged + "m / " + q.targetMin + "m (" + pct + "%)</span>";
+          wrap.appendChild(head);
+
+          if (q.weaknessSummary) {
+            var weak = document.createElement("div");
+            weak.className = "muted";
+            weak.style.cssText = "font-size:11px;margin-top:3px";
+            weak.textContent = q.weaknessSummary;
+            wrap.appendChild(weak);
+          }
+
+          var meter = document.createElement("div");
+          meter.className = "meter";
+          meter.style.margin = "6px 0";
+          meter.innerHTML = "<div class='meter-fill' style='width:" + pct + "%'></div>";
+          wrap.appendChild(meter);
+
+          var btnRow = document.createElement("div");
+          btnRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px";
+          [15, 30].forEach(function (mins) {
+            var addBtn = document.createElement("button");
+            addBtn.type = "button";
+            addBtn.className = "btn btn-sm";
+            addBtn.textContent = "+" + mins + "m";
+            addBtn.addEventListener("click", function () {
+              checkInMobilePlanner({ date: pl.date, addStudyMin: { subject: q.subject, minutes: mins, milestoneId: q.milestoneId } }, "+" + mins + "m logged");
+            });
+            btnRow.appendChild(addBtn);
+          });
+          wrap.appendChild(btnRow);
+
+          var items = q.checklist || [];
+          if (items.length) {
+            var chkList = document.createElement("div");
+            chkList.style.cssText = "display:grid;gap:5px";
+            items.forEach(function (item) {
+              var isChecked = doneChecklistIds.indexOf(item.id) >= 0;
+              var chkBtn = document.createElement("button");
+              chkBtn.type = "button";
+              chkBtn.className = "chk-row" + (isChecked ? " done" : "");
+              chkBtn.innerHTML =
+                "<span class='mono' style='font-size:12px;flex-shrink:0'>" + (isChecked ? "☑" : "☐") + "</span>" +
+                "<span class='rich' style='min-width:0;flex:1'>" + renderRichMath(item.text || "") + "</span>";
+              chkBtn.addEventListener("click", function () {
+                checkInMobilePlanner({ date: pl.date, toggleChecklistId: item.id });
+              });
+              chkList.appendChild(chkBtn);
+            });
+            wrap.appendChild(chkList);
+          }
+          quotasEl.appendChild(wrap);
+        });
+      }
     }
-    Array.prototype.slice.call(document.querySelectorAll("#mob-energy-strip [data-energy]")).forEach(function (btn) {
-      var val = Number(btn.getAttribute("data-energy"));
-      btn.classList.toggle("active", Number(log.energyScore) === val);
-    });
 
     var blocksEl = byId("planner-blocks");
     blocksEl.innerHTML = "";
-    var shown = (pl.blocks || []).filter(function (b) {
-      return b.type === "study" || b.type === "hobby" || b.type === "sleep";
-    }).slice(0, 8);
+    var shown = (pl.blocks || []).slice(0, 16);
     if (!shown.length) {
-      blocksEl.innerHTML = "<div class='item muted'>No scheduled study blocks yet.</div>";
+      blocksEl.innerHTML = "<div class='item muted'>No scheduled blocks today.</div>";
       return;
     }
     shown.forEach(function (b) {
+      var interactive = b.type === "study" || b.type === "hobby" || b.type === "sleep";
       var isDone = doneIds.indexOf(b.id) >= 0;
+      if (!interactive) {
+        var staticRow = document.createElement("div");
+        staticRow.className = "item muted";
+        staticRow.style.padding = "8px 11px";
+        staticRow.innerHTML =
+          "<div class='row-between'><span style='font-size:12px'>" + escapeHtml(b.startTime + "–" + b.endTime + " · " + b.title) + "</span>" +
+          "<span class='mono' style='font-size:10px;text-transform:uppercase'>" + escapeHtml(b.type) + "</span></div>";
+        blocksEl.appendChild(staticRow);
+        return;
+      }
       var row = document.createElement("button");
       row.type = "button";
       row.className = "session-item";
@@ -842,13 +1049,129 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         "<span class='mono' style='font-size:11px'>" + (isDone ? "✓ Done" : "Tap ✓") + "</span></div>" +
         (b.reason ? "<div class='muted' style='font-size:11px;margin-top:2px'>" + escapeHtml(b.reason) + "</div>" : "");
       row.addEventListener("click", function () {
-        checkInMobilePlanner({ date: pl.date, toggleBlockId: b.id });
+        checkInMobilePlanner({ date: pl.date, toggleBlockId: b.id }, isDone ? "Block unchecked" : "Block ✓");
       });
       blocksEl.appendChild(row);
     });
   }
 
-  function checkInMobilePlanner(patch) {
+  function renderMobileLog() {
+    var pl = state.planner;
+    if (!pl) return;
+    var log = pl.todayLog || {};
+
+    var hintEl = byId("log-sleep-hint");
+    if (hintEl) {
+      hintEl.textContent = "Target: bed " + (pl.recommendedBedtime || "--:--") + " · wake " + (pl.todayWakeTime || "--:--") + " · Realism " + Math.round((pl.realismFactor || 1) * 100) + "%";
+    }
+    var bedInput = byId("mob-bedtime");
+    if (bedInput && document.activeElement !== bedInput) {
+      bedInput.value = log.actualBedtime || pl.recommendedBedtime || "";
+    }
+    var wakeInput = byId("mob-waketime");
+    if (wakeInput && document.activeElement !== wakeInput) {
+      wakeInput.value = log.actualWakeTime || pl.todayWakeTime || "";
+    }
+    var sleepOkBtn = byId("mob-sleep-ok");
+    if (sleepOkBtn) {
+      sleepOkBtn.classList.toggle("active", Boolean(log.sleepOnTarget));
+      sleepOkBtn.textContent = log.sleepOnTarget ? "Sleep Target ✓" : "Sleep on Target";
+    }
+    var wokeEarlyBtn = byId("mob-woke-early");
+    if (wokeEarlyBtn) {
+      wokeEarlyBtn.classList.toggle("active", Boolean(log.wokeEarlyUnintended));
+      wokeEarlyBtn.textContent = log.wokeEarlyUnintended ? "Woke Early (4-5 AM) ✓" : "Woke Early (4-5 AM)";
+    }
+    Array.prototype.slice.call(document.querySelectorAll("#mob-energy-strip [data-energy]")).forEach(function (btn) {
+      var val = Number(btn.getAttribute("data-energy"));
+      btn.classList.toggle("active", Number(log.energyScore) === val);
+    });
+    Array.prototype.slice.call(document.querySelectorAll("#mob-sleep-quality-strip [data-sleepq]")).forEach(function (btn) {
+      var val = Number(btn.getAttribute("data-sleepq"));
+      btn.classList.toggle("active", Number(log.sleepQuality) === val);
+    });
+
+    var mealsBtn = byId("mob-meals-ok");
+    if (mealsBtn) {
+      mealsBtn.classList.toggle("active", Boolean(log.mealsOk));
+      mealsBtn.textContent = log.mealsOk ? "Meals OK ✓" : "Meals OK";
+    }
+    var hobbyBtn = byId("mob-hobby-ok");
+    if (hobbyBtn) {
+      hobbyBtn.classList.toggle("active", Boolean(log.hobbyDone));
+      hobbyBtn.textContent = log.hobbyDone ? "Hobby ✓" : "Hobby Done";
+    }
+    var mealsSummaryEl = byId("mob-meals-summary");
+    if (mealsSummaryEl) {
+      var mealParts = (pl.meals || []).map(function (m) { return m.label + " " + m.startTime; });
+      var hobbyText = (pl.hobbies && pl.hobbies.length) ? (" · Hobbies: " + pl.hobbies.join(", ")) : "";
+      mealsSummaryEl.textContent = (mealParts.length ? mealParts.join(" · ") : "Meals configured on desktop") + hobbyText;
+    }
+
+    var noteEl = byId("mob-daily-note");
+    if (noteEl && document.activeElement !== noteEl) {
+      noteEl.value = log.note || "";
+    }
+
+    var subjSelect = byId("mob-task-subject");
+    if (subjSelect) {
+      var prevSubj = subjSelect.value;
+      var subjects = [];
+      (pl.quotas || []).forEach(function (q) {
+        if (q.subject && subjects.indexOf(q.subject) < 0) subjects.push(q.subject);
+      });
+      if (state.examPrep && state.examPrep.scopes) {
+        state.examPrep.scopes.forEach(function (sc) {
+          if (sc.label && subjects.indexOf(sc.label) < 0) subjects.push(sc.label);
+        });
+      }
+      if (!subjects.length) subjects.push("General Study");
+      else if (subjects.indexOf("General Study") < 0) subjects.push("General Study");
+      subjSelect.innerHTML = "";
+      subjects.forEach(function (s) {
+        var opt = document.createElement("option");
+        opt.value = s;
+        opt.textContent = s;
+        subjSelect.appendChild(opt);
+      });
+      if (prevSubj && subjects.indexOf(prevSubj) >= 0) {
+        subjSelect.value = prevSubj;
+      }
+    }
+
+    var journalEl = byId("mob-journal-text");
+    if (journalEl && document.activeElement !== journalEl) {
+      journalEl.value = log.journalText || "";
+    }
+
+    var compBox = byId("mob-compliance-box");
+    if (compBox) {
+      var comp = log.compliance;
+      if (!comp) {
+        compBox.classList.add("hidden");
+        compBox.innerHTML = "";
+      } else {
+        compBox.classList.remove("hidden");
+        var cls = comp.adherencePct >= 75 ? "ok" : (comp.adherencePct >= 45 ? "warn" : "err");
+        compBox.innerHTML =
+          "<div class='row-between' style='margin-bottom:4px'>" +
+            "<strong style='font-size:13px'>Adherence Score: <span class='" + cls + "'>" + comp.adherencePct + "%</span></strong>" +
+            "<span class='mono muted' style='font-size:11px'>" + comp.actualStudyMin + "m / " + comp.plannedStudyMin + "m</span>" +
+          "</div>" +
+          "<div class='rich' style='font-size:12px;margin-bottom:4px'>" + renderRichMath(comp.summary || "") + "</div>" +
+          (comp.nextDayAdvice ? "<div class='muted' style='font-size:11px'><strong>Next:</strong> " + escapeHtml(comp.nextDayAdvice) + "</div>" : "");
+      }
+    }
+  }
+
+  function renderMobilePlanner() {
+    renderMobilePlan();
+    renderMobileLog();
+  }
+
+  function checkInMobilePlanner(patch, toastMsg) {
+    showErrorBox("plan-error", "", function () { checkInMobilePlanner(patch, toastMsg); });
+    showErrorBox("log-error", "", function () { checkInMobilePlanner(patch, toastMsg); });
     return fetchJson(COMPANION_URL + "/planner-checkin", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -858,10 +1181,13 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         if (res && res.planner) {
           state.planner = res.planner;
           renderMobilePlanner();
+          if (toastMsg) flashLogSaved(toastMsg);
         }
       })
       .catch(function (err) {
-        showErrorBox("companion-error", "Habit check-in failed: " + err.message, function () { checkInMobilePlanner(patch); });
+        var msg = "Check-in failed: " + (err && err.message ? err.message : "offline");
+        showErrorBox("plan-error", msg, function () { checkInMobilePlanner(patch, toastMsg); });
+        showErrorBox("log-error", msg, function () { checkInMobilePlanner(patch, toastMsg); });
       });
   }
 
@@ -1220,23 +1546,58 @@ export function buildMobileHtml(uploadEndpoint: string): string {
   });
 
   byId("cards-refresh").addEventListener("click", loadCompanionState);
+  byId("plan-refresh").addEventListener("click", loadCompanionState);
+  byId("log-refresh").addEventListener("click", loadCompanionState);
   byId("exam-refresh").addEventListener("click", loadCompanionState);
+
+  Array.prototype.slice.call(document.querySelectorAll("#mob-intensity-strip [data-intensity]")).forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var pl = state.planner;
+      var mode = btn.getAttribute("data-intensity");
+      if (!pl || !mode) return;
+      checkInMobilePlanner({ date: pl.date, intensity: mode }, "Mode: " + mode);
+    });
+  });
+
   byId("mob-meals-ok").addEventListener("click", function () {
     var pl = state.planner;
     if (!pl) return;
-    checkInMobilePlanner({ date: pl.date, mealsOk: !(pl.todayLog && pl.todayLog.mealsOk) });
+    var nextVal = !(pl.todayLog && pl.todayLog.mealsOk);
+    checkInMobilePlanner({ date: pl.date, mealsOk: nextVal }, nextVal ? "Meals OK ✓" : "Meals unchecked");
   });
   byId("mob-hobby-ok").addEventListener("click", function () {
     var pl = state.planner;
     if (!pl) return;
-    checkInMobilePlanner({ date: pl.date, hobbyDone: !(pl.todayLog && pl.todayLog.hobbyDone) });
+    var nextVal = !(pl.todayLog && pl.todayLog.hobbyDone);
+    checkInMobilePlanner({ date: pl.date, hobbyDone: nextVal }, nextVal ? "Hobby ✓" : "Hobby unchecked");
   });
+  byId("mob-sleep-ok").addEventListener("click", function () {
+    var pl = state.planner;
+    if (!pl) return;
+    var nextVal = !(pl.todayLog && pl.todayLog.sleepOnTarget);
+    checkInMobilePlanner({ date: pl.date, sleepOnTarget: nextVal }, nextVal ? "Sleep on target ✓" : "Updated");
+  });
+  byId("mob-woke-early").addEventListener("click", function () {
+    var pl = state.planner;
+    if (!pl) return;
+    var nextVal = !(pl.todayLog && pl.todayLog.wokeEarlyUnintended);
+    checkInMobilePlanner({ date: pl.date, wokeEarlyUnintended: nextVal }, "Wake flag saved");
+  });
+
   var mobBedtime = byId("mob-bedtime");
   if (mobBedtime) {
     mobBedtime.addEventListener("change", function () {
       var pl = state.planner;
       if (!pl || !mobBedtime.value) return;
-      checkInMobilePlanner({ date: pl.date, actualBedtime: mobBedtime.value });
+      checkInMobilePlanner({ date: pl.date, actualBedtime: mobBedtime.value }, "Bedtime saved");
+    });
+  }
+  var mobWaketime = byId("mob-waketime");
+  if (mobWaketime) {
+    mobWaketime.addEventListener("change", function () {
+      var pl = state.planner;
+      if (!pl || !mobWaketime.value) return;
+      checkInMobilePlanner({ date: pl.date, actualWakeTime: mobWaketime.value }, "Wake time saved");
     });
   }
   Array.prototype.slice.call(document.querySelectorAll("#mob-energy-strip [data-energy]")).forEach(function (btn) {
@@ -1244,7 +1605,54 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       var pl = state.planner;
       var score = Number(btn.getAttribute("data-energy"));
       if (!pl || !score) return;
-      checkInMobilePlanner({ date: pl.date, energyScore: score });
+      checkInMobilePlanner({ date: pl.date, energyScore: score }, "Energy " + score + "/5");
+    });
+  });
+  Array.prototype.slice.call(document.querySelectorAll("#mob-sleep-quality-strip [data-sleepq]")).forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var pl = state.planner;
+      var q = Number(btn.getAttribute("data-sleepq"));
+      if (!pl || !q) return;
+      checkInMobilePlanner({ date: pl.date, sleepQuality: q }, "Sleep quality " + q + "/5");
+    });
+  });
+  byId("mob-note-save").addEventListener("click", function () {
+    var pl = state.planner;
+    var noteEl = byId("mob-daily-note");
+    if (!pl || !noteEl) return;
+    checkInMobilePlanner({ date: pl.date, note: noteEl.value.trim() }, "Daily note saved");
+  });
+  byId("mob-task-log-btn").addEventListener("click", function () {
+    var pl = state.planner;
+    var subjEl = byId("mob-task-subject");
+    var minEl = byId("mob-task-min");
+    var titleEl = byId("mob-task-title");
+    if (!pl || !subjEl || !minEl) return;
+    var subj = (subjEl.value || "General Study").trim();
+    var mins = Math.max(1, Math.min(600, Math.round(Number(minEl.value) || 30)));
+    var taskNote = titleEl ? titleEl.value.trim() : "";
+    checkInMobilePlanner({
+      date: pl.date,
+      addStudyMin: { subject: subj, minutes: mins },
+      taskNote: taskNote || undefined
+    }, "+" + mins + "m " + subj).then(function () {
+      if (titleEl) titleEl.value = "";
+    });
+  });
+  byId("mob-journal-audit-btn").addEventListener("click", function () {
+    var pl = state.planner;
+    var journalEl = byId("mob-journal-text");
+    if (!pl || !journalEl) return;
+    var btn = byId("mob-journal-audit-btn");
+    btn.disabled = true;
+    btn.textContent = "Scoring...";
+    checkInMobilePlanner({
+      date: pl.date,
+      journalText: journalEl.value.trim(),
+      evaluateJournal: true
+    }, "24h Log scored").finally(function () {
+      btn.disabled = false;
+      btn.textContent = "Save & Score 24h Log (0 tokens)";
     });
   });
 

@@ -657,15 +657,86 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 			assert.equal(body.planner.todayLog.mealsOk, true);
 			assert.equal(body.planner.todayLog.actualBedtime, "01:45");
 			assert.equal(body.planner.todayLog.energyScore, 4);
+
+			// Second check-in: task log append + wake time + early wake + intensity switch + 24h journal audit
+			const taskRes = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}/companion/planner-checkin`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					date: state.planner.date,
+					actualWakeTime: "07:10",
+					wokeEarlyUnintended: true,
+					intensity: "intensive",
+					addStudyMin: { subject: "Competitive Programming", minutes: 30 },
+					taskNote: "Solved 2 bitmask DP problems",
+				}),
+			});
+			assert.equal(taskRes.status, 200);
+			const taskBody = (await taskRes.json()) as {
+				ok: boolean;
+				planner: {
+					intensity: string;
+					todayLog: {
+						actualWakeTime?: string;
+						wokeEarlyUnintended?: boolean;
+						journalText?: string;
+						loggedStudyMinBySubject: Record<string, number>;
+					};
+				};
+			};
+			assert.equal(taskBody.ok, true);
+			assert.equal(taskBody.planner.intensity, "intensive");
+			assert.equal(taskBody.planner.todayLog.actualWakeTime, "07:10");
+			assert.equal(taskBody.planner.todayLog.wokeEarlyUnintended, true);
+			assert.ok((taskBody.planner.todayLog.loggedStudyMinBySubject["Competitive Programming"] ?? 0) >= 30);
+			assert.ok(taskBody.planner.todayLog.journalText?.includes("Solved 2 bitmask DP problems"));
+
+			const auditRes = await fetch(`http://127.0.0.1:${session.port}/p/${session.token}/companion/planner-checkin`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					date: state.planner.date,
+					journalText: "08:00-09:00 Competitive Programming: Solved DP + Graph problems\n12:00-12:45 Lunch",
+					evaluateJournal: true,
+				}),
+			});
+			assert.equal(auditRes.status, 200);
+			const auditBody = (await auditRes.json()) as {
+				ok: boolean;
+				planner: { todayLog: { compliance?: { adherencePct: number; actualStudyMin: number } } };
+			};
+			assert.equal(auditBody.ok, true);
+			assert.equal(typeof auditBody.planner.todayLog.compliance?.adherencePct, "number");
 		} finally {
 			await closePhoneUploadSession();
 		}
 
-		// Verify mobile UI still parses cleanly as valid ES5 JS, exposes bedtime & energy controls, and has zero literal https://
+		// Verify mobile UI separates Plan, Log, and Exam & Chat tabs, parses cleanly as ES5 JS, and has zero literal https://
 		const html = buildMobileHtml("http://127.0.0.1:4321/p/tok/upload");
 		assert.equal(html.includes("https://"), false);
-		assert.ok(html.includes('id="mob-bedtime"'));
-		assert.ok(html.includes('id="mob-energy-strip"'));
+		for (const id of [
+			"tab-photo",
+			"tab-cards",
+			"tab-plan",
+			"tab-log",
+			"tab-exam",
+			"panel-plan",
+			"panel-log",
+			"planner-quotas-list",
+			"mob-intensity-strip",
+			"mob-bedtime",
+			"mob-waketime",
+			"mob-woke-early",
+			"mob-energy-strip",
+			"mob-task-log-btn",
+			"mob-journal-audit-btn",
+		]) {
+			assert.ok(html.includes(`id="${id}"`), `Missing mobile element #${id}`);
+		}
+		assert.ok(html.indexOf('id="planner-mobile-card"') > html.indexOf('id="panel-plan"'));
+		assert.ok(html.indexOf('id="planner-mobile-card"') < html.indexOf('id="panel-log"'));
+		assert.ok(html.indexOf('id="mob-journal-audit-btn"') > html.indexOf('id="panel-log"'));
+		assert.ok(html.indexOf('id="mob-journal-audit-btn"') < html.indexOf('id="panel-exam"'));
 		const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(html);
 		assert.ok(scriptMatch?.[1]);
 		assert.doesNotThrow(() => new vm.Script(scriptMatch![1]!));
