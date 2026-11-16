@@ -277,7 +277,8 @@ export function PlannerCapacityModal({
 									{r.dataCoverage.graphNodes} Graph concepts / {r.dataCoverage.graphChains} chains
 								</span>
 								<span className="rounded border bg-background px-1.5 py-0.5">
-									{r.dataCoverage.quizConfidenceSamples} Quiz confidence / {r.dataCoverage.practiceProblems} Practice problems
+									{r.dataCoverage.quizConfidenceSamples} Quiz conf · {r.dataCoverage.practiceProblems} Practice concluded
+									{(r.dataCoverage.recallExplainCount ?? 0) > 0 ? ` · ${r.dataCoverage.recallExplainCount} Explain/Recall` : ""}
 								</span>
 								<span className="rounded border bg-background px-1.5 py-0.5">
 									{r.dataCoverage.mistakeRecords} Mistakes analyzed · {r.dataCoverage.pastChatSessions} Past sessions
@@ -345,6 +346,11 @@ export function PlannerCapacityModal({
 							{r.subjectBreakdown.length > 0 && (
 								<div>
 									<h3 className="mb-1.5 text-xs font-semibold text-foreground">Per-Subject Calibration Breakdown</h3>
+									{r.dataCoverage.trackedPropositions < 5 && r.dataCoverage.graphNodes > 10 && (
+										<p className="mb-2 text-[11px] text-muted-foreground">
+											Mẹo: Mở tab <strong>FLASHCARDS</strong> chọn các cụm/node Graph để tạo thẻ ôn tập (hiện mới có {r.dataCoverage.trackedPropositions}/{r.dataCoverage.graphNodes} khái niệm có lịch FSRS), hoặc mở Practice từ node Graph để <code>conclude</code> tự ghi điểm FSRS.
+										</p>
+									)}
 									<div className="overflow-x-auto rounded-xl border">
 										<table className="w-full text-left text-[11px]">
 											<thead className="border-b bg-muted/40 text-muted-foreground">

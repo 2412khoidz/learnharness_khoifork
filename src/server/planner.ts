@@ -192,6 +192,154 @@ const ROLE_DISPLAY_NAMES: Partial<Record<ModelRole, string>> = {
 	pdfReader: "PDF Reader",
 };
 
+const SUBJECT_MATCH_NOISE = new Set([
+	"day",
+	"luyen",
+	"tap",
+	"bai",
+	"on",
+	"thi",
+	"hoc",
+	"mon",
+	"cua",
+	"va",
+	"cho",
+	"voi",
+	"sinh",
+	"vien",
+	"olympic",
+	"viet",
+	"nam",
+	"practice",
+	"teach",
+	"study",
+	"nang",
+	"cao",
+	"co",
+]);
+
+function expandSubjectMatchAliases(norm: string): string {
+	let out = norm;
+	if (out.includes("tri tue nhan tao")) out += " ai";
+	if (/\bai\b/.test(out)) out += " tri tue nhan tao";
+	if (/\bdse\b/.test(out)) out += " lap trinh xu ly du lieu data science";
+	if (out.includes("lap trinh xu ly du lieu")) out += " dse";
+	if (/\bxstk\b/.test(out)) out += " xac suat thong ke";
+	if (out.includes("xac suat thong ke")) out += " xstk";
+	return out;
+}
+
+function tokenizeSubjectMatch(norm: string): string[] {
+	const raw = expandSubjectMatchAliases(norm)
+		.split(/\s+/)
+		.filter((t) => t.length >= 2 && !SUBJECT_MATCH_NOISE.has(t));
+	return [...new Set(raw)];
+}
+
+function extractFirstUserMessageText(chat: ChatRecord): string {
+	const msgs = Array.isArray(chat.messages) ? (chat.messages as Array<Record<string, unknown>>) : [];
+	for (const m of msgs) {
+		if (m.role !== "user") continue;
+		if (typeof m.content === "string") return m.content.slice(0, 500);
+		if (Array.isArray(m.content)) {
+			const parts = (m.content as Array<Record<string, unknown>>)
+				.filter((b) => b.type === "text" && typeof b.text === "string")
+				.map((b) => String(b.text));
+			if (parts.length > 0) return parts.join(" ").slice(0, 500);
+		}
+		break;
+	}
+	return "";
+}
+
+function matchKnownSubject(
+	title: string,
+	knownSubjects: readonly string[],
+	contextText = "",
+): string | undefined {
+	const normTitle = normalizeSubjectKey(title);
+	const normCtx = normalizeSubjectKey(contextText);
+	if (!normTitle && !normCtx) return undefined;
+
+	const expandedTitle = expandSubjectMatchAliases(normTitle);
+	const expandedCombined = expandSubjectMatchAliases(`${normTitle} ${normCtx}`.trim());
+	const combinedTokens = new Set(tokenizeSubjectMatch(`${normTitle} ${normCtx}`.trim()));
+
+	let best: string | undefined;
+	let bestScore = 0;
+
+	for (const sub of knownSubjects) {
+		const nk = normalizeSubjectKey(sub);
+		if (nk.length < 2) continue;
+		const expandedSub = expandSubjectMatchAliases(nk);
+
+		if (normTitle && (normTitle.includes(nk) || nk.includes(normTitle))) {
+			const sc = 200 + nk.length;
+			if (sc > bestScore) {
+				best = sub;
+				bestScore = sc;
+			}
+			continue;
+		}
+		if (expandedTitle && (expandedTitle.includes(nk) || expandedSub.includes(normTitle))) {
+			const sc = 160 + nk.length;
+			if (sc > bestScore) {
+				best = sub;
+				bestScore = sc;
+			}
+			continue;
+		}
+		if (normCtx && expandedCombined.includes(nk)) {
+			const sc = 140 + nk.length;
+			if (sc > bestScore) {
+				best = sub;
+				bestScore = sc;
+			}
+			continue;
+		}
+
+		const subTokens = tokenizeSubjectMatch(nk);
+		if (subTokens.length === 0) continue;
+		let matchedTokens = 0;
+		for (const tok of subTokens) {
+			if (combinedTokens.has(tok)) matchedTokens++;
+		}
+		const coverage = matchedTokens / subTokens.length;
+		const meetsThreshold =
+			(subTokens.length === 1 && matchedTokens === 1) ||
+			(matchedTokens >= 2 && coverage >= 0.55);
+		if (meetsThreshold) {
+			const sc = 60 + matchedTokens * 15 + Math.round(coverage * 20);
+			if (sc > bestScore) {
+				best = sub;
+				bestScore = sc;
+			}
+		}
+	}
+	return best;
+}
+
+function resolveProblemDurationMin(
+	concludeTs: number | null,
+	lastProblemTs: number | null,
+	firstAttemptAfterProblemTs: number | null,
+): number | null {
+	if (concludeTs === null || lastProblemTs === null || concludeTs <= lastProblemTs) return null;
+	const directDeltaMs = concludeTs - lastProblemTs;
+	if (directDeltaMs <= 180 * 60_000) {
+		const mins = Math.round(Math.min(directDeltaMs, 90 * 60_000) / 60_000);
+		return mins >= 2 ? mins : null;
+	}
+	if (firstAttemptAfterProblemTs !== null && concludeTs > firstAttemptAfterProblemTs) {
+		const activeDeltaMs = concludeTs - firstAttemptAfterProblemTs;
+		if (activeDeltaMs <= 180 * 60_000) {
+			const mins = Math.round(Math.min(activeDeltaMs, 90 * 60_000) / 60_000);
+			return mins >= 2 ? mins : null;
+		}
+	}
+	return null;
+}
+
 function computeActiveSessionStudyMinutes(chat: ChatRecord): {
 	activeMin: number;
 	solvedCount: number;
@@ -203,6 +351,7 @@ function computeActiveSessionStudyMinutes(chat: ChatRecord): {
 	let activeMs = 0;
 	let prevTs: number | null = null;
 	let lastProblemTs: number | null = null;
+	let firstAttemptTs: number | null = null;
 	let solvedCount = 0;
 	let hintsCount = 0;
 	let unsolvedCount = 0;
@@ -215,6 +364,9 @@ function computeActiveSessionStudyMinutes(chat: ChatRecord): {
 			if (delta > 0) activeMs += Math.min(delta, 25 * 60_000);
 		}
 		if (ts !== null) prevTs = ts;
+		if (m.role === "user" && lastProblemTs !== null && firstAttemptTs === null && ts !== null && ts > lastProblemTs) {
+			firstAttemptTs = ts;
+		}
 
 		const blocks = Array.isArray(m.content) ? m.content : [];
 		for (const blk of blocks as Array<Record<string, unknown>>) {
@@ -222,17 +374,19 @@ function computeActiveSessionStudyMinutes(chat: ChatRecord): {
 			const name = typeof blk.name === "string" ? blk.name : "";
 			const args = (blk.arguments && typeof blk.arguments === "object" ? blk.arguments : {}) as Record<string, unknown>;
 			if (name === "problem") {
-				if (ts !== null) lastProblemTs = ts;
+				if (ts !== null) {
+					lastProblemTs = ts;
+					firstAttemptTs = null;
+				}
 			} else if (name === "conclude") {
 				const outcome = typeof args.outcome === "string" ? args.outcome : "";
 				if (outcome === "solved") solvedCount++;
 				else if (outcome === "solvedWithHints") hintsCount++;
 				else if (outcome === "movedOn" || outcome === "surrendered") unsolvedCount++;
-				if (ts !== null && lastProblemTs !== null && ts > lastProblemTs) {
-					const durMin = Math.round(Math.min(ts - lastProblemTs, 90 * 60_000) / 60_000);
-					if (durMin >= 2) problemDurationsMin.push(durMin);
-					lastProblemTs = null;
-				}
+				const durMin = resolveProblemDurationMin(ts, lastProblemTs, firstAttemptTs);
+				if (durMin !== null) problemDurationsMin.push(durMin);
+				lastProblemTs = null;
+				firstAttemptTs = null;
 			}
 		}
 	}
@@ -339,22 +493,8 @@ function buildPlannerLearningProfile(opts: {
 	const allProblemMins: number[] = [];
 	const allTeachMins: number[] = [];
 
-	const matchSubjectForTitle = (title: string): string | undefined => {
-		const normTitle = normalizeSubjectKey(title);
-		if (!normTitle) return undefined;
-		let best: string | undefined;
-		let bestLen = 0;
-		for (const b of buckets.values()) {
-			const bk = normalizeSubjectKey(b.subject);
-			if (bk.length >= 2 && (normTitle.includes(bk) || bk.includes(normTitle)) && bk.length > bestLen) {
-				best = b.subject;
-				bestLen = bk.length;
-			}
-		}
-		return best;
-	};
-
-	for (const s of sessions.slice(0, 24)) {
+	const knownBucketSubjects = [...buckets.values()].map((b) => b.subject);
+	for (const s of sessions.slice(0, 40)) {
 		const chat = readChatSafe(s.id, chatsDir);
 		if (!chat) continue;
 		const stats = computeActiveSessionStudyMinutes(chat);
@@ -368,7 +508,11 @@ function buildPlannerLearningProfile(opts: {
 		totalProblemsConcluded += stats.solvedCount + stats.hintsCount + stats.unsolvedCount;
 		allProblemMins.push(...stats.problemDurationsMin);
 
-		const matchedSubj = matchSubjectForTitle(chat.title || s.title);
+		const matchedSubj = matchKnownSubject(
+			chat.title || s.title,
+			knownBucketSubjects,
+			extractFirstUserMessageText(chat),
+		);
 		if (matchedSubj) {
 			const b = ensureBucket(matchedSubj);
 			if (isPractice) b.practiceSessions++;
@@ -399,10 +543,12 @@ function buildPlannerLearningProfile(opts: {
 		}
 	}
 
-	const sufficientData = totalFsrsReviews >= 8 && (totalPracticeSessions + totalTeachSessions >= 2 || loggedStudyDays >= 2);
+	const sufficientData =
+		(totalFsrsReviews >= 8 || totalProblemsConcluded >= 8) &&
+		(totalPracticeSessions + totalTeachSessions >= 2 || loggedStudyDays >= 2);
 	const sufficiencyReason = sufficientData
-		? `Calibrated from ${totalFsrsReviews} FSRS reviews · ${totalPracticeSessions + totalTeachSessions} sessions · ${loggedStudyDays} logged day(s)`
-		: `Baseline only: need ≥8 FSRS reviews and ≥2 sessions or logged days (currently ${totalFsrsReviews} FSRS reviews, ${totalPracticeSessions + totalTeachSessions} sessions, ${loggedStudyDays} logged days)`;
+		? `Calibrated from ${totalFsrsReviews} FSRS reviews · ${totalProblemsConcluded} concluded problems · ${totalPracticeSessions + totalTeachSessions} sessions`
+		: `Baseline only: need ≥8 FSRS reviews or ≥8 concluded Practice problems and ≥2 sessions/days (currently ${totalFsrsReviews} FSRS, ${totalProblemsConcluded} problems, ${totalPracticeSessions + totalTeachSessions} sessions)`;
 
 	const bySubject: Record<string, SubjectLearningMetrics> = {};
 	for (const b of buckets.values()) {
@@ -422,11 +568,14 @@ function buildPlannerLearningProfile(opts: {
 				: null;
 
 		let paceFactor = 1.0;
-		if (sufficientData && (b.fsrsReviews >= 4 || totalProb >= 2)) {
+		const subjectEvidence = b.fsrsReviews + totalProb * 2;
+		if (b.fsrsReviews >= 4 || totalProb >= 2) {
+			const confScale = sufficientData ? 1 : Math.min(1, subjectEvidence / 8);
 			const diffAdjust = avgDifficulty !== null ? (avgDifficulty - 5.2) * 0.045 : 0;
 			const solveAdjust = practiceSolveRatePct !== null ? (72 - practiceSolveRatePct) * 0.004 : 0;
 			const lapseAdjust = lapseRatePct !== null ? Math.max(0, lapseRatePct - 15) * 0.004 : 0;
-			paceFactor = Math.min(1.65, Math.max(0.75, Math.round((1 + diffAdjust + solveAdjust + lapseAdjust) * 100) / 100));
+			const rawPace = 1 + (diffAdjust + solveAdjust + lapseAdjust) * confScale;
+			paceFactor = Math.min(1.65, Math.max(0.75, Math.round(rawPace * 100) / 100));
 		}
 
 		bySubject[b.subject] = {
@@ -2220,21 +2369,6 @@ export async function suggestLifestyleBalanceServer(
 
 const QUIZ_RESULT_TOOLS = new Set(["quiz", "probe", "mcq", "mcq_batch", "explain", "recall"]);
 
-function matchKnownSubject(title: string, knownSubjects: readonly string[]): string | undefined {
-	const normTitle = normalizeSubjectKey(title);
-	if (!normTitle) return undefined;
-	let best: string | undefined;
-	let bestLen = 0;
-	for (const sub of knownSubjects) {
-		const nk = normalizeSubjectKey(sub);
-		if (nk.length >= 2 && (normTitle.includes(nk) || nk.includes(normTitle)) && nk.length > bestLen) {
-			best = sub;
-			bestLen = nk.length;
-		}
-	}
-	return best;
-}
-
 function collectQuizAndPracticeSamples(opts: {
 	sessions: readonly PlannerSessionSummary[];
 	knownSubjects: readonly string[];
@@ -2242,12 +2376,17 @@ function collectQuizAndPracticeSamples(opts: {
 }): {
 	quizSamples: QuizConfidenceSample[];
 	practiceSamples: PracticeOutcomeSample[];
+	recallExplainCount: number;
 } {
 	const quizSamples: QuizConfidenceSample[] = [];
 	const practiceSamples: PracticeOutcomeSample[] = [];
+	let recallExplainCount = 0;
 
 	const pushQuizDetail = (detail: Record<string, unknown>, origin: string, subject: string | undefined, sessionTitle: string) => {
 		if (detail.dismissed || detail.byVoice) return;
+		if (origin === "explain" || origin === "recall" || origin === "coding_question") {
+			recallExplainCount++;
+		}
 		const dontKnow = Boolean(detail.dontKnow);
 		const isGraded = detail.correct === true || detail.correct === false || dontKnow;
 		if (!isGraded) return;
@@ -2269,16 +2408,41 @@ function collectQuizAndPracticeSamples(opts: {
 		const chat = readChatSafe(s.id, opts.chatsDir);
 		if (!chat) continue;
 		const sessionTitle = chat.title || s.title;
-		const subject = matchKnownSubject(sessionTitle, opts.knownSubjects);
+		const subject = matchKnownSubject(sessionTitle, opts.knownSubjects, extractFirstUserMessageText(chat));
 		const msgs = Array.isArray(chat.messages) ? chat.messages : [];
 		let lastProblemTs: number | null = null;
+		let firstAttemptTs: number | null = null;
+		const concludedCallIds = new Set<string>();
 
 		for (const m of msgs as Array<Record<string, unknown>>) {
 			const ts = typeof m.timestamp === "number" && Number.isFinite(m.timestamp) ? m.timestamp : null;
+			if (m.role === "user" && lastProblemTs !== null && firstAttemptTs === null && ts !== null && ts > lastProblemTs) {
+				firstAttemptTs = ts;
+			}
 			const content = Array.isArray(m.content) ? m.content : [];
 			for (const blk of content as Array<Record<string, unknown>>) {
-				if (blk.type === "toolCall" && blk.name === "problem" && ts !== null) {
+				if (blk.type !== "toolCall") continue;
+				const callName = typeof blk.name === "string" ? blk.name : "";
+				if (callName === "problem" && ts !== null) {
 					lastProblemTs = ts;
+					firstAttemptTs = null;
+				} else if (callName === "conclude") {
+					const args = (blk.arguments && typeof blk.arguments === "object" ? blk.arguments : {}) as Record<string, unknown>;
+					const outcome = typeof args.outcome === "string" ? args.outcome : "";
+					if (outcome === "solved" || outcome === "solvedWithHints" || outcome === "movedOn" || outcome === "surrendered") {
+						if (typeof blk.id === "string" && blk.id) concludedCallIds.add(blk.id);
+						const durMin = resolveProblemDurationMin(ts, lastProblemTs, firstAttemptTs);
+						practiceSamples.push({
+							...(subject ? { subject } : {}),
+							sessionTitle,
+							outcome,
+							rung: typeof args.rung === "string" ? args.rung : null,
+							missClass: typeof args.missClass === "string" ? args.missClass : null,
+							durationMin: durMin,
+						});
+						lastProblemTs = null;
+						firstAttemptTs = null;
+					}
 				}
 			}
 
@@ -2286,9 +2450,9 @@ function collectQuizAndPracticeSamples(opts: {
 			const toolName = typeof m.toolName === "string" ? m.toolName : "";
 			if (m.isError) continue;
 			const details = m.details as Record<string, unknown> | undefined;
-			if (!details || typeof details !== "object") continue;
 
-			if (QUIZ_RESULT_TOOLS.has(toolName)) {
+			if (QUIZ_RESULT_TOOLS.has(toolName) || toolName === "coding_question") {
+				if (!details || typeof details !== "object") continue;
 				if (Array.isArray(details.batch)) {
 					for (const item of details.batch as Array<Record<string, unknown>>) {
 						if (item && typeof item === "object") pushQuizDetail(item, toolName, subject, sessionTitle);
@@ -2297,27 +2461,28 @@ function collectQuizAndPracticeSamples(opts: {
 					pushQuizDetail(details, toolName, subject, sessionTitle);
 				}
 			} else if (toolName === "conclude") {
+				const callId = typeof m.toolCallId === "string" ? m.toolCallId : "";
+				if (callId && concludedCallIds.has(callId)) continue;
+				if (!details || typeof details !== "object") continue;
 				const outcome = typeof details.outcome === "string" ? details.outcome : "";
 				if (outcome === "solved" || outcome === "solvedWithHints" || outcome === "movedOn" || outcome === "surrendered") {
-					const durMin =
-						ts !== null && lastProblemTs !== null && ts > lastProblemTs
-							? Math.round(Math.min(ts - lastProblemTs, 90 * 60_000) / 60_000)
-							: null;
+					const durMin = resolveProblemDurationMin(ts, lastProblemTs, firstAttemptTs);
 					practiceSamples.push({
 						...(subject ? { subject } : {}),
 						sessionTitle,
 						outcome,
 						rung: typeof details.rung === "string" ? details.rung : null,
 						missClass: typeof details.missClass === "string" ? details.missClass : null,
-						durationMin: durMin && durMin >= 2 ? durMin : null,
+						durationMin: durMin,
 					});
 					lastProblemTs = null;
+					firstAttemptTs = null;
 				}
 			}
 		}
 	}
 
-	return { quizSamples, practiceSamples };
+	return { quizSamples, practiceSamples, recallExplainCount };
 }
 
 export function readPlannerLearningCapacityServer(
@@ -2369,7 +2534,7 @@ export function readPlannerLearningCapacityServer(
 		...signals.subjectSignals.map((s) => s.label),
 		...config.milestones.map((m) => m.subject),
 	];
-	const { quizSamples, practiceSamples } = collectQuizAndPracticeSamples({
+	const { quizSamples, practiceSamples, recallExplainCount } = collectQuizAndPracticeSamples({
 		sessions,
 		knownSubjects,
 		chatsDir: opts?.chatsDir,
@@ -2390,6 +2555,7 @@ export function readPlannerLearningCapacityServer(
 		graphChainCount,
 		quizSamples,
 		practiceSamples,
+		recallExplainCount,
 		mistakes,
 		now,
 	});

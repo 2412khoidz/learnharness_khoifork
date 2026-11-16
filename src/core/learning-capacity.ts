@@ -96,6 +96,7 @@ export interface LearningCapacityReport {
 		quizSamples: number;
 		quizConfidenceSamples: number;
 		practiceProblems: number;
+		recallExplainCount?: number;
 		mistakeRecords: number;
 		pastChatSessions: number;
 		loggedPlannerDays: number;
@@ -129,6 +130,7 @@ export interface LearningCapacityTelemetryInput {
 	graphChainCount?: number;
 	quizSamples?: readonly QuizConfidenceSample[];
 	practiceSamples?: readonly PracticeOutcomeSample[];
+	recallExplainCount?: number;
 	mistakes?: readonly MistakeRecord[];
 	now?: number;
 }
@@ -584,7 +586,8 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 	const compositeScore = weightTot > 0 ? Math.round(weightedScoreSum / weightTot) : null;
 
 	const confidenceLevel: LearningCapacityReport["confidenceLevel"] =
-		fsrsReviewCount >= 12 && (totalProbSamples + confSamples.length >= 4 || allLogs.length >= 3)
+		(fsrsReviewCount >= 12 && (totalProbSamples + confSamples.length >= 4 || allLogs.length >= 3)) ||
+		totalProbSamples + confSamples.length >= 16
 			? "calibrated"
 			: memorySampleCount + totalGraphNodes + totalProbSamples + confSamples.length + allLogs.length >= 3
 				? "emerging"
@@ -625,49 +628,85 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 	const subjectBreakdown: SubjectLearningCapacityDetail[] = [];
 	const seenSubjKeys = new Set<string>();
 
-	const quizBiasForSubject = (subjName: string): { bias: number | null; brier: number | null; n: number } => {
+	const quizBiasForSubject = (subjName: string): { bias: number | null; brier: number | null; accPct: number | null; n: number } => {
 		const nk = normalizeSubjectKey(subjName);
-		const matched = confSamples.filter((q) => {
+		const matched = quizSamples.filter((q) => {
+			if (q.subject && normalizeSubjectKey(q.subject) === nk) return true;
 			const qs = normalizeSubjectKey(q.subject || q.sessionTitle);
-			return qs && (qs === nk || qs.includes(nk) || nk.includes(qs));
+			return Boolean(qs && (qs === nk || qs.includes(nk) || nk.includes(qs)));
 		});
-		if (matched.length === 0) return { bias: null, brier: null, n: 0 };
+		const accPct = matched.length > 0
+			? Math.round((matched.filter((q) => q.correct).length / matched.length) * 100)
+			: null;
+		const withConf = matched.filter((q) => !q.dontKnow && q.confidencePct !== null);
+		if (withConf.length === 0) return { bias: null, brier: null, accPct, n: matched.length };
 		const brier = roundTo(
-			matched.reduce((a, q) => {
+			withConf.reduce((a, q) => {
 				const p = clamp((q.confidencePct ?? 50) / 100, 0, 1);
 				return a + Math.pow(p - (q.correct ? 1 : 0), 2);
-			}, 0) / matched.length,
+			}, 0) / withConf.length,
 			3,
 		);
 		const bias = Math.round(
-			matched.reduce((a, q) => a + ((q.confidencePct ?? 50) - (q.correct ? 100 : 0)), 0) / matched.length,
+			withConf.reduce((a, q) => a + ((q.confidencePct ?? 50) - (q.correct ? 100 : 0)), 0) / withConf.length,
 		);
-		return { bias, brier, n: matched.length };
+		return { bias, brier, accPct, n: withConf.length };
+	};
+
+	const buildSubjectDetail = (
+		subjectName: string,
+		readinessPct: number,
+		metrics?: LearningCapacityTelemetryInput["signals"]["learningProfile"] extends infer P
+			? P extends { bySubject: Record<string, infer M> }
+				? M
+				: never
+			: never,
+	): SubjectLearningCapacityDetail => {
+		const nk = normalizeSubjectKey(subjectName);
+		const qMeta = quizBiasForSubject(subjectName);
+		const subjProblems = practiceSamples.filter((p) => {
+			const pk = normalizeSubjectKey(p.subject || p.sessionTitle);
+			return Boolean(pk && (pk === nk || (p.subject && pk.includes(nk))));
+		});
+		const directSolvePct =
+			metrics?.practiceSolveRatePct ??
+			(subjProblems.length > 0
+				? Math.round((subjProblems.filter((p) => p.outcome === "solved").length / subjProblems.length) * 100)
+				: null);
+		const subjDurs = subjProblems.map((p) => p.durationMin).filter((d): d is number => d !== null && d > 0);
+		const directAvgMin =
+			metrics?.avgMinutesPerProblem ??
+			(subjDurs.length > 0 ? Math.round(subjDurs.reduce((a, v) => a + v, 0) / subjDurs.length) : null);
+
+		const totalProbForSubj = Math.max(
+			subjProblems.length,
+			(metrics?.practiceSolvedCount ?? 0) + (metrics?.practiceHintsCount ?? 0) + (metrics?.practiceUnsolvedCount ?? 0),
+		);
+		let paceFactor = metrics?.paceFactor ?? 1.0;
+		if (paceFactor === 1.0 && qMeta.n >= 4 && qMeta.accPct !== null && totalProbForSubj < 2 && (metrics?.fsrsReviews ?? 0) < 4) {
+			const scale = Math.min(1, qMeta.n / 8);
+			const quizAdj = (72 - qMeta.accPct) * 0.003 * scale;
+			paceFactor = roundTo(clamp(1.0 + quizAdj, 0.78, 1.45), 2);
+		}
+		const sampleCount = (metrics?.fsrsReviews ?? 0) + totalProbForSubj + qMeta.n;
+		return {
+			subject: subjectName,
+			readinessPct,
+			retentionPct: metrics?.retentionRatePct ?? null,
+			avgStabilityDays: metrics?.avgStabilityDays ?? null,
+			avgDifficulty: metrics?.avgDifficulty ?? null,
+			solveRatePct: directSolvePct,
+			avgMinPerProblem: directAvgMin,
+			quizBiasPct: qMeta.bias,
+			brierScore: qMeta.brier,
+			paceFactor,
+			sampleCount,
+		};
 	};
 
 	for (const sig of signals.subjectSignals) {
 		seenSubjKeys.add(normalizeSubjectKey(sig.label));
-		const metrics = lp?.bySubject[sig.label];
-		const qMeta = quizBiasForSubject(sig.label);
-		const sampleCount =
-			(metrics?.fsrsReviews ?? 0) +
-			(metrics?.practiceSolvedCount ?? 0) +
-			(metrics?.practiceHintsCount ?? 0) +
-			(metrics?.practiceUnsolvedCount ?? 0) +
-			qMeta.n;
-		subjectBreakdown.push({
-			subject: sig.label,
-			readinessPct: sig.readinessPct,
-			retentionPct: metrics?.retentionRatePct ?? null,
-			avgStabilityDays: metrics?.avgStabilityDays ?? null,
-			avgDifficulty: metrics?.avgDifficulty ?? null,
-			solveRatePct: metrics?.practiceSolveRatePct ?? null,
-			avgMinPerProblem: metrics?.avgMinutesPerProblem ?? null,
-			quizBiasPct: qMeta.bias,
-			brierScore: qMeta.brier,
-			paceFactor: metrics?.paceFactor ?? 1.0,
-			sampleCount,
-		});
+		subjectBreakdown.push(buildSubjectDetail(sig.label, sig.readinessPct, lp?.bySubject[sig.label]));
 	}
 
 	if (lp) {
@@ -675,27 +714,9 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			const nk = normalizeSubjectKey(metrics.subject);
 			if (seenSubjKeys.has(nk)) continue;
 			seenSubjKeys.add(nk);
-			const qMeta = quizBiasForSubject(metrics.subject);
-			const sampleCount =
-				metrics.fsrsReviews +
-				metrics.practiceSolvedCount +
-				metrics.practiceHintsCount +
-				metrics.practiceUnsolvedCount +
-				qMeta.n;
-			if (sampleCount === 0 && metrics.loggedPlannerMinutes === 0) continue;
-			subjectBreakdown.push({
-				subject: metrics.subject,
-				readinessPct: 35,
-				retentionPct: metrics.retentionRatePct,
-				avgStabilityDays: metrics.avgStabilityDays,
-				avgDifficulty: metrics.avgDifficulty,
-				solveRatePct: metrics.practiceSolveRatePct,
-				avgMinPerProblem: metrics.avgMinutesPerProblem,
-				quizBiasPct: qMeta.bias,
-				brierScore: qMeta.brier,
-				paceFactor: metrics.paceFactor,
-				sampleCount,
-			});
+			const detail = buildSubjectDetail(metrics.subject, 35, metrics);
+			if (detail.sampleCount === 0 && metrics.loggedPlannerMinutes === 0) continue;
+			subjectBreakdown.push(detail);
 		}
 	}
 
@@ -746,6 +767,7 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			quizSamples: quizSamples.length,
 			quizConfidenceSamples: confSamples.length,
 			practiceProblems: totalProbSamples,
+			...(input.recallExplainCount !== undefined ? { recallExplainCount: input.recallExplainCount } : {}),
 			mistakeRecords: analyzedErrCount,
 			pastChatSessions: signals.recentSessions.length,
 			loggedPlannerDays: allLogs.length,

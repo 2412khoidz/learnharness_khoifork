@@ -1771,4 +1771,114 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		assert.equal(coachTailor.snapshot.config.lifestyle.sleep.eveningDrowsyStart, "19:45");
 		assert.ok(coachTailor.snapshot.config.lifestyle.wellnessGuardrail?.wakeUpAnchorProtocol?.includes("balcony"));
 	});
+
+	it("extracts Practice conclude toolCall.arguments, fuzzy-matches subject names, excludes >3h multi-day gaps, and unlocks Pace without FSRS gate", () => {
+		const dir = fs.mkdtempSync(path.join(TMP_DATA, "telemetry-"));
+		const plannerFile = path.join(dir, "planner.json");
+		const examPrepFile = path.join(dir, "exam-prep.json");
+		const flashcardsFile = path.join(dir, "flashcards.json");
+		const mistakesFile = path.join(dir, "mistakes.json");
+		const chatsDir = path.join(dir, "chats");
+		fs.mkdirSync(chatsDir, { recursive: true });
+		fs.writeFileSync(flashcardsFile, JSON.stringify({ cards: [], reviews: [], propositions: {} }));
+		fs.writeFileSync(mistakesFile, JSON.stringify([]));
+
+		patchPlannerConfig(
+			{
+				milestones: [
+					{
+						id: "m_ai",
+						kind: "exam",
+						title: "Cơ sở toán AI",
+						subject: "Cơ sở toán AI",
+						dueDate: "2026-12-01",
+						priority: 3,
+						cognitiveLoad: "heavy",
+						clusterIds: [],
+						estimatedHours: 20,
+						completedHours: 2,
+						syllabusTopics: [],
+						notes: "",
+					},
+					{
+						id: "m_dse",
+						kind: "exam",
+						title: "Lập trình xử lý dữ liệu",
+						subject: "Lập trình xử lý dữ liệu",
+						dueDate: "2026-12-03",
+						priority: 2,
+						cognitiveLoad: "heavy",
+						clusterIds: [],
+						estimatedHours: 16,
+						completedHours: 1,
+						syllabusTopics: [],
+						notes: "",
+					},
+				],
+			},
+			{ plannerFile, examPrepFile },
+		);
+
+		const t0 = new Date("2026-11-15T10:00:00Z").getTime();
+		// Session 1: "Luyện bài tập cơ sở toán học" with conclude on toolCall.arguments + details: null on toolResult!
+		fs.writeFileSync(
+			path.join(chatsDir, "chat_ai_prac.json"),
+			JSON.stringify({
+				id: "chat_ai_prac",
+				title: "Luyện bài tập cơ sở toán học",
+				kind: "practice",
+				updatedAt: "2026-11-16T08:00:00Z",
+				messages: [
+					{ id: "u1", role: "user", content: "Giúp tôi môn cơ sở toán học của trí tuệ nhân tạo", timestamp: t0 },
+					{ id: "p1", role: "assistant", content: [{ type: "toolCall", id: "tc_p1", name: "problem", arguments: { statement: "Solve" } }], timestamp: t0 + 60_000 },
+					{ id: "c1", role: "assistant", content: [{ type: "toolCall", id: "tc_c1", name: "conclude", arguments: { outcome: "solvedWithHints", rung: "R3" } }], timestamp: t0 + 11 * 60_000 },
+					{ id: "r1", role: "toolResult", toolCallId: "tc_c1", toolName: "conclude", details: null, content: [{ type: "text", text: "Problem concluded." }], timestamp: t0 + 11 * 60_000 },
+					{ id: "p2", role: "assistant", content: [{ type: "toolCall", id: "tc_p2", name: "problem", arguments: { statement: "Solve 2" } }], timestamp: t0 + 12 * 60_000 },
+					{ id: "c2", role: "assistant", content: [{ type: "toolCall", id: "tc_c2", name: "conclude", arguments: { outcome: "solvedWithHints", rung: "R2" } }], timestamp: t0 + 27 * 60_000 },
+					{ id: "r2", role: "toolResult", toolCallId: "tc_c2", toolName: "conclude", details: null, content: [{ type: "text", text: "Problem concluded." }], timestamp: t0 + 27 * 60_000 },
+				],
+			}),
+		);
+
+		// Session 2: "Luyện bài tập DSE" matching "Lập trình xử lý dữ liệu" + ignore multi-day >3h gap!
+		fs.writeFileSync(
+			path.join(chatsDir, "chat_dse_prac.json"),
+			JSON.stringify({
+				id: "chat_dse_prac",
+				title: "Luyện bài tập DSE",
+				kind: "practice",
+				updatedAt: "2026-11-16T09:00:00Z",
+				messages: [
+					{ id: "u1", role: "user", content: "Luyện bài tập DSE xử lý bảng pandas", timestamp: t0 },
+					{ id: "p1", role: "assistant", content: [{ type: "toolCall", id: "tc_dp1", name: "problem", arguments: { statement: "Series" } }], timestamp: t0 + 60_000 },
+					// 5 days later concluded -> should count outcome but ignore 5-day gap from avgMinutes!
+					{ id: "c1", role: "assistant", content: [{ type: "toolCall", id: "tc_dc1", name: "conclude", arguments: { outcome: "solved" } }], timestamp: t0 + 5 * 24 * 3600_000 },
+					{ id: "e1", role: "toolResult", toolName: "recall", details: { kind: "explain", dontKnow: false }, timestamp: t0 + 61_000 },
+				],
+			}),
+		);
+
+		const cap = readPlannerLearningCapacityServer({
+			plannerFile,
+			examPrepFile,
+			flashcardsFile,
+			mistakesFile,
+			chatsDir,
+			date: "2026-11-16",
+		});
+
+		assert.equal(cap.report.dataCoverage.practiceProblems, 3);
+		assert.equal(cap.report.dataCoverage.recallExplainCount, 1);
+
+		const aiRow = cap.report.subjectBreakdown.find((r) => r.subject === "Cơ sở toán AI");
+		const dseRow = cap.report.subjectBreakdown.find((r) => r.subject === "Lập trình xử lý dữ liệu");
+		assert.ok(aiRow, "Cơ sở toán AI should receive concluded problems from 'Luyện bài tập cơ sở toán học'");
+		assert.equal(aiRow!.solveRatePct, 0);
+		assert.equal(aiRow!.avgMinPerProblem, 13); // (10m + 15m) / 2
+		assert.ok(aiRow!.paceFactor > 1.0, `Pace factor should scale above 1.0x from low autonomous solve rate even with 0 FSRS reviews, got ${aiRow!.paceFactor}`);
+
+		assert.ok(dseRow, "Lập trình xử lý dữ liệu should receive concluded problems from 'Luyện bài tập DSE'");
+		assert.equal(dseRow!.solveRatePct, 100);
+		assert.equal(dseRow!.avgMinPerProblem, null); // >3h multi-day gap must not pollute solve minutes
+	});
 });
