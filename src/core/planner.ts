@@ -3773,6 +3773,38 @@ export function computePersonalizedMilestoneEstimate(opts: {
 	};
 }
 
+const SENSITIVE_JOURNAL_RE =
+	/\b(?:thu\s*dam|quay\s*tay|soc\s*lo|phim\s*(?:sex|18\+|nguoi\s*lon|nong)|xem\s*(?:sex|porn|hentai|jav|18\+)|porn(?:ography)?|hentai|masturbat(?:e|ed|es|ing|ion)|fap(?:ping|ped)?|no\s*fap|pmo|fetish(?:es)?|erotica|orgasm(?:s)?|jerk(?:ed|ing)?\s*off|libido\s*(?:spike|cao|tang)|nung)\b/gi;
+
+/**
+ * Redacts explicit/intimate terms from journal text before showing in history previews
+ * or sending to cloud AI models while preserving timestamps and behavioral meaning.
+ */
+export function redactSensitiveJournalText(text: string): string {
+	if (!text) return "";
+	let sanitized = text.replace(SENSITIVE_JOURNAL_RE, "[Personal reset]");
+	// Collapse ASCII fallback via normalized matching on individual comma/newline segments if accented tokens missed
+	const lines = sanitized.split(/\r?\n/);
+	return lines
+		.map((line) => {
+			const norm = normalizeSubjectKey(line);
+			if (
+				/\b(thu dam|quay tay|soc lo|xem sex|phim sex|porn|hentai|fetish|masturbat|jerk off|libido|nung|pmo)\b/.test(
+					norm,
+				)
+			) {
+				const rangeMatch = line.match(
+					/^\s*(\d{1,2}\s*(?::|h)\s*\d{0,2}\s*(?:-|–|—|to|den|đến)\s*\d{1,2}\s*(?::|h)\s*\d{0,2}\s*:?)/i,
+				);
+				const rangePrefix = rangeMatch?.[1]?.trim();
+				return rangePrefix ? `${rangePrefix} [Personal reset]` : "[Personal reset]";
+			}
+			return line;
+		})
+		.join("\n")
+		.trim();
+}
+
 function classifyJournalLine(text: string, knownSubjects: readonly string[]): {
 	category: JournalActivityCategory;
 	subject?: string;
@@ -3789,10 +3821,19 @@ function classifyJournalLine(text: string, knownSubjects: readonly string[]): {
 		}
 	}
 
+	if (/\b(personal reset|reset ca nhan|personal break|nghi ca nhan)\b/.test(norm)) {
+		return { category: "rest" };
+	}
+	if (/\b(thu dam|quay tay|soc lo|xem sex|phim sex|porn|hentai|fetish|masturbat|jerk off|pmo)\b/.test(norm)) {
+		return { category: "distraction" };
+	}
+	if (/\b(khong hoc|chua hoc|chua on|doc linh tinh|ngoi choi|luot linh tinh|khong tap trung|vo dinh)\b/.test(norm)) {
+		return { category: "distraction" };
+	}
 	if (/\b(ngu|sleep|nap|chp mat|chop mat|di ngu|thuc day|wake)\b/.test(norm)) {
 		return { category: "sleep" };
 	}
-	if (/\b(an sang|an trua|an toi|an com|lunch|dinner|breakfast|meal|bua)\b/.test(norm)) {
+	if (/\b(an sang|an trua|an toi|an com|di an|lunch|dinner|breakfast|meal|bua)\b/.test(norm)) {
 		return { category: "meal" };
 	}
 	if (/\b(len lop|giang duong|tiet hoc|lecture|class|seminar|di hoc)\b/.test(norm)) {
@@ -3804,7 +3845,7 @@ function classifyJournalLine(text: string, knownSubjects: readonly string[]): {
 	if (/\b(chay bo|the thao|gym|dan|nhac|music|movie|phim|hobby|giai tri|cafe|di choi)\b/.test(norm)) {
 		return { category: "hobby" };
 	}
-	if (/\b(nghi|rest|relax|tam|ve sinh)\b/.test(norm)) {
+	if (/\b(nghi|rest|relax|tam|tam rua|ve sinh|di chuyen|commute)\b/.test(norm)) {
 		return { category: "rest" };
 	}
 	if (matchedSubject || /\b(hoc|on|giai|luyen|doc|chung minh|bai tap|flashcard|fsrs|study|practice|proof|olympic|code|lap trinh)\b/.test(norm)) {
@@ -3921,6 +3962,22 @@ export function evaluatePlanVsActualLocal(opts: {
 			? plannedStudyBlocks.reduce((a, b) => a + b.durationMin, 0)
 			: Math.round((plan?.plannedStudyHours ?? 0) * 60);
 
+	const nowMs = opts.now ?? Date.now();
+	const isToday = date === localDateString(nowMs);
+	const nowDateObj = new Date(nowMs);
+	const nowClockMin = nowDateObj.getHours() * 60 + nowDateObj.getMinutes();
+	const lastLoggedEndMin = combinedEntries.reduce((mx, e) => {
+		const m = parseClockMin(e.endTime);
+		return m !== null ? Math.max(mx, m) : mx;
+	}, 0);
+	const cutoffMin = Math.max(isToday ? nowClockMin : 24 * 60, lastLoggedEndMin);
+	const remainingPlannedBlocks = isToday ? plannedStudyBlocks.filter((b) => b.startMin >= cutoffMin) : [];
+	const remainingPlannedMin = remainingPlannedBlocks.reduce((a, b) => a + b.durationMin, 0);
+	const plannedSoFarMin = isToday
+		? plannedStudyBlocks.filter((b) => b.startMin < cutoffMin).reduce((a, b) => a + b.durationMin, 0)
+		: plannedStudyMin;
+	const isPartialMiddayLog = isToday && cutoffMin < 20 * 60 && remainingPlannedMin >= 30;
+
 	const journalStudyMin = combinedEntries
 		.filter((e) => e.category === "study")
 		.reduce((a, e) => a + e.minutes, 0);
@@ -3934,37 +3991,49 @@ export function evaluatePlanVsActualLocal(opts: {
 		.filter((e) => e.category === "distraction")
 		.reduce((a, e) => a + e.minutes, 0);
 
-	const denom = Math.max(30, plannedStudyMin);
-	const volumeScore = Math.min(1.08, actualStudyMin / denom);
-	const blockScore = plannedStudyBlocks.length > 0 ? completedBlockCount / plannedStudyBlocks.length : volumeScore;
+	const evalTargetMin = isPartialMiddayLog ? plannedSoFarMin : plannedStudyMin;
+	const denom = Math.max(30, evalTargetMin);
+	const volumeScore = evalTargetMin === 0 ? (actualStudyMin > 0 ? 1 : 0.75) : Math.min(1.08, actualStudyMin / denom);
+	const elapsedBlockCount = isPartialMiddayLog
+		? plannedStudyBlocks.filter((b) => b.startMin < cutoffMin).length
+		: plannedStudyBlocks.length;
+	const blockScore = elapsedBlockCount > 0 ? Math.min(1, completedBlockCount / elapsedBlockCount) : volumeScore;
 	const distractionPenalty = distractionMin > 45 ? Math.min(0.22, (distractionMin - 45) / 300) : 0;
 	const habitBonus = (log?.mealsOk ? 0.04 : 0) + (log?.hobbyDone ? 0.04 : 0);
 	const rawAdherence = (volumeScore * 0.58 + Math.max(blockScore, volumeScore * 0.85) * 0.42 - distractionPenalty + habitBonus) * 100;
 	const adherencePct = clamp(Math.round(rawAdherence), 0, 100);
 
-	const observedRealism = clamp(actualStudyMin / denom, 0.4, 1.35);
 	const prevRealism = config.realismFactor ?? 1.0;
-	const suggestedRealismFactor = clamp(Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100, 0.65, 1.25);
+	const observedRealism = isPartialMiddayLog ? prevRealism : clamp(actualStudyMin / Math.max(30, plannedStudyMin), 0.4, 1.35);
+	const suggestedRealismFactor = isPartialMiddayLog
+		? prevRealism
+		: clamp(Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100, 0.65, 1.25);
 
 	const strengths: string[] = [];
 	const frictionPoints: string[] = [];
 
-	if (actualStudyMin >= plannedStudyMin * 0.85 && actualStudyMin > 0) {
-		strengths.push(`Met study volume: ${(actualStudyMin / 60).toFixed(1)}h actual vs ${(plannedStudyMin / 60).toFixed(1)}h planned.`);
+	if (isPartialMiddayLog && remainingPlannedMin > 0) {
+		strengths.push(
+			`Mid-day check-in (logged up to ${formatClockMin(cutoffMin)}): ${(remainingPlannedMin / 60).toFixed(1)}h planned study still ahead — EWMA capacity held steady (${Math.round(prevRealism * 100)}%).`,
+		);
+	}
+	if (actualStudyMin >= evalTargetMin * 0.85 && actualStudyMin > 0) {
+		strengths.push(`Met study pace: ${(actualStudyMin / 60).toFixed(1)}h actual vs ${(evalTargetMin / 60).toFixed(1)}h expected so far.`);
 	} else if (actualStudyMin > 0) {
-		frictionPoints.push(`Shortfall of ${Math.max(0, plannedStudyMin - actualStudyMin)}m compared to ${(plannedStudyMin / 60).toFixed(1)}h target.`);
-	} else {
+		frictionPoints.push(`Shortfall of ${Math.max(0, evalTargetMin - actualStudyMin)}m compared to ${(evalTargetMin / 60).toFixed(1)}h expected.`);
+	} else if (!isPartialMiddayLog || plannedSoFarMin > 0) {
 		frictionPoints.push("No study minutes logged or detected in journal yet.");
 	}
 
 	if (distractionMin >= 45) {
-		frictionPoints.push(`Distraction window totaled ${distractionMin}m — guard peak focus hours or trim target.`);
+		frictionPoints.push(`Distraction / off-task window totaled ${distractionMin}m — anchor next scheduled block immediately.`);
 	}
 	if (log?.hobbyDone) strengths.push("Protected recharge / hobby rest.");
 	if (log?.mealsOk) strengths.push("Kept regular meal timing.");
 
-	const nextDayAdvice =
-		observedRealism < 0.75
+	const nextDayAdvice = isPartialMiddayLog
+		? `Remaining ${(remainingPlannedMin / 60).toFixed(1)}h planned later today — focus on your next scheduled study block and re-score tonight.`
+		: observedRealism < 0.75
 			? `Plan was slightly ambitious (${Math.round(observedRealism * 100)}% completed). Tomorrow's adaptive cap scales smoothly to ${(suggestedRealismFactor * 100).toFixed(0)}% capacity.`
 			: observedRealism > 1.15
 				? "Strong momentum! You exceeded today's target cleanly without overreaching."
@@ -3973,13 +4042,15 @@ export function evaluatePlanVsActualLocal(opts: {
 	return {
 		report: {
 			date,
-			evaluatedAt: new Date(opts.now ?? Date.now()).toISOString(),
+			evaluatedAt: new Date(nowMs).toISOString(),
 			evaluatedBy: "local",
 			adherencePct,
 			plannedStudyMin,
 			actualStudyMin,
 			realismRatio: Math.round(observedRealism * 100) / 100,
-			summary: `Adherence ${adherencePct}% · ${(actualStudyMin / 60).toFixed(1)}h studied vs ${(plannedStudyMin / 60).toFixed(1)}h planned${distractionMin > 0 ? ` · ${distractionMin}m distraction` : ""}.`,
+			summary: isPartialMiddayLog
+				? `Mid-day snapshot (${adherencePct}%): ${(actualStudyMin / 60).toFixed(1)}h studied before ${formatClockMin(cutoffMin)} (${(remainingPlannedMin / 60).toFixed(1)}h planned later today).`
+				: `Adherence ${adherencePct}% · ${(actualStudyMin / 60).toFixed(1)}h studied vs ${(plannedStudyMin / 60).toFixed(1)}h planned${distractionMin > 0 ? ` · ${distractionMin}m distraction` : ""}.`,
 			strengths,
 			frictionPoints,
 			nextDayAdvice,

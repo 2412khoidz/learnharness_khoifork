@@ -34,6 +34,7 @@ import {
 	parseJournalTextLocal,
 	parseLocalSyllabusOutline,
 	parseSimpleWeeklyText,
+	redactSensitiveJournalText,
 	resolveActiveBlockStatus,
 	sanitizePlannerConfig,
 	type PlannerConfig,
@@ -1880,5 +1881,99 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		assert.ok(dseRow, "Lập trình xử lý dữ liệu should receive concluded problems from 'Luyện bài tập DSE'");
 		assert.equal(dseRow!.solveRatePct, 100);
 		assert.equal(dseRow!.avgMinPerProblem, null); // >3h multi-day gap must not pollute solve minutes
+	});
+
+	it("masks intimate terms cleanly in discreet mode and avoids penalizing EWMA realism on mid-day partial logs", async () => {
+		const rawDiary = [
+			"06:30-07:30: Thủ dâm",
+			"7h30-11h30 : Lên thư viện VNU (đọc linh tinh chứ cũng không học)",
+			"11h30-12h15 : đi ăn",
+			"12h15-14h30: Về nhà, thủ dâm thêm 1 lần, ngủ trưa, tắm rửa",
+			"14h30-15h10: Di chuyển lên UET",
+		].join("\n");
+
+		const masked = redactSensitiveJournalText(rawDiary);
+		assert.ok(!/thủ\s*dâm|thu\s*dam/i.test(masked));
+		assert.ok(masked.includes("06:30-07:30: [Personal reset]"));
+		assert.ok(masked.includes("12h15-14h30: [Personal reset]"));
+
+		const parsed = parseJournalTextLocal(rawDiary, "2026-11-16", ["Dạy giải tích olympic sinh viên"]);
+		// "đọc linh tinh chứ cũng không học" MUST NOT be misclassified as study!
+		const studyEntries = parsed.filter((e) => e.category === "study");
+		assert.equal(studyEntries.length, 0);
+
+		const dir = fs.mkdtempSync(path.join(TMP_DATA, "discreet-midday-"));
+		const plannerFile = path.join(dir, "planner.json");
+		const examPrepFile = path.join(dir, "exam-prep.json");
+		const afternoonNow = new Date("2026-11-16T15:45:00").getTime();
+
+		patchPlannerConfig(
+			{
+				realismFactor: 1.0,
+				lifestyle: {
+					...DEFAULT_PLANNER_CONFIG.lifestyle,
+					sleep: {
+						...DEFAULT_PLANNER_CONFIG.lifestyle.sleep,
+						currentBedtime: "23:30",
+						targetBedtime: "23:30",
+						preferredWakeTime: "15:50",
+						peakFocusWindow: "evening",
+					},
+				},
+				milestones: [
+					{
+						id: "m_calc",
+						kind: "competition",
+						title: "Olympic",
+						subject: "Giải tích",
+						dueDate: "2026-11-28",
+						priority: 3,
+						cognitiveLoad: "heavy",
+						clusterIds: [],
+						estimatedHours: 15,
+						completedHours: 1,
+						syllabusTopics: [],
+						notes: "",
+					},
+				],
+			},
+			{ plannerFile, examPrepFile, now: afternoonNow },
+		);
+
+		let capturedPrompt = "";
+		const baseEngine = fakeSubmitEngine("submit_journal_evaluation", {
+			adherencePct: 60,
+			actualStudyMin: 0,
+			summary: "Mid-day check-in up to 15:10; evening study blocks remain ahead.",
+			strengths: ["Honest tracking"],
+			frictionPoints: ["Unstructured morning at library"],
+			nextDayAdvice: "Start evening block immediately.",
+			entries: [
+				{ startTime: "06:30", endTime: "07:30", category: "rest", title: "[Personal reset]", minutes: 60 },
+				{ startTime: "07:30", endTime: "11:30", category: "distraction", title: "Thư viện (chưa vào học)", minutes: 240 },
+			],
+		});
+		const inspectEngine: PiEngine = {
+			model: baseEngine.model,
+			streamFn: (model, context, options) => {
+				capturedPrompt = JSON.stringify(context);
+				return baseEngine.streamFn!(model, context, options);
+			},
+		};
+
+		const aiEval = await evaluateDailyJournalServer({
+			plannerFile,
+			examPrepFile,
+			date: "2026-11-16",
+			journalText: rawDiary,
+			mode: "llm",
+			discreet: true,
+			engineOverride: inspectEngine,
+			now: afternoonNow,
+		});
+
+		assert.ok(!/thủ\s*dâm|thu\s*dam/i.test(capturedPrompt), "Sensitive phrasing must be masked before leaving machine to cloud AI");
+		assert.equal(aiEval.snapshot.config.realismFactor, 1.0, "Mid-day partial log must NOT drop EWMA realism below 1.0 while evening blocks are still ahead");
+		assert.equal(aiEval.report.realismRatio, 1);
 	});
 });

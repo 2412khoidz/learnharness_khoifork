@@ -12,6 +12,7 @@ import {
 	formatPlainMathPreview,
 	normalizeSubjectKey,
 	parseClockMin,
+	redactSensitiveJournalText,
 	resolveSubjectMaxDailyCap,
 	WEEKDAY_LABELS,
 	WEEKDAYS,
@@ -56,6 +57,8 @@ import {
 	ChevronRightIcon,
 	CircleIcon,
 	CpuIcon,
+	EyeIcon,
+	EyeOffIcon,
 	FileUpIcon,
 	FlameIcon,
 	HeartPulseIcon,
@@ -72,6 +75,7 @@ import {
 	SaveIcon,
 	ScaleIcon,
 	SearchIcon,
+	ShieldCheckIcon,
 	SlidersHorizontalIcon,
 	SparklesIcon,
 	TrashIcon,
@@ -3843,7 +3847,29 @@ function JournalAuditTab({
 	);
 	const [auditMode, setAuditMode] = useState<"local" | "llm">("local");
 	const [preferredRole, setPreferredRole] = useState("");
+	const [discreetMode, setDiscreetMode] = useState(true);
+	const [hideEditorText, setHideEditorText] = useState(false);
 	const [evaluating, setEvaluating] = useState(false);
+
+	useEffect(() => {
+		try {
+			if (window.localStorage.getItem("lh:journal-discreet") === "0") setDiscreetMode(false);
+		} catch {
+			// Ignore localStorage unavailability.
+		}
+	}, []);
+
+	const toggleDiscreetMode = () => {
+		setDiscreetMode((prev) => {
+			const next = !prev;
+			try {
+				window.localStorage.setItem("lh:journal-discreet", next ? "1" : "0");
+			} catch {
+				// Ignore localStorage unavailability.
+			}
+			return next;
+		});
+	};
 
 	// Manual activity add bar
 	const [actStart, setActStart] = useState("08:30");
@@ -3918,6 +3944,7 @@ function JournalAuditTab({
 					journalText,
 					manualEntries,
 					mode: auditMode,
+					discreet: discreetMode,
 					...(auditMode === "llm" && preferredRole ? { preferredRole } : {}),
 				}),
 			});
@@ -3984,7 +4011,17 @@ function JournalAuditTab({
 										{d} {d === snap.plan.date ? "(Today)" : ""}
 									</div>
 									<div className="truncate text-[10px] text-muted-foreground">
-										{l?.journalText ? l.journalText.slice(0, 42) : l?.note ? l.note.slice(0, 42) : "No journal yet"}
+										{discreetMode
+											? l?.compliance
+												? `${Math.round((l.compliance.actualStudyMin / 60) * 10) / 10}h studied · Private log hidden`
+												: l?.journalText?.trim()
+													? `${l.journalText.trim().split(/\r?\n/).length} logged lines (Discreet)`
+													: "No journal yet"
+											: l?.journalText
+												? redactSensitiveJournalText(l.journalText).slice(0, 42)
+												: l?.note
+													? redactSensitiveJournalText(l.note).slice(0, 42)
+													: "No journal yet"}
 									</div>
 								</div>
 								<div className="shrink-0 text-right">
@@ -4064,12 +4101,47 @@ function JournalAuditTab({
 					</div>
 				)}
 
+				<div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 px-2.5 py-1.5 text-[11px]">
+					<label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-foreground" title="Hides diary preview in sidebar and masks intimate/private phrases into [Personal reset] before sending to cloud AI">
+						<input
+							type="checkbox"
+							checked={discreetMode}
+							onChange={toggleDiscreetMode}
+						/>
+						<ShieldCheckIcon className="size-3.5 text-primary" />
+						Discreet Mode (Mask private words before AI &amp; hide history)
+					</label>
+					<div className="flex items-center gap-1.5">
+						<button
+							type="button"
+							onClick={() => setJournalText((prev) => redactSensitiveJournalText(prev))}
+							className="rounded border bg-background px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+							title="Replace sensitive words in the editor with [Personal reset]"
+						>
+							Mask text now
+						</button>
+						<button
+							type="button"
+							onClick={() => setHideEditorText((v) => !v)}
+							data-testid="journal-blur-toggle"
+							className="inline-flex items-center gap-1 rounded border bg-background px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+							title="Blur/hide editor & timeline when studying in public (library / class)"
+						>
+							{hideEditorText ? <EyeIcon className="size-3" /> : <EyeOffIcon className="size-3" />}
+							{hideEditorText ? "Show text" : "Blur screen"}
+						</button>
+					</div>
+				</div>
+
 				<textarea
 					rows={5}
 					value={journalText}
 					onChange={(e) => setJournalText(e.target.value)}
-					placeholder={"Write freely what actually happened across 24h (one per line or timestamps), e.g.:\n08:30-11:00 Giải 3 bài dãy số Giải tích Olympic\n12:00-13:00 Ăn trưa + nghỉ\n14:00-15:00 Mệt nên lướt điện thoại / chợp mắt\n20:00-21:45 Ôn FSRS Đại số + sửa mistake rule"}
-					className="w-full rounded-lg border bg-background p-2.5 text-xs leading-relaxed"
+					placeholder={"Write freely what actually happened across 24h (timestamps or notes), e.g.:\n08:30-11:00 Giải 3 bài dãy số Giải tích Olympic\n12:00-13:00 Ăn trưa + nghỉ\n14:00-15:00 Mệt / personal reset\n20:00-21:45 Ôn FSRS Đại số + sửa mistake rule"}
+					className={cn(
+						"w-full rounded-lg border bg-background p-2.5 text-xs leading-relaxed transition-[filter]",
+						hideEditorText ? "blur-sm focus:blur-none" : "",
+					)}
 				/>
 
 				{/* Quick structured log row */}
@@ -4205,7 +4277,7 @@ function JournalAuditTab({
 										<span className="font-medium tabular-nums text-muted-foreground">{ent.startTime}–{ent.endTime}</span>{" "}
 										<span className="rounded border px-1 py-0 text-[9px] uppercase">{ent.category}</span>{" "}
 										{ent.subject ? `[${ent.subject}] ` : ""}
-										{ent.title}
+										{discreetMode ? redactSensitiveJournalText(ent.title) : ent.title}
 									</span>
 									<span className="shrink-0 tabular-nums text-muted-foreground">{ent.minutes}m</span>
 								</div>

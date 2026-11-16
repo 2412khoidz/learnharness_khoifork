@@ -28,6 +28,7 @@ import {
 	parseJournalTextLocal,
 	parseLocalSyllabusOutline,
 	parseSimpleWeeklyText,
+	redactSensitiveJournalText,
 	resolveActiveBlockStatus,
 	sanitizePlannerConfig,
 	WEEKDAYS,
@@ -2065,6 +2066,7 @@ export async function evaluateDailyJournalServer(
 		journalText?: string;
 		manualEntries?: JournalActivityEntry[];
 		mode?: "local" | "llm";
+		discreet?: boolean;
 		preferredRole?: ModelRole;
 		engineOverride?: PiEngine;
 		signal?: AbortSignal;
@@ -2099,10 +2101,15 @@ export async function evaluateDailyJournalServer(
 		now,
 	});
 
+	const discreet = opts.discreet !== false;
+	const localEntries = discreet
+		? localEval.parsedEntries.map((e) => ({ ...e, title: redactSensitiveJournalText(e.title) || e.title }))
+		: localEval.parsedEntries;
+
 	if ((opts.mode ?? "local") === "local") {
 		const updated = applyJournalEvaluationToConfig(current, date, {
 			journalText: opts.journalText,
-			entries: localEval.parsedEntries,
+			entries: localEntries,
 			report: localEval.report,
 			suggestedRealismFactor: localEval.suggestedRealismFactor,
 			now,
@@ -2111,7 +2118,7 @@ export async function evaluateDailyJournalServer(
 		return {
 			snapshot: readPlannerSnapshot({ ...opts, date, now }),
 			report: localEval.report,
-			parsedEntries: localEval.parsedEntries,
+			parsedEntries: localEntries,
 			modelLabel: "local:journal-auditor",
 		};
 	}
@@ -2123,15 +2130,41 @@ export async function evaluateDailyJournalServer(
 		throw new PlannerAiUnavailable("No model is configured for AI journal evaluation.");
 	}
 
-	const journalBody = (opts.journalText ?? log?.journalText ?? "").trim();
+	const journalBodyRaw = (opts.journalText ?? log?.journalText ?? "").trim();
+	const journalBodyForAi = discreet ? redactSensitiveJournalText(journalBodyRaw) : journalBodyRaw;
+	const entriesForAi = (opts.manualEntries ?? log?.actualEntries ?? []).map((e) => ({
+		...e,
+		title: discreet ? redactSensitiveJournalText(e.title) : e.title,
+	}));
+
+	const plannedStudyBlocks = plan.blocks.filter((b) => b.type === "study");
+	const isToday = date === localDateString(now);
+	const nowObj = new Date(now);
+	const nowClockMin = nowObj.getHours() * 60 + nowObj.getMinutes();
+	const lastLoggedEndMin = localEval.parsedEntries.reduce((mx, e) => {
+		const m = parseClockMin(e.endTime);
+		return m !== null ? Math.max(mx, m) : mx;
+	}, 0);
+	const cutoffMin = Math.max(isToday ? nowClockMin : 24 * 60, lastLoggedEndMin);
+	const remainingPlannedBlocks = isToday ? plannedStudyBlocks.filter((b) => b.startMin >= cutoffMin) : [];
+	const remainingPlannedMin = remainingPlannedBlocks.reduce((a, b) => a + b.durationMin, 0);
+	const plannedSoFarMin = isToday
+		? plannedStudyBlocks.filter((b) => b.startMin < cutoffMin).reduce((a, b) => a + b.durationMin, 0)
+		: localEval.report.plannedStudyMin;
+	const isPartialMiddayLog = isToday && cutoffMin < 20 * 60 && remainingPlannedMin >= 30;
+
 	const prompt = JSON.stringify({
 		date,
-		plannedStudyHours: plan.plannedStudyHours,
+		isPartialMiddayLog,
+		currentClockTime: formatClockMin(cutoffMin),
+		plannedStudyHoursTotal: plan.plannedStudyHours,
+		plannedSoFarMin,
+		remainingPlannedStudyBlocks: remainingPlannedBlocks.map((b) => `${b.startTime}-${b.endTime} ${b.title}`),
 		plannedQuotas: plan.quotas.map((q) => ({ subject: q.subject, targetMin: q.targetMin })),
 		plannedBlocks: plan.blocks.map((b) => `${b.startTime}-${b.endTime} [${b.type}] ${b.title}`),
 		checkedBlocksCount: log?.completedBlockIds.length ?? 0,
-		manualEntries: opts.manualEntries ?? log?.actualEntries ?? [],
-		journalText: journalBody.slice(0, 3500),
+		manualEntries: entriesForAi,
+		journalText: journalBodyForAi.slice(0, 3500),
 		knownSubjects,
 	});
 
@@ -2155,7 +2188,8 @@ export async function evaluateDailyJournalServer(
 	const aiOut = await runPlannerSubmit<AiJournalEvalOut>({
 		role: resolved.role,
 		engine: resolved.engine,
-		systemPrompt: "You are a candid Student Study Auditor. Parse the student's 24h freeform journal against today's planned schedule, score honest adherencePct (0-100), extract structured activity entries with realistic minutes, note strengths & distractions/friction, and give concise next-day adjustment advice. Call submit_journal_evaluation once.",
+		systemPrompt:
+			"You are a candid, supportive Student Study Auditor. Parse the student's freeform journal against today's planned schedule, score honest adherencePct (0-100), extract structured activity entries with realistic minutes, note strengths & distractions/friction, and give concise practical advice. IMPORTANT: Keep output strictly discreet — never repeat explicit personal terms, keep any private break/reset neutral like '[Personal reset]'. If `isPartialMiddayLog` is true, score adherencePct relative to `plannedSoFarMin` (or neutral mid-day progress if no study block was due before `currentClockTime`) and NEVER treat `remainingPlannedStudyBlocks` later today as skipped failures; focus `nextDayAdvice` on finishing the remaining blocks today. Call submit_journal_evaluation once.",
 		promptText: prompt,
 		toolName: "submit_journal_evaluation",
 		toolDescription: "Submit 24h Plan vs Actual compliance evaluation and extracted timeline.",
@@ -2165,22 +2199,26 @@ export async function evaluateDailyJournalServer(
 		validate: (v) => (v.summary?.trim() ? null : "Provide evaluation summary."),
 	});
 
+	const maskOut = (s: string) => (discreet ? redactSensitiveJournalText(s) : s);
+
 	const aiEntries: JournalActivityEntry[] = (aiOut.entries.length > 0 ? aiOut.entries : localEval.parsedEntries).map((e, i) => ({
 		id: `jai_${date}_${i}`,
 		startTime: typeof e.startTime === "string" && e.startTime.trim() ? e.startTime.trim().slice(0, 8) : "08:00",
 		endTime: typeof e.endTime === "string" && e.endTime.trim() ? e.endTime.trim().slice(0, 8) : "09:00",
 		category: e.category,
 		...(typeof e.subject === "string" && e.subject.trim() ? { subject: e.subject.trim().slice(0, 80) } : {}),
-		title: String(e.title || "Logged activity").trim().slice(0, 140),
+		title: maskOut(String(e.title || "Logged activity").trim()).slice(0, 140),
 		minutes: Math.max(5, Math.min(720, Math.round(Number(e.minutes) || 30))),
 		source: "ai_extracted",
 	}));
 
 	const plannedStudyMin = Math.max(30, localEval.report.plannedStudyMin);
 	const actualStudyMin = Math.max(0, Math.min(960, Math.round(Number(aiOut.actualStudyMin) || 0)));
-	const observedRealism = Math.max(0.4, Math.min(1.35, actualStudyMin / plannedStudyMin));
 	const prevRealism = current.realismFactor ?? 1.0;
-	const suggestedRealismFactor = Math.max(0.65, Math.min(1.25, Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100));
+	const observedRealism = isPartialMiddayLog ? prevRealism : Math.max(0.4, Math.min(1.35, actualStudyMin / plannedStudyMin));
+	const suggestedRealismFactor = isPartialMiddayLog
+		? prevRealism
+		: Math.max(0.65, Math.min(1.25, Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100));
 
 	const report: PlanComplianceReport = {
 		date,
@@ -2191,10 +2229,10 @@ export async function evaluateDailyJournalServer(
 		plannedStudyMin: localEval.report.plannedStudyMin,
 		actualStudyMin,
 		realismRatio: Math.round(observedRealism * 100) / 100,
-		summary: aiOut.summary.trim().slice(0, 600),
-		strengths: aiOut.strengths.slice(0, 6).map((s) => String(s).trim().slice(0, 180)).filter(Boolean),
-		frictionPoints: aiOut.frictionPoints.slice(0, 6).map((s) => String(s).trim().slice(0, 180)).filter(Boolean),
-		nextDayAdvice: aiOut.nextDayAdvice.trim().slice(0, 260),
+		summary: maskOut(aiOut.summary.trim()).slice(0, 600),
+		strengths: aiOut.strengths.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
+		frictionPoints: aiOut.frictionPoints.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
+		nextDayAdvice: maskOut(aiOut.nextDayAdvice.trim()).slice(0, 260),
 	};
 
 	const updated = applyJournalEvaluationToConfig(current, date, {
