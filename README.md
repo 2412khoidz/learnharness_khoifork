@@ -21,8 +21,8 @@
 
 **ChronoHarness** (`2412khoidz/learnharness_khoifork`) là nhánh mở rộng từ [**LearnHarness v0.6.1**](https://github.com/amosblomqvist/learnharness), giữ nguyên trọn vẹn phương pháp sư phạm *Measure → Plan → Teach → Practice* nhưng **cài đặt & chạy song song hoàn toàn độc lập** trên Windows và bổ sung loạt tính năng phục vụ ôn thi cường độ cao, theo dõi trí nhớ dài hạn bằng FSRS-6 và học liên thiết bị trên điện thoại.
 
-> **Bản phát hành Windows x64 mới nhất:** [`ChronoHarness-0.6.1-x64-setup.exe` (`chronoharness-0.6.1-r11`)](https://github.com/2412khoidz/learnharness_khoifork/releases/tag/chronoharness-0.6.1-r11)
-> - SHA256: `85263d344b25975b0f807087b5b3a8f8cf8cc160bf84f48cc4a04dac4de7879c`
+> **Bản phát hành Windows x64 mới nhất:** [`ChronoHarness-0.6.1-x64-setup.exe` (`chronoharness-0.6.1-r12`)](https://github.com/2412khoidz/learnharness_khoifork/releases/tag/chronoharness-0.6.1-r12)
+> - SHA256: `b8af4eea23ac80280a6ce90075e600c166cb5daa72b29b2ee5fb7c3ba9096cee`
 
 ![LearnHarness teaching session](docs/assets/teaching-session.png)
 
