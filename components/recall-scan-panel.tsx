@@ -60,7 +60,7 @@ export function RecallScanPanel({ records, onSaved }: { records: MistakeRecord[]
 				<div className="space-y-2">{visible.map((result) => {
 					const eligible = result.verdict === "partial" || result.verdict === "wrong" || result.verdict === "dont_know";
 					return <details key={result.id} className="rounded-lg border bg-background p-2.5 text-xs">
-						<summary className="cursor-pointer"><strong>{labels[result.verdict]}</strong> · {result.sessionTitle} · {result.draft.question}</summary>
+						<summary className="cursor-pointer"><strong>{labels[result.verdict]}</strong> · {result.sessionTitle}<ToolContentResponse className="mt-1">{result.draft.question}</ToolContentResponse></summary>
 						<div className="mt-2 space-y-2">
 							<div><strong>Your answer:</strong><ToolContentResponse>{result.draft.yourAnswer}</ToolContentResponse></div>
 							{result.strengths && <div><strong>What was right:</strong><ToolContentResponse>{result.strengths}</ToolContentResponse></div>}
