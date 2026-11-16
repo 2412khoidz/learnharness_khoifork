@@ -21,8 +21,8 @@
 
 **ChronoHarness** (`2412khoidz/learnharness_khoifork`) là nhánh mở rộng từ [**LearnHarness v0.6.1**](https://github.com/amosblomqvist/learnharness), giữ nguyên trọn vẹn phương pháp sư phạm *Measure → Plan → Teach → Practice* nhưng **cài đặt & chạy song song hoàn toàn độc lập** trên Windows và bổ sung loạt tính năng phục vụ ôn thi cường độ cao, theo dõi trí nhớ dài hạn bằng FSRS-6 và học liên thiết bị trên điện thoại.
 
-> **Bản phát hành Windows x64 mới nhất:** [`ChronoHarness-0.6.1-x64-setup.exe` (`chronoharness-0.6.1-r13`)](https://github.com/2412khoidz/learnharness_khoifork/releases/tag/chronoharness-0.6.1-r13)
-> - SHA256: `0dde2965c06c7ec91b9860502beb5653007090b1496fd9ad100ca5002c4f02b3`
+> **Bản phát hành Windows x64 mới nhất:** [`ChronoHarness-0.6.1-x64-setup.exe` (`chronoharness-0.6.1-r14`)](https://github.com/2412khoidz/learnharness_khoifork/releases/tag/chronoharness-0.6.1-r14)
+> - SHA256: `7c763b650eb912bf76d40a5589aac7d6028239529b1b505c3be8286c60072c45`
 
 ![LearnHarness teaching session](docs/assets/teaching-session.png)
 
@@ -40,7 +40,7 @@ Bảng đối chiếu nhanh giữa **LearnHarness `v0.6.1` gốc** và **ChronoH
 | **Sổ tay lỗi sai & Phân tích AI** | Chỉ hiển thị đúng/sai & giải thích tĩnh trong phiên chat | **Trang `/mistakes`** gom mọi câu sai (kể cả **Free recall** `explain`/`recall` qua AI `flag_mistake` hoặc nút **`Save to mistakes`**) / `"I don't know"` / bài Practice chưa giải gọn, **phân loại 9 nhóm lỗi**, tự động phân tích ngắn nguyên nhân + **"Next time" rule** ngay dưới nút **`Why`**, tool `mistakes` cho AI và tự nhắc trong **Exam Prep** |
 | **Lập lịch học tập & Thói quen** | Không có | **Trang `/planner` (Student Study OS):** chọn **`Local · 0 tokens`** hoặc **`AI Coach` (BYOK)** theo 3 cường độ nhất quán (**`Healthy < Balanced < Intensive`**), nút **`Coach`** mở Side Chat đối thoại chỉnh lịch/ngủ/thói quen + **`Undo`** 1 chạm, nút **`Lực học`** chẩn đoán **6 trục khoa học** (FSRS-6, Brier Calibration, Solve Velocity, Graph Foundations, Mistake Taxonomy, Circadian EWMA), sửa trực tiếp từng block & giờ thức/ngủ/ăn trong ngày, **`Auto-Research Syllabus (AI)`** có Live Trace, cộng tab **`24h Journal & Audit`** đối chiếu 24h (lưu tới 365 ngày) |
 | **Nhận biết khoảng nghỉ học** | Không theo dõi thời gian gián đoạn giữa các lượt | **Temporal Gap Hints** tự gắn ghi chú tạm sau `>= 4 giờ` / `>= 24 giờ` nghỉ trên payload gửi model |
-| **Học trên điện thoại (QR)** | Không có | **Mobile Study Companion v2** qua `Same Wi-Fi (LAN)` hoặc `Any network (HTTPS)` (Cloudflare Quick Tunnel pre-warm, chạy nền 60m): tab **`Photo`**, **`FSRS Cards`**, **`Exam & Chat`** (kèm **`📷 Camera`** & **`📎 Attach File`** trong chat) |
+| **Học trên điện thoại (QR)** | Không có | **Mobile Study Companion v2** qua `Same Wi-Fi (LAN)` hoặc `Any network (HTTPS)` (Cloudflare Quick Tunnel pre-warm, chạy nền 60m) gồm **5 tab riêng**: **`Photo`**, **`Cards`**, **`Plan`**, **`Log`**, **`Exam & Chat`** (kèm **`📷 Camera`** & **`📎 Attach File`**) |
 | **Ghi chú, Toán & Sửa tin nhắn** | Chỉ trích dẫn vào câu hỏi hoặc chat phụ | **Sổ tay từng bài (`Notes`)** kéo rộng `280–560px`, bôi đen **`Note`** để trích dẫn, **click công thức toán copy LaTeX**, **`Edit Last`** tua ngược lượt cuối, **Pin/Archive** session, **dán ảnh Ctrl+V** |
 | **Nhập sách & Ngôn ngữ Graph** | Không có `.epub`, trích xuất hay bị đổi sang tiếng Anh | Nhập **`.epub`** (≤ 25 MB) kèm **`[DOCUMENT OUTLINE DIGEST]`**, giữ ngôn ngữ nguồn (**`Extraction language`**), sửa bare LaTeX & đóng gói KaTeX standalone |
 | **Sao lưu toàn bộ dữ liệu** | Sao chép thủ công thư mục `data/` | **1-Click `Backup & Restore`** ra file `.json` (kèm `mistakes.json`, không xuất `auth.json` / API keys) |
@@ -79,7 +79,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
 
 ### 3. Đồ thị Tri thức ↔ FSRS-6 ↔ Vòng lặp Practice & Optimizer
 - **Bản đồ nhiệt FSRS-6 trên Graph (`components/graph-view.tsx`):**
-  - Thanh công cụ lọc trên Đồ thị hiển thị số node **Strong / Decaying / Overdue**, chip **`FSRS`**, **`Due (N)`**, **`Foundations (N · X untracked)`**, **`Prereq (N)`** (cảnh báo node có tiền đề yếu), **`Off`**, và nút **`Practice weak`**.
+  - Thanh công cụ lọc trên Đồ thị hiển thị số node **Strong / Decaying / Overdue**, chip **`FSRS`**, **`Due (N)`**, **`Foundations (N · X untracked)`**, **`Prereq (N)`** (cảnh báo node có tiền đề yếu), **`Off`**, và nút **`Practice weak`**. Thanh có tay nắm **kéo-thả tự do** (nhấp đúp để đặt lại vị trí) và nút **`▴`/`▾`** thu gọn thành pill nhỏ gọn (lưu trạng thái trong `localStorage`) để không che các cụm node phía trên.
   - Bấm **`Practice weak`** (hoặc **`Select for Practice`** trên thẻ node) nạp toàn bộ các node yếu/đến hạn/tiền đề yếu và chuyển thẳng thanh soạn chat ở màn hình Graph/Home sang chế độ **Practice** (kèm nút **`Start Practice →`**).
   - Click từng node trên Graph để xem trực tiếp chỉ số **`R=% · S=..d · D=..`**, số mệnh đề phụ thuộc phía sau (`Supports N downstream propositions`), trạng thái `Untracked foundation` và danh sách `Weak prerequisites`.
 - **Chấm điểm ngược tự động từ Practice → FSRS-6 (`src/server/graph-fsrs.ts`):**
@@ -96,14 +96,12 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
   - **`Same Wi-Fi (LAN)`:** Kết nối trực tiếp qua mạng nội bộ.
   - **`Any network (HTTPS)`:** Dùng Cloudflare Quick Tunnel (`trycloudflare.com`) được **pre-warm sẵn** để truy cập từ 4G/5G hoặc Wi-Fi khác mạng.
 - **Chạy nền bền bỉ sau khi đóng bảng QR:** Bấm `Done` hoặc `X` chỉ ẩn modal QR — kết nối điện thoại vẫn chạy nền (idle TTL **60 phút**, tự gia hạn khi có thao tác) kèm chấm xanh trạng thái trên nút điện thoại, **không** bị mất kết nối hay lỗi `HTTP 404`. Chỉ ngắt khi bấm **`Disconnect`** hoặc tạo lại mã bằng **`New code`**.
-- **3 tab tối ưu trực tiếp cho điện thoại (`src/server/phone-mobile-ui.ts`):**
+- **5 tab tách biệt tối ưu trực tiếp cho điện thoại (`src/server/phone-mobile-ui.ts`):**
   1. **`Photo`:** Chụp ảnh camera (`Take Photo with Camera`) hoặc chọn nhiều ảnh gửi thẳng vào ô soạn thảo Desktop; có tùy chọn **`High detail (2400px · slower over 4G/5G)`**.
-  2. **`FSRS Cards`:** Ôn thẻ FSRS-6 đến hạn ngay trên điện thoại (`Show Answer` → `Again` / `Hard` / `Good` / `Easy` kèm ngày hẹn dự kiến), lưu thẳng vào `flashcards.json`.
-  3. **`Exam & Chat`:**
-     - Điều chỉnh **`Study Mode`**, **`Teaching Pace`**, **`Subject Scope`**, **`Saved Exams`** và theo dõi **`Readiness %`**.
-     - Mở danh sách **`Recent Sessions`**, đọc bài có công thức **KaTeX**, gửi câu trả lời quiz/giải thích (`Tutor Check`, `Submit Selected`, `I don't know`), hoặc tạo mới **`Teach Me` / `Practice Problems` / `Drill Weak Roots`**.
-     - Chỉnh sửa **`Per-Lesson Notes`** đồng bộ hai chiều với máy tính.
-     - **`📷 Camera` & `📎 Attach File` ngay trong khung Chat:** Chụp trực tiếp ảnh bài làm viết tay hoặc đính kèm nhiều tài liệu (ảnh, `.pdf`, `.txt`, `.md`, `.tex`, code... tới **25 MB/file**) ngay lúc trả lời AI Tutor hoặc khi tạo bài học mới qua endpoint `/p/<token>/companion/upload`.
+  2. **`Cards`:** Ôn thẻ FSRS-6 đến hạn ngay trên điện thoại (`Show Answer` → `Again` / `Hard` / `Good` / `Easy` kèm ngày hẹn dự kiến), lưu thẳng vào `flashcards.json`.
+  3. **`Plan`:** Xem **`Today's Study Plan`** tách riêng — đổi nhanh cường độ **`Healthy` / `Balanced` / `Intensive`**, theo dõi các kỳ thi sắp tới (`D-x`), **Subject Quotas & Checklists** (cộng nhanh `+15m` / `+30m`, tick hoàn thành checklist hỗ trợ KaTeX), và chạm **`Tap ✓`** trên **Time-Blocked Schedule** cả ngày.
+  4. **`Log`:** Ghi nhật ký tách riêng cho **Sleep & Energy** (giờ đi ngủ `Slept at`, giờ dậy `Woke at`, `Sleep on Target`, `Woke Early (4-5 AM)`, `Energy 1–5`, `Sleep Q 1–5`), **Meals, Hobbies & Daily Note** (`Meals OK`, `Hobby Done`, ghi chú ngắn), **Log Completed Task / Study Bout** (chọn môn + số phút + tên việc vừa xong), và **24h Reality Journal** kèm nút **`Save & Score 24h Log (0 tokens)`** trả ngay `Adherence %`.
+  5. **`Exam & Chat`:** Tập trung hoàn toàn vào học & thi — điều chỉnh **`Study Mode`**, **`Teaching Pace`**, **`Subject Scope`**, **`Saved Exams`**, theo dõi **`Readiness %`**, đọc/trả lời **`Recent Sessions`** (KaTeX, **`📷 Camera`**, **`📎 Attach File`**, `Per-Lesson Notes`) hoặc tạo mới **`Teach Me` / `Practice Problems` / `Drill Weak Roots`**.
 
 ### 5. Công cụ Học tập, Trích xuất Tài liệu, Toán LaTeX & Sao lưu
 - **Sổ tay bài học (`Notes` — `components/lesson-notes-panel.tsx`):** Nút **`Notes`** góc trên bên phải mỗi session mở khung ghi chú Markdown, kéo giãn **`280px–560px`** (mặc định `340px`), tự lưu sau `500ms`, có nút **Copy Markdown**, **Download `.md`**, đồng bộ với Mobile Companion.
@@ -147,7 +145,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
 ### 8. Study Planner & Habit Tracker (`/planner` — Student Study OS)
 - **Giao diện tối giản & nút nhắc chuyển môn mềm (`components/sidebar.tsx`, `components/planner-page.tsx`, `components/planner-switch-pill.tsx`):**
   - Nút **`Planner`** nằm gọn dưới chân Sidebar trái cùng hàng với **`Settings`** và **`Mistakes`**, không làm chật danh sách `Sessions`.
-  - **`PlannerSwitchPill`** tự ẩn khi chưa đặt lịch hoặc khi đang ở `/planner`: nhắc trước **2 phút** sắp hết block (`+5m` / `Switch`), đề xuất chuyển môn mềm khi hết giờ (`Switch` / `+5m` / `+15m`), không gắn idle timer làm gián đoạn lúc giải Toán / nháp giấy, và không bao giờ khóa quyền thao tác.
+  - **`PlannerSwitchPill`** tự ẩn khi chưa đặt lịch hoặc khi đang ở `/planner`, mặc định neo phía trên nút chọn model góc dưới phải (`bottom-16 right-4`) để không che menu model: nhắc trước **2 phút** sắp hết block (`+5m` / `Switch`), đề xuất chuyển môn mềm khi hết giờ (`Switch` / `+5m` / `+15m`), có tay nắm **kéo-thả vị trí** (nhấp đúp đặt lại) và nút **`-` thu gọn** thành pill đếm phút nhỏ (lưu trong `localStorage`), không gắn idle timer và không bao giờ khóa quyền thao tác.
 - **2 Engine lập lịch nhất quán, Lực học cá nhân & Chỉnh tay toàn quyền (`src/core/planner.ts`, `src/server/planner.ts`):**
   - **`Local · 0 tokens` & `AI Coach` đồng bộ cường độ (`Healthy < Balanced < Intensive`) & Dự báo 7 ngày:** Tham số chế độ cường độ (`Healthy` `1.5–4.0h`, `Balanced` `2.0–5.75h`, `Intensive` `3.5–9.0h`), trần giờ học và lịch tuần **được đồng bộ chặt chẽ cả hai chiều** (đổi cường độ ở chế độ `AI Coach` tự động sinh lại lịch & cập nhật ngay **`7-Day Workload Forecast`**). Hỗ trợ **Pin / Pause / Focus Today**, bù **Adaptive Carryover**, và render **KaTeX/LaTeX** mượt trực tiếp qua `HostMarkdown` không cắt gãy công thức.
   - **Kéo ngữ cảnh cụ thể từ Graph & Sessions (không còn task chung chung):** Trích xuất trực tiếp tên tài liệu (`.pdf`/`.epub`/`.md`/Notion CSV chưa hoàn thành), chương đang học trong `PlanTree` và bài tập còn dở (`problem` / `conclude`) để đưa thành đầu việc cụ thể thay vì câu chung chung.
@@ -167,7 +165,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
   - **Calendar kiểu Google Calendar:** chuyển chế độ **`Month`** hoặc **`Year`**, chạm vào bất kỳ ngày nào để xem trước free/study hours, tắt TKB tuần riêng ngày thi (`dayOverrides`), thêm/xóa sự kiện một lần, đặt ghi chú/target giờ riêng cho ngày đó, hoặc bấm **Edit** sửa từng milestone.
   - **Đồng bộ liền mạch Exam Prep ↔ Graph ↔ Sessions ↔ `.pdf`:** tự đồng bộ các **Exam Prep Profiles** sang Calendar & Milestones (`Sync Exam Profiles`), liên kết nhiều **Graph Clusters / Chat Sessions** để tự kéo ghi chú bài học, plan tree & tài liệu đã học (`Pull Context (0 tokens)`), kèm nạp trực tiếp **`.pdf` / `.epub` / `.md` / `.txt` / `.ics`** (`/api/planner/extract-material`) cho **`Parse Outline (0 tokens)`** và **`Auto-Research (AI)`**.
   - **Ngủ sâu chống tỉnh sớm, Gaming có điểm dừng & Tối ưu Hobby bằng AI (`Habits, Hobbies & Sleep`):** Hỗ trợ cả **tỉnh giấc sớm 4–5h sáng** (`Early waking (4–5 AM)`: giãn nhẹ khung sáng, thêm power nap 25 phút đầu giờ chiều tránh ngủ muộn quá 14:30, nới đệm tắt màn hình trước ngủ), thêm khung **Gaming có giới nghiêm** trước giờ ngủ, mục **tối ưu điều độ thói quen cá nhân kín đáo** (`Private Discipline & Habit Moderation`) và nút **`Suggest Balance (0t)` / `Optimize with AI`** (`/api/planner/suggest-lifestyle`) bên cạnh chỉnh trực tiếp TKB & 3 bữa ăn.
-  - **Mobile Companion Sync:** xem lịch hôm nay, mốc thi, tick **`Meals OK`**, **`Hobby Done`**, hoàn thành từng block và nhập **`Slept` (giờ ngủ) + `Energy 1–5`** ngay trên điện thoại.
+  - **Mobile Companion Sync:** tách thành tab **`Plan`** (lịch ngày, đổi cường độ `Healthy/Balanced/Intensive`, quotas & checklists) và tab **`Log`** (ngủ/thức/tỉnh sớm, `Meals OK`, `Hobby Done`, `Energy`/`Sleep Q 1–5`, log task theo phút và chấm **`Save & Score 24h Log`**) đồng bộ hai chiều với máy tính.
 
 ---
 
@@ -186,7 +184,7 @@ Chi tiết từng nhóm nâng cấp so với bản gốc:
 | **Nạp thẻ để FSRS nhận diện Graph** | Vào tab **`FLASHCARDS`** ở Sidebar → chọn cụm/mệnh đề từ Graph để sinh cue (hoặc dùng **`+ Create card`**). Sau đó ôn thẻ hoặc làm **Practice** (`conclude`) để FSRS tự cập nhật lịch. |
 | **Ghi chú, trích dẫn & Copy LaTeX** | Bấm **`Notes`** ở góc trên phải chat; bôi đen chữ → **`Note`** để trích dẫn; click vào công thức toán để copy LaTeX; bấm **`Edit Last`** nếu muốn sửa lại câu vừa hỏi. |
 | **Nhập sách `.epub` / tài liệu** | Ở màn hình **Graph** (hoặc Home), bấm **`Extract files…`** → chọn `.epub`, `.pdf`, `.md`, `.tex`, `.txt` (≤ 25 MB/file). |
-| **Học & gửi ảnh từ điện thoại** | Bấm icon **QR / Điện thoại** cạnh ô nhập → chọn **`Any network (HTTPS)`** hoặc **`Same Wi-Fi (LAN)`** → quét QR → bấm **`Done`** để ẩn bảng QR nhưng giữ kết nối chạy nền. Dùng tab **`Photo`**, **`FSRS Cards`**, **`Exam & Chat`** (có **`📷 Camera`** & **`📎 Attach File`**). Khi cần ngắt hẳn, mở lại bảng QR bấm **`Disconnect`**. |
+| **Học & gửi ảnh từ điện thoại** | Bấm icon **QR / Điện thoại** cạnh ô nhập → chọn **`Any network (HTTPS)`** hoặc **`Same Wi-Fi (LAN)`** → quét QR → bấm **`Done`** để ẩn bảng QR nhưng giữ kết nối chạy nền. Dùng 5 tab riêng: **`Photo`**, **`Cards`**, **`Plan`**, **`Log`**, **`Exam & Chat`** (có **`📷 Camera`** & **`📎 Attach File`**). Khi cần ngắt hẳn, mở lại bảng QR bấm **`Disconnect`**. |
 | **Xem lại & phân tích lỗi sai** | Bấm **`Mistakes`** dưới chân Sidebar trái (cạnh `Settings`) → chọn **`Scan past sessions`** (`Analyze them`) để quét lịch sử cũ hoặc mở nút **`Why`** ngay dưới câu vừa làm sai trong chat. |
 | **Sao lưu / Chuyển máy** | **Settings (`Ctrl+,`) → `General` → `Backup & Restore` → `Export snapshot`**; sang máy mới bấm **`Restore snapshot`** và nhập lại API key ở **`Providers`**. |
 
