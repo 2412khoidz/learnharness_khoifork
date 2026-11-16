@@ -14,6 +14,7 @@ import {
 } from "../core/exam-prep.ts";
 import { ERROR_TYPE_LABELS, summarizeMistakes, type MistakeRecord } from "../core/mistakes.ts";
 import { computeGraphFsrsSummary, emptyGraphFsrsSummary } from "../core/fsrs-graph.ts";
+import { clipPreservingLatex } from "../core/planner.ts";
 import type { Cluster, GraphChain, GraphNode } from "../core/contracts.ts";
 import type { GraphStore } from "../core/ports.ts";
 import { birthSessionPartition } from "../core/session-clusters.ts";
@@ -98,8 +99,7 @@ function buildExamPrepMistakeHints(records: readonly MistakeRecord[]): ExamPrepM
 	const recentRules: string[] = [];
 	const seen = new Set<string>();
 	for (const rec of sortedReady) {
-		const rawRule = rec.analysis!.rule.replace(/\s+/g, " ").trim();
-		const rule = rawRule.length <= 220 ? rawRule : `${rawRule.slice(0, 219).trimEnd()}…`;
+		const rule = clipPreservingLatex(rec.analysis!.rule, 220);
 		if (!rule || seen.has(rule)) continue;
 		seen.add(rule);
 		recentRules.push(rule);

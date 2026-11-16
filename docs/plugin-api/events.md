@@ -69,6 +69,7 @@ export interface ServerEvents {
         data?: unknown;
     };
     "mistakes-changed": Record<string, never>;
+    "planner-changed": Record<string, never>;
 }
 ```
 
@@ -97,6 +98,7 @@ export interface ServerEvents {
 - ["plugin-message".topic](#serverevents-plugin-messagetopic)
 - ["plugin-message".data](#serverevents-plugin-messagedata)
 - ["mistakes-changed"](#serverevents-mistakes-changed)
+- ["planner-changed"](#serverevents-planner-changed)
 
 ### ServerEvents "turn-started"
 
@@ -285,6 +287,14 @@ Mistake-log mutation (mistakes fork): any record added, analyzed, retried or del
 
 ```ts
 "mistakes-changed": Record<string, never>;
+```
+
+### ServerEvents "planner-changed"
+
+Study planner mutation: schedule, milestones, lifestyle, or daily check-in updated.
+
+```ts
+"planner-changed": Record<string, never>;
 ```
 
 ## ServerEventType

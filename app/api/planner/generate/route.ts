@@ -1,5 +1,8 @@
+import type { ModelRole } from "@/config";
 import type { PlannerEngineMode } from "@/src/core";
 import { generatePlannerSchedule, PlannerAiUnavailable } from "@/src/server";
+
+const ALLOWED_ROLES = new Set<string>(["researcher", "prober", "analyst", "sideQuestion", "visualMaker", "pdfReader"]);
 
 export async function POST(request: Request) {
 	let body: Record<string, unknown> = {};
@@ -12,12 +15,17 @@ export async function POST(request: Request) {
 
 	const mode: PlannerEngineMode | undefined =
 		body.mode === "llm" || body.mode === "local" ? body.mode : undefined;
+	const preferredRole =
+		typeof body.preferredRole === "string" && ALLOWED_ROLES.has(body.preferredRole)
+			? (body.preferredRole as ModelRole)
+			: undefined;
 	const date = typeof body.date === "string" ? body.date : undefined;
 	const focusNote = typeof body.focusNote === "string" ? body.focusNote : undefined;
 
 	try {
 		const { snapshot } = await generatePlannerSchedule({
 			mode,
+			preferredRole,
 			date,
 			focusNote,
 			signal: request.signal,

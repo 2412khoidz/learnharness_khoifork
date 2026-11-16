@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
 	addDaysToDate,
 	buildMonthGridDates,
+	clipPreservingLatex,
 	computeLocalPlannerPlan,
 	daysBetweenDates,
 	formatClockMin,
@@ -39,6 +40,7 @@ import {
 	type WeeklyForecastDay,
 } from "@/src/core";
 import { TopBar } from "@/components/top-bar";
+import { HostMarkdown } from "@/components/host-markdown";
 import { BrailleSpinner } from "@/components/braille-spinner";
 import { useServerEvent } from "@/components/server-events";
 import { cn } from "@/lib/utils";
@@ -108,6 +110,19 @@ const MONTH_NAMES = [
 	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ] as const;
 
+function PlannerMathText({ text, className }: { text: string; className?: string }) {
+	const safe = clipPreservingLatex(text, 280);
+	const hasBalancedMath = /\$[^$]+\$/.test(safe) && (safe.match(/(?<!\\)\$/g) ?? []).length % 2 === 0;
+	if (!hasBalancedMath) {
+		return <span className={className}>{formatPlainMathPreview(safe, 260)}</span>;
+	}
+	return (
+		<span className={cn("inline [&_.katex]:[font-size:1em] [&_p]:m-0 [&_p]:inline", className)}>
+			<HostMarkdown text={safe} />
+		</span>
+	);
+}
+
 function formatMinCompact(min: number): string {
 	const h = Math.floor(min / 60);
 	const m = min % 60;
@@ -121,6 +136,7 @@ export function PlannerPage() {
 	const [tab, setTab] = useState<PlannerTab>("today");
 	const [busy, setBusy] = useState(false);
 	const [aiNote, setAiNote] = useState("");
+	const [coachRole, setCoachRole] = useState("");
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
 	const load = useCallback(async () => {
@@ -164,11 +180,13 @@ export function PlannerPage() {
 			setBusy(true);
 			setErrorMsg(null);
 			try {
+				const mode = overrideMode ?? snap?.config.engineMode ?? "local";
 				const res = await fetch("/api/planner/generate", {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({
-						mode: overrideMode ?? snap?.config.engineMode ?? "local",
+						mode,
+						...(mode === "llm" && coachRole ? { preferredRole: coachRole } : {}),
 						focusNote: aiNote.trim() || undefined,
 					}),
 				});
@@ -181,7 +199,7 @@ export function PlannerPage() {
 				setBusy(false);
 			}
 		},
-		[aiNote, snap?.config.engineMode],
+		[aiNote, coachRole, snap?.config.engineMode],
 	);
 
 	const checkIn = useCallback(async (payload: Record<string, unknown>) => {
@@ -257,7 +275,13 @@ export function PlannerPage() {
 									type="button"
 									data-testid={`planner-intensity-${id}`}
 									disabled={busy}
-									onClick={() => void patchPlanner({ intensity: id })}
+									onClick={() => {
+										void patchPlanner({ intensity: id }).then(() => {
+											if (snap.config.engineMode === "llm" && snap.aiAvailability.coach.available) {
+												void generatePlan("llm");
+											}
+										});
+									}}
 									className={cn(
 										"inline-flex items-center gap-1 rounded-md px-2 py-1 transition-colors",
 										snap.config.intensity === id
@@ -337,6 +361,9 @@ export function PlannerPage() {
 									{snap.plan.carryoverNote && (
 										<p className="mt-1 text-[11px] text-primary">{snap.plan.carryoverNote}</p>
 									)}
+									{snap.plan.examDeficitWarning && (
+										<p className="mt-1 text-[11px] text-warning">{snap.plan.examDeficitWarning}</p>
+									)}
 									<div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-xs">
 										<button
 											type="button"
@@ -396,14 +423,32 @@ export function PlannerPage() {
 											90m cycle wakes: {snap.plan.habitStrength.cycleWakeSuggestions.slice(0, 2).join(" · ")}
 										</p>
 									)}
-									<div className="mt-2 flex items-center gap-2 text-xs">
-										<label className="text-[11px] text-muted-foreground">Log slept at:</label>
+									<div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+										<label className="text-[11px] text-muted-foreground">Slept:</label>
 										<input
 											type="time"
 											value={todayLog?.actualBedtime ?? snap.config.lifestyle.sleep.currentBedtime}
 											onChange={(e) => void checkIn({ date: snap.plan.date, actualBedtime: e.target.value })}
 											className="rounded border bg-background px-1.5 py-0.5 text-xs"
 										/>
+										<label className="text-[11px] text-muted-foreground">Woke:</label>
+										<input
+											type="time"
+											value={todayLog?.actualWakeTime ?? snap.plan.todayWakeTime}
+											onChange={(e) => void checkIn({ date: snap.plan.date, actualWakeTime: e.target.value })}
+											className="rounded border bg-background px-1.5 py-0.5 text-xs"
+										/>
+										<button
+											type="button"
+											onClick={() => void checkIn({ date: snap.plan.date, wokeEarlyUnintended: !todayLog?.wokeEarlyUnintended })}
+											className={cn(
+												"rounded border px-1.5 py-0.5 text-[10px] transition-colors",
+												todayLog?.wokeEarlyUnintended ? "border-warning/40 bg-warning/10 text-warning" : "text-muted-foreground hover:bg-accent",
+											)}
+											title="Flag unintended 4-5 AM awakening so schedule softens morning load and adds recovery nap"
+										>
+											{todayLog?.wokeEarlyUnintended ? "Woke early ✓" : "Woke early?"}
+										</button>
 										<button
 											type="button"
 											onClick={() => setTab("lifestyle")}
@@ -420,16 +465,22 @@ export function PlannerPage() {
 										<span>{snap.signals.examPrep.examReadinessPct}% graph ready</span>
 									</div>
 									{snap.plan.coachSummary ? (
-										<p className="mt-1.5 text-xs leading-relaxed text-foreground">{snap.plan.coachSummary}</p>
+										<div className="mt-1.5 text-xs leading-relaxed text-foreground">
+											<PlannerMathText text={snap.plan.coachSummary} />
+										</div>
 									) : (
-										<p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+										<div className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
 											{snap.signals.subjectSignals.length > 0
 												? `${snap.signals.subjectSignals.reduce((a, s) => a + s.dueCount, 0)} FSRS cards due · ${snap.signals.subjectSignals.reduce((a, s) => a + s.weakCount, 0)} weak foundations tracked.`
 												: "Add exams, competitions, or weekly fixed events to tailor your study quotas."}
-											{snap.signals.mistakeHints?.recentRules[0]
-												? ` Top mistake rule: "${formatPlainMathPreview(snap.signals.mistakeHints.recentRules[0], 140)}"`
-												: ""}
-										</p>
+											{snap.signals.mistakeHints?.recentRules[0] && (
+												<span>
+													{" "}Top mistake rule: &ldquo;
+													<PlannerMathText text={snap.signals.mistakeHints.recentRules[0]} className="text-foreground" />
+													&rdquo;
+												</span>
+											)}
+										</div>
 									)}
 									{snap.signals.learningProfile && (
 										<div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
@@ -458,14 +509,29 @@ export function PlannerPage() {
 										</div>
 									)}
 									{snap.config.engineMode === "llm" && (
-										<div className="mt-2 flex gap-1.5">
+										<div className="mt-2 flex flex-wrap gap-1.5">
 											<input
 												type="text"
 												value={aiNote}
 												onChange={(e) => setAiNote(e.target.value)}
-												placeholder="Optional AI note (e.g. mệt buổi tối, ưu tiên Giải tích)..."
+												placeholder="Optional AI note (e.g. dậy sớm 4h mệt, ưu tiên đề 1 BTVN)..."
 												className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 text-xs"
 											/>
+											{snap.aiAvailability.availableRoles && snap.aiAvailability.availableRoles.length > 0 && (
+												<select
+													value={coachRole}
+													onChange={(e) => setCoachRole(e.target.value)}
+													className="max-w-[155px] truncate rounded-md border bg-background px-1.5 py-1 text-[11px]"
+													title="Select AI Coach model role"
+												>
+													<option value="">Auto ({snap.aiAvailability.coach.modelLabel ?? "coach"})</option>
+													{snap.aiAvailability.availableRoles.map((r) => (
+														<option key={r.role} value={r.role}>
+															{r.label}: {r.modelLabel}
+														</option>
+													))}
+												</select>
+											)}
 										</div>
 									)}
 								</div>
@@ -529,6 +595,7 @@ export function PlannerPage() {
 									snap={snap}
 									busy={busy}
 									onSaveLifestyle={(lifestyle) => patchPlanner({ lifestyle })}
+									onError={setErrorMsg}
 								/>
 							)}
 							{tab === "journal" && (
@@ -1020,7 +1087,7 @@ function TodayQuotasTab({
 												) : (
 													<CircleIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
 												)}
-												<span>{formatPlainMathPreview(item.text, 160)}</span>
+												<PlannerMathText text={item.text} />
 											</button>
 										</li>
 									);
@@ -1277,7 +1344,7 @@ function TodayQuotasTab({
 								</div>
 								<div className="min-w-0 flex-1">
 									<div className={cn("truncate text-sm font-medium", isDone && "line-through")}>
-										{blk.title}
+										<PlannerMathText text={blk.title} />
 									</div>
 									{(blk.reason || blk.cognitiveLoad) && (
 										<div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -1286,7 +1353,7 @@ function TodayQuotasTab({
 													{blk.cognitiveLoad}
 												</span>
 											)}
-											{blk.reason && <span>{blk.reason}</span>}
+											{blk.reason && <PlannerMathText text={blk.reason} />}
 										</div>
 									)}
 								</div>
@@ -2762,13 +2829,17 @@ function LifestyleTab({
 	snap,
 	busy,
 	onSaveLifestyle,
+	onError,
 }: {
 	snap: PlannerSnapshot;
 	busy: boolean;
 	onSaveLifestyle: (lifestyle: LifestyleConfig) => Promise<void>;
+	onError: (msg: string | null) => void;
 }) {
 	const [draft, setDraft] = useState<LifestyleConfig>(snap.config.lifestyle);
 	const [newHobby, setNewHobby] = useState("");
+	const [suggesting, setSuggesting] = useState(false);
+	const [suggestionInfo, setSuggestionInfo] = useState<{ rationale: string; tips: string[]; modelLabel: string } | null>(null);
 
 	useEffect(() => {
 		setDraft(snap.config.lifestyle);
@@ -2786,13 +2857,78 @@ function LifestyleTab({
 		setNewHobby("");
 	};
 
+	const runSuggestLifestyle = async (useAi: boolean) => {
+		setSuggesting(true);
+		onError(null);
+		try {
+			const res = await fetch("/api/planner/suggest-lifestyle", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ useAi }),
+			});
+			const data = (await res.json()) as {
+				hobbies?: string[];
+				dailyHobbyMin?: number;
+				gameBudgetMin?: number;
+				gameCutoffBeforeBedMin?: number;
+				windDownBufferMin?: number;
+				allowMiddayRecoveryNap?: boolean;
+				rationale?: string;
+				tips?: string[];
+				modelLabel?: string;
+				error?: string;
+			};
+			if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+			setDraft((prev) => ({
+				...prev,
+				...(data.hobbies && data.hobbies.length > 0 ? { hobbies: data.hobbies } : {}),
+				...(typeof data.dailyHobbyMin === "number" ? { dailyHobbyMin: data.dailyHobbyMin } : {}),
+				...(typeof data.gameBudgetMin === "number" ? { gameBudgetMin: data.gameBudgetMin } : {}),
+				...(typeof data.gameCutoffBeforeBedMin === "number" ? { gameCutoffBeforeBedMin: data.gameCutoffBeforeBedMin } : {}),
+				sleep: {
+					...prev.sleep,
+					...(typeof data.windDownBufferMin === "number" ? { windDownBufferMin: data.windDownBufferMin } : {}),
+					...(typeof data.allowMiddayRecoveryNap === "boolean" ? { allowMiddayRecoveryNap: data.allowMiddayRecoveryNap } : {}),
+				},
+			}));
+			if (data.rationale) {
+				setSuggestionInfo({
+					rationale: data.rationale,
+					tips: data.tips ?? [],
+					modelLabel: data.modelLabel ?? "local",
+				});
+			}
+		} catch (e) {
+			onError(e instanceof Error ? e.message : "Could not optimize lifestyle settings.");
+		} finally {
+			setSuggesting(false);
+		}
+	};
+
+	const guardrail = draft.wellnessGuardrail ?? {
+		enabled: false,
+		currentWeeklyFreq: 4,
+		targetWeeklyFreq: 1,
+		riskWindows: ["late_night", "post_stress"],
+		replacementProtocol: "10m walk, pushups/water, offline book, phone outside bed",
+	};
+
+	const toggleRiskWindow = (win: string) => {
+		const prevList = guardrail.riskWindows ?? [];
+		const nextList = prevList.includes(win) ? prevList.filter((w) => w !== win) : [...prevList, win];
+		setDraft({
+			...draft,
+			wellnessGuardrail: { ...guardrail, enabled: true, riskWindows: nextList },
+		});
+	};
+
 	return (
 		<div className="grid gap-4 lg:grid-cols-12">
 			<div className="flex flex-col gap-4 rounded-xl border bg-card p-4 text-xs lg:col-span-7">
 				<div>
-					<h3 className="text-sm font-medium">Sleep Anchor & Recovery</h3>
+					<h3 className="text-sm font-medium">Sleep Anchor &amp; Continuity Recovery</h3>
 					<p className="mt-0.5 text-muted-foreground">
-						Pulls skewed late-night sleep back gradually by your chosen daily step instead of an impossible sudden jump.
+						Handles both gradual bedtime shifting and 4–5 AM early-waking consolidation.
 					</p>
 					<div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
 						<div>
@@ -2814,6 +2950,15 @@ function LifestyleTab({
 							/>
 						</div>
 						<div>
+							<label className="mb-1 block text-muted-foreground">Preferred Wake</label>
+							<input
+								type="time"
+								value={draft.sleep.preferredWakeTime ?? "07:00"}
+								onChange={(e) => setDraft({ ...draft, sleep: { ...draft.sleep, preferredWakeTime: e.target.value } })}
+								className="w-full rounded-md border bg-background px-2 py-1"
+							/>
+						</div>
+						<div>
 							<label className="mb-1 block text-muted-foreground">Sleep Goal (hrs)</label>
 							<input
 								type="number"
@@ -2827,6 +2972,8 @@ function LifestyleTab({
 								className="w-full rounded-md border bg-background px-2 py-1"
 							/>
 						</div>
+					</div>
+					<div className="mt-2.5 grid grid-cols-2 gap-3 sm:grid-cols-3">
 						<div>
 							<label className="mb-1 block text-muted-foreground">Shift Step (min/day)</label>
 							<input
@@ -2840,6 +2987,40 @@ function LifestyleTab({
 								}
 								className="w-full rounded-md border bg-background px-2 py-1"
 							/>
+						</div>
+						<div>
+							<label className="mb-1 block text-muted-foreground">Screen-off Wind-down (m)</label>
+							<input
+								type="number"
+								min={15}
+								max={60}
+								step={5}
+								value={draft.sleep.windDownBufferMin ?? 30}
+								onChange={(e) =>
+									setDraft({ ...draft, sleep: { ...draft.sleep, windDownBufferMin: Number(e.target.value) || 30 } })
+								}
+								className="w-full rounded-md border bg-background px-2 py-1"
+							/>
+						</div>
+						<div className="col-span-2 flex flex-col justify-end gap-1 sm:col-span-1">
+							<label className="flex items-center gap-1.5 text-[11px] text-foreground">
+								<input
+									type="checkbox"
+									checked={Boolean(draft.sleep.earlyWakingIssue)}
+									onChange={(e) => setDraft({ ...draft, sleep: { ...draft.sleep, earlyWakingIssue: e.target.checked } })}
+								/>
+								Early waking (4–5 AM)
+							</label>
+							<label className="flex items-center gap-1.5 text-[11px] text-foreground">
+								<input
+									type="checkbox"
+									checked={draft.sleep.allowMiddayRecoveryNap ?? true}
+									onChange={(e) =>
+										setDraft({ ...draft, sleep: { ...draft.sleep, allowMiddayRecoveryNap: e.target.checked } })
+									}
+								/>
+								25m midday recovery nap
+							</label>
 						</div>
 					</div>
 				</div>
@@ -3005,6 +3186,134 @@ function LifestyleTab({
 							</select>
 						</div>
 					</div>
+
+					<div className="mt-3 grid grid-cols-2 gap-3 border-t pt-3">
+						<div>
+							<label className="mb-1 block text-muted-foreground">Bounded Gaming Budget (m/day)</label>
+							<input
+								type="number"
+								min={0}
+								max={180}
+								step={10}
+								value={draft.gameBudgetMin ?? 0}
+								onChange={(e) => setDraft({ ...draft, gameBudgetMin: Number(e.target.value) || 0 })}
+								className="w-full rounded-md border bg-background px-2 py-1"
+							/>
+						</div>
+						<div>
+							<label className="mb-1 block text-muted-foreground">Game Cutoff Before Sleep (m)</label>
+							<input
+								type="number"
+								min={30}
+								max={240}
+								step={15}
+								value={draft.gameCutoffBeforeBedMin ?? 90}
+								onChange={(e) => setDraft({ ...draft, gameCutoffBeforeBedMin: Number(e.target.value) || 90 })}
+								className="w-full rounded-md border bg-background px-2 py-1"
+							/>
+						</div>
+					</div>
+
+					<details className="mt-3 rounded-lg border bg-muted/20 p-2.5">
+						<summary className="cursor-pointer font-medium text-muted-foreground hover:text-foreground">
+							Private Discipline &amp; Habit Moderation (Discreet · AI-assisted)
+						</summary>
+						<div className="mt-2.5 flex flex-col gap-2.5">
+							<label className="flex items-center gap-2 text-xs text-foreground">
+								<input
+									type="checkbox"
+									checked={Boolean(guardrail.enabled)}
+									onChange={(e) =>
+										setDraft({
+											...draft,
+											wellnessGuardrail: { ...guardrail, enabled: e.target.checked },
+										})
+									}
+								/>
+								Enable discreet frequency taper &amp; high-risk window scheduling guardrails (never shown overtly on timeline)
+							</label>
+							{guardrail.enabled && (
+								<>
+									<div className="grid grid-cols-2 gap-2">
+										<div>
+											<label className="mb-0.5 block text-[11px] text-muted-foreground">Current Weekly Freq</label>
+											<input
+												type="number"
+												min={0}
+												max={30}
+												value={guardrail.currentWeeklyFreq ?? 4}
+												onChange={(e) =>
+													setDraft({
+														...draft,
+														wellnessGuardrail: { ...guardrail, currentWeeklyFreq: Number(e.target.value) || 0 },
+													})
+												}
+												className="w-full rounded border bg-background px-2 py-1"
+											/>
+										</div>
+										<div>
+											<label className="mb-0.5 block text-[11px] text-muted-foreground">Healthy Target Freq (/wk)</label>
+											<input
+												type="number"
+												min={0}
+												max={21}
+												value={guardrail.targetWeeklyFreq ?? 1}
+												onChange={(e) =>
+													setDraft({
+														...draft,
+														wellnessGuardrail: { ...guardrail, targetWeeklyFreq: Number(e.target.value) || 0 },
+													})
+												}
+												className="w-full rounded border bg-background px-2 py-1"
+											/>
+										</div>
+									</div>
+									<div>
+										<div className="mb-1 text-[11px] text-muted-foreground">High-risk Trigger Windows:</div>
+										<div className="flex flex-wrap gap-1.5">
+											{[
+												{ id: "late_night", label: "Late night" },
+												{ id: "post_stress", label: "After tough study" },
+												{ id: "idle_afternoon", label: "Idle afternoon" },
+												{ id: "alone_in_room", label: "Phone in bed" },
+											].map((w) => {
+												const active = (guardrail.riskWindows ?? []).includes(w.id);
+												return (
+													<button
+														key={w.id}
+														type="button"
+														onClick={() => toggleRiskWindow(w.id)}
+														className={cn(
+															"rounded border px-2 py-0.5 text-[11px]",
+															active ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent",
+														)}
+													>
+														{w.label}
+													</button>
+												);
+											})}
+										</div>
+									</div>
+									<div>
+										<label className="mb-0.5 block text-[11px] text-muted-foreground">Replacement Reset Protocol</label>
+										<input
+											type="text"
+											value={guardrail.replacementProtocol ?? ""}
+											onChange={(e) =>
+												setDraft({
+													...draft,
+													wellnessGuardrail: { ...guardrail, replacementProtocol: e.target.value },
+												})
+											}
+											placeholder="e.g. 10m walk, pushups + cold water, offline book..."
+											className="w-full rounded border bg-background px-2 py-1"
+										/>
+									</div>
+								</>
+							)}
+						</div>
+					</details>
+
 					<label className="mt-3 flex items-center gap-2 text-xs text-foreground">
 						<input
 							type="checkbox"
@@ -3013,16 +3322,52 @@ function LifestyleTab({
 						/>
 						Enable soft-strict subject switch prompt when a study block finishes
 					</label>
+
+					{suggestionInfo && (
+						<div className="mt-3 rounded-lg border border-primary/30 bg-primary/5 p-2.5 text-[11px]">
+							<div className="flex items-center justify-between font-medium text-foreground">
+								<span>Suggested Lifestyle Balance</span>
+								<span className="text-[10px] text-muted-foreground">{suggestionInfo.modelLabel}</span>
+							</div>
+							<p className="mt-1 text-foreground">{suggestionInfo.rationale}</p>
+							{suggestionInfo.tips.length > 0 && (
+								<ul className="mt-1 space-y-0.5 text-muted-foreground">
+									{suggestionInfo.tips.map((t, i) => (
+										<li key={i}>• {t}</li>
+									))}
+								</ul>
+							)}
+						</div>
+					)}
 				</div>
 
-				<div className="flex justify-end border-t pt-3">
+				<div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+					<div className="flex items-center gap-1.5">
+						<button
+							type="button"
+							disabled={suggesting || busy}
+							onClick={() => void runSuggestLifestyle(false)}
+							className="rounded-md border px-2.5 py-1.5 font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+						>
+							{suggesting ? "..." : "Suggest Balance (0t)"}
+						</button>
+						<button
+							type="button"
+							disabled={suggesting || busy || !snap.aiAvailability.coach.available}
+							onClick={() => void runSuggestLifestyle(true)}
+							title={snap.aiAvailability.coach.available ? `Uses ${snap.aiAvailability.coach.modelLabel}` : "Configure model key first"}
+							className="inline-flex items-center gap-1 rounded-md border bg-muted/40 px-2.5 py-1.5 font-medium hover:bg-accent disabled:opacity-40"
+						>
+							<SparklesIcon className="size-3 text-primary" /> Optimize with AI
+						</button>
+					</div>
 					<button
 						type="button"
 						disabled={busy}
 						onClick={() => void onSaveLifestyle(draft)}
 						className="rounded-md bg-primary px-4 py-1.5 font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
 					>
-						Save Lifestyle & Recompute Plan
+						Save Lifestyle &amp; Recompute Plan
 					</button>
 				</div>
 			</div>

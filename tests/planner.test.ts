@@ -15,6 +15,7 @@ import {
 	applyLlmPlanOutput,
 	buildCompactPlannerDigest,
 	buildMonthGridDates,
+	clipPreservingLatex,
 	computeExamPrepStatus,
 	computeHabitStrengthSummary,
 	computeLocalPlannerPlan,
@@ -54,6 +55,7 @@ import {
 	parseWeeklyScheduleInput,
 	readPlannerSnapshot,
 	researchExamSyllabus,
+	suggestLifestyleBalanceServer,
 	writeExamPrepConfig,
 } from "../src/server/index.ts";
 
@@ -872,7 +874,9 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		assert.ok(plan.weeklyForecast?.every((d) => Array.isArray(d.subjects) && d.subjects.length >= 1));
 		for (const q of plan.quotas) {
 			for (const c of q.checklist) {
-				assert.ok(!c.text.includes("$"));
+				assert.ok(!c.text.endsWith("\\f"));
+				const dollarCount = (c.text.match(/\$/g) ?? []).length;
+				assert.equal(dollarCount % 2, 0);
 			}
 		}
 
@@ -1116,5 +1120,144 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		assert.ok(steps.includes("done"));
 		assert.equal(researched.modelLabel, "custom");
 		assert.ok(researched.trace.length >= 3);
+	});
+
+	it("guarantees Healthy < Balanced < Intensive across Local and AI Coach + syncs 7-day forecast, early-waking nap, gaming cutoff, and concrete session context", async () => {
+		const heavySignals: PlannerPersonalSignals = {
+			...sampleSignals("2026-11-16"),
+			subjectSignals: [
+				{
+					clusterId: "c_calc",
+					label: "Olympic Giải tích",
+					nodeCount: 20,
+					trackedCount: 8,
+					dueCount: 2,
+					weakCount: 1,
+					untrackedCount: 10,
+					readinessPct: 40,
+					dueSampleNames: ["Định lý Stolz-Cesàro"],
+					weakSampleNames: ["Giới hạn dãy số"],
+					untrackedSampleNames: ["Tích phân suy rộng loại 2"],
+					attachedFiles: ["De_Olympic_SV_2025.pdf"],
+					activePlanTopics: ["Chương 2: Giới hạn hàm & Đạo hàm"],
+					pendingProblems: ["Đề 1 BTVN câu 8: Tìm lim x_n"],
+					recentChatTitles: ["Dạy giải tích olympic sinh viên"],
+					lastStudiedAt: "2026-11-15T10:00:00Z",
+				},
+			],
+		};
+
+		const heavyExamConfig: PlannerConfig = {
+			...DEFAULT_PLANNER_CONFIG,
+			lifestyle: {
+				...DEFAULT_PLANNER_CONFIG.lifestyle,
+				gameBudgetMin: 40,
+				gameCutoffBeforeBedMin: 90,
+				sleep: {
+					...DEFAULT_PLANNER_CONFIG.lifestyle.sleep,
+					targetBedtime: "23:15",
+					preferredWakeTime: "07:00",
+					earlyWakingIssue: true,
+					windDownBufferMin: 40,
+					allowMiddayRecoveryNap: true,
+				},
+				wellnessGuardrail: {
+					enabled: true,
+					currentWeeklyFreq: 5,
+					targetWeeklyFreq: 2,
+					riskWindows: ["late_night", "post_stress"],
+					replacementProtocol: "10m outdoor walk + offline book",
+				},
+			},
+			milestones: [
+				{
+					id: "ms_big1",
+					kind: "competition",
+					title: "Olympic Giải tích",
+					subject: "Olympic Giải tích",
+					dueDate: "2026-11-26",
+					priority: 3,
+					cognitiveLoad: "heavy",
+					clusterIds: ["c_calc"],
+					estimatedHours: 70,
+					completedHours: 0,
+					syllabusTopics: [],
+					notes: "",
+				},
+			],
+		};
+
+		const healthy = computeLocalPlannerPlan({ ...heavyExamConfig, intensity: "healthy" }, heavySignals, new Date("2026-11-16T08:00:00Z").getTime());
+		const balanced = computeLocalPlannerPlan({ ...heavyExamConfig, intensity: "balanced" }, heavySignals, new Date("2026-11-16T08:00:00Z").getTime());
+		const intensive = computeLocalPlannerPlan({ ...heavyExamConfig, intensity: "intensive" }, heavySignals, new Date("2026-11-16T08:00:00Z").getTime());
+
+		assert.ok(healthy.minDailyStudyHours <= 4.0);
+		assert.ok(healthy.examDeficitWarning?.includes("Healthy cap"));
+		assert.ok(healthy.plannedStudyHours < balanced.plannedStudyHours);
+		assert.ok(balanced.plannedStudyHours <= intensive.plannedStudyHours);
+		assert.ok(healthy.blocks.some((b) => b.id.startsWith("blk_nap_")));
+		const gameBlk = healthy.blocks.find((b) => b.id.startsWith("blk_game_"));
+		assert.ok(gameBlk);
+		assert.ok(gameBlk.endMin <= (healthy.blocks.find((b) => b.type === "sleep")?.startMin ?? 9999));
+
+		// Check concrete session work items surfaced in checklists + AI digest
+		const qText = healthy.quotas.flatMap((q) => q.checklist.map((c) => c.text)).join(" | ");
+		assert.ok(qText.includes("Đề 1 BTVN câu 8"));
+		assert.ok(qText.includes("Chương 2: Giới hạn hàm"));
+
+		// Verify clipPreservingLatex keeps balanced $...$ math without cutting inside \frac
+		const safeMath = clipPreservingLatex("Gặp $0\\cdot\\infty$ với dãy truy hồi, tính $\\frac{1}{x_{n+1}}-\\frac{1}{x_n}$ cuối kỳ", 80);
+		assert.equal((safeMath.match(/\$/g) ?? []).length % 2, 0);
+
+		// Verify applyLlmPlanOutput enforces Healthy cap AND syncs 7-day forecast
+		const aiMergedHealthy = applyLlmPlanOutput(
+			healthy,
+			{
+				coachSummary: "Keep balanced.",
+				minDailyStudyHours: 6.5, // Hallucinated too high for Healthy
+				blocks: [
+					{ startTime: "08:15", endTime: "10:15", type: "study", subject: "Olympic Giải tích", title: "De_Olympic_SV_2025.pdf — Đề 1 BTVN câu 8" },
+					{ startTime: "10:30", endTime: "12:00", type: "study", subject: "Olympic Giải tích", title: "Chương 2" },
+					{ startTime: "14:00", endTime: "16:30", type: "study", subject: "Olympic Giải tích", title: "Overflow block" },
+					{ startTime: "16:45", endTime: "19:15", type: "study", subject: "Olympic Giải tích", title: "Second overflow block" },
+				],
+				quotas: [{ subject: "Olympic Giải tích", targetMin: 420, checklist: ["Giải Đề 1 BTVN câu 8"] }],
+			},
+			{ ...heavyExamConfig, intensity: "healthy" },
+			"test-model",
+		);
+		assert.ok(aiMergedHealthy.plannedStudyHours <= 4.1);
+		assert.ok(aiMergedHealthy.minDailyStudyHours <= 4.1);
+		assert.equal(aiMergedHealthy.weeklyForecast?.[0]?.plannedHours, aiMergedHealthy.plannedStudyHours);
+
+		// Notion CSV parser skips completed "Yes" rows and imports unfinished tasks
+		const notionParsed = parseLocalSyllabusOutline(
+			"Bài,Hoàn Thành,Note,Trạng thái,Độ khó\n10.20,Yes,,✓,🟢\n10.21,No,,△,🔴\n11.17,No,,○,🟠",
+		);
+		assert.equal(notionParsed.syllabusTopics.length, 2);
+		assert.ok(notionParsed.syllabusTopics[0]?.title.includes("10.21"));
+
+		// Lifestyle optimizer works in both 0-token local and BYOK AI modes
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-life-"));
+		const plannerFile = path.join(dir, "planner.json");
+		patchPlannerConfig({ lifestyle: heavyExamConfig.lifestyle }, { plannerFile });
+		const localOpt = await suggestLifestyleBalanceServer({ plannerFile, useAi: false });
+		assert.equal(localOpt.modelLabel, "local:lifestyle-optimizer");
+		assert.ok(localOpt.windDownBufferMin >= 40);
+		const aiOpt = await suggestLifestyleBalanceServer({
+			plannerFile,
+			useAi: true,
+			engineOverride: fakeSubmitEngine("submit_lifestyle_balance", {
+				hobbies: ["Afternoon Walk", "Music"],
+				dailyHobbyMin: 75,
+				gameBudgetMin: 30,
+				gameCutoffBeforeBedMin: 120,
+				windDownBufferMin: 45,
+				allowMiddayRecoveryNap: true,
+				rationale: "Prioritize deep sleep pressure & screen curfew.",
+				tips: ["Stop games 2h before bed"],
+			}),
+		});
+		assert.equal(aiOpt.gameCutoffBeforeBedMin, 120);
 	});
 });

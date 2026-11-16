@@ -11,12 +11,14 @@ import {
 	applyJournalEvaluationToConfig,
 	applyLlmPlanOutput,
 	buildCompactPlannerDigest,
+	clipPreservingLatex,
 	computeHabitStrengthSummary,
 	computeLocalPlannerPlan,
 	computePersonalizedMilestoneEstimate,
 	DEFAULT_PLANNER_CONFIG,
 	evaluatePlanVsActualLocal,
 	formatPlainMathPreview,
+	INTENSITY_STUDY_BOUNDS,
 	isValidDateString,
 	localDateString,
 	normalizeSubjectKey,
@@ -459,6 +461,108 @@ function buildPlannerLearningProfile(opts: {
 	};
 }
 
+function collectSessionWorkItemsForSubject(
+	matchingSessions: readonly PlannerSessionSummary[],
+	chatsDir?: string,
+): {
+	attachedFiles: string[];
+	activePlanTopics: string[];
+	pendingProblems: string[];
+	sessionNotesPreview?: string;
+} {
+	const filesSet = new Set<string>();
+	const planTopics: string[] = [];
+	const pendingProblems: string[] = [];
+	const notesList: string[] = [];
+
+	const addFileMatches = (raw: string) => {
+		for (const fp of parseFilePaths(raw)) {
+			if (fp.kind !== "path") continue;
+			const base = path.basename(fp.path || "").trim();
+			if (base && base.length <= 70) filesSet.add(base);
+		}
+		const docMatches = raw.match(/[\wÀ-ỹ.\- ()]+\.(?:pdf|epub|md|txt|csv|docx?|tex)/gi) ?? [];
+		for (const dm of docMatches) {
+			const clean = path.basename(dm.trim()).slice(0, 70);
+			if (clean) filesSet.add(clean);
+		}
+	};
+
+	const walkPlanTree = (tree: PlanTree | undefined) => {
+		if (!tree?.nodes || !Array.isArray(tree.nodes)) return;
+		for (const node of tree.nodes) {
+			const label = (node.title || "").trim();
+			if (label && !planTopics.includes(label) && planTopics.length < 5) {
+				planTopics.push(clipPreservingLatex(label, 90));
+			}
+		}
+	};
+
+	for (const s of matchingSessions.slice(0, 3)) {
+		addFileMatches(s.title);
+		const chat = readChatSafe(s.id, chatsDir);
+		if (!chat) continue;
+		if (chat.notes?.trim()) {
+			addFileMatches(chat.notes);
+			if (notesList.length < 2) notesList.push(clipPreservingLatex(chat.notes, 110));
+		}
+		walkPlanTree(chat.tree);
+
+		const msgs = Array.isArray(chat.messages) ? chat.messages : [];
+		const problemStems = new Map<string, string>();
+		const concludedClean = new Set<string>();
+		let lastProblemStem = "";
+		let lastConcludedOutcome = "";
+
+		for (const m of msgs as Array<Record<string, unknown>>) {
+			if (m.role === "user") {
+				if (typeof m.content === "string") addFileMatches(m.content);
+				else if (Array.isArray(m.content)) {
+					for (const b of m.content as Array<{ type?: string; text?: string }>) {
+						if (b.type === "text" && b.text) addFileMatches(b.text);
+					}
+				}
+			}
+			const blocks = Array.isArray(m.content) ? m.content : [];
+			for (const blk of blocks as Array<Record<string, unknown>>) {
+				if (blk.type !== "toolCall") continue;
+				const name = typeof blk.name === "string" ? blk.name : "";
+				const id = typeof blk.id === "string" ? blk.id : "";
+				const args = (blk.arguments && typeof blk.arguments === "object" ? blk.arguments : {}) as Record<string, unknown>;
+				if (name === "problem") {
+					const rawStmt = typeof args.statement === "string" ? args.statement : typeof args.title === "string" ? args.title : "";
+					const cleanStmt = clipPreservingLatex(rawStmt.split(/\r?\n/)[0] ?? rawStmt, 95);
+					if (cleanStmt) {
+						if (id) problemStems.set(id, cleanStmt);
+						lastProblemStem = cleanStmt;
+						lastConcludedOutcome = "";
+					}
+				} else if (name === "conclude") {
+					const out = typeof args.outcome === "string" ? args.outcome : "";
+					lastConcludedOutcome = out;
+					if (out === "solved" && id) concludedClean.add(id);
+				}
+			}
+		}
+		if (lastProblemStem && lastConcludedOutcome !== "solved" && pendingProblems.length < 3) {
+			pendingProblems.push(lastProblemStem);
+		} else {
+			for (const [id, stmt] of problemStems) {
+				if (!concludedClean.has(id) && pendingProblems.length < 3 && !pendingProblems.includes(stmt)) {
+					pendingProblems.push(stmt);
+				}
+			}
+		}
+	}
+
+	return {
+		attachedFiles: [...filesSet].slice(0, 4),
+		activePlanTopics: planTopics,
+		pendingProblems,
+		...(notesList.length > 0 ? { sessionNotesPreview: notesList.join(" | ").slice(0, 160) } : {}),
+	};
+}
+
 export function buildPlannerPersonalSignals(
 	config: PlannerConfig,
 	opts?: PlannerReadOptions & { chatsDir?: string; date?: string },
@@ -511,6 +615,7 @@ export function buildPlannerPersonalSignals(
 
 				const dueSampleNames: string[] = [];
 				const weakSampleNames: string[] = [];
+				const untrackedSampleNames: string[] = [];
 				for (const n of memberNodes) {
 					const info = fsrs.nodes[n.id];
 					if (!info) continue;
@@ -518,10 +623,16 @@ export function buildPlannerPersonalSignals(
 					if ((info.isFoundation && info.memoryBand !== "untracked" && info.retrievability !== null && info.retrievability < 0.7) && weakSampleNames.length < 4) {
 						weakSampleNames.push(n.name);
 					}
+					if (info.state === "untracked" && untrackedSampleNames.length < 5) {
+						untrackedSampleNames.push(n.name);
+					}
 				}
 
 				const needle = scope.label.toLowerCase();
 				const matchingSessions = sessions.filter((s) => s.title.toLowerCase().includes(needle) || needle.includes(s.title.toLowerCase()));
+				const sessionItems = isolatedTestMode && !opts?.chatsDir
+					? { attachedFiles: [], activePlanTopics: [], pendingProblems: [] }
+					: collectSessionWorkItemsForSubject(matchingSessions, opts?.chatsDir);
 
 				subjectSignals.push({
 					clusterId: scope.id,
@@ -534,6 +645,11 @@ export function buildPlannerPersonalSignals(
 					readinessPct: scope.readinessPct,
 					dueSampleNames,
 					weakSampleNames,
+					...(untrackedSampleNames.length > 0 ? { untrackedSampleNames } : {}),
+					...(sessionItems.attachedFiles.length > 0 ? { attachedFiles: sessionItems.attachedFiles } : {}),
+					...(sessionItems.activePlanTopics.length > 0 ? { activePlanTopics: sessionItems.activePlanTopics } : {}),
+					...(sessionItems.pendingProblems.length > 0 ? { pendingProblems: sessionItems.pendingProblems } : {}),
+					...(sessionItems.sessionNotesPreview ? { sessionNotesPreview: sessionItems.sessionNotesPreview } : {}),
 					recentChatTitles: matchingSessions.slice(0, 3).map((s) => s.title),
 					lastStudiedAt: matchingSessions[0]?.updatedAt ?? null,
 				});
@@ -607,7 +723,7 @@ export function buildPlannerPersonalSignals(
 	const cleanedMistakeHints = examPrep.mistakeHints
 		? {
 			...examPrep.mistakeHints,
-			recentRules: examPrep.mistakeHints.recentRules.map((r) => formatPlainMathPreview(r, 170)).filter(Boolean),
+			recentRules: examPrep.mistakeHints.recentRules.map((r) => clipPreservingLatex(r, 200)).filter(Boolean),
 		}
 		: undefined;
 
@@ -999,6 +1115,7 @@ const llmPlanSchema = Type.Object({
 
 export async function generatePlannerSchedule(opts: {
 	mode?: PlannerEngineMode;
+	preferredRole?: ModelRole;
 	date?: string;
 	focusNote?: string;
 	plannerFile?: string;
@@ -1040,23 +1157,30 @@ export async function generatePlannerSchedule(opts: {
 
 	const resolved = opts.engineOverride
 		? { role: "prober" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
-		: resolvePlannerEngine("coach");
+		: resolvePlannerEngine("coach", opts.preferredRole);
 
 	if (!resolved) {
 		throw new PlannerAiUnavailable("No model is configured for AI Coach (open Settings -> Models).");
 	}
 
 	const digest = buildCompactPlannerDigest(config, signals, baseline);
-	const systemPrompt = `You are a disciplined, realistic Student Study Coach inside ChronoHarness.
+	const systemPrompt = `You are a hyper-specific, disciplined, empathetic Student Study & Wellness Coach inside ChronoHarness.
 Analyze the compact daily student digest and call submit_daily_plan ONCE.
 
-Rules:
-- Respect fixedEventsToday, meals, sleep target, and hobby recovery — NEVER overlap fixed events.
-- Only allocate dynamic blocks inside the available free windows between wake and bedtime.
-- Prevent single-subject obsession: interleave urgent competition/exam subjects with break gaps, putting heavy proofs/algorithms in peak focus hours and light FSRS/mistake reviews in lower-energy windows.
-- Honor healthy sleep shift (${baseline.sleepShiftAdvice}).
-- Match user language (if subject/milestone titles are Vietnamese, write coachSummary/checklist cleanly in Vietnamese).
-- Keep output concise: max 10 study/break/hobby blocks, max 5 quotas.`;
+STRICT RULES:
+1. Intensity Envelope (NON-NEGOTIABLE): Read \`intensityEnvelope\` ({ mode, minStudyHours, targetStudyHours, maxStudyHours, minHobbyMin, maxSubjectsToday }).
+   - Total study minutes across blocks MUST respect [minStudyHours, maxStudyHours]. NEVER exceed maxStudyHours in Healthy or Balanced mode!
+   - Schedule at least minHobbyMin minutes of real recharge / sport / relaxation.
+2. Hyper-Specific Tasks (NO GENERIC FILLER):
+   - NEVER write vague filler like "Chọn một chủ đề chưa theo dõi", "Bài tập toán AI", "Làm bài tập ghi lỗ hổng", or "Khảo sát kiến thức mới".
+   - Instead, EVERY study block title, actionTopic, and quota checklist item MUST reference the EXACT theorems, files, open PlanTree chapters, unfinished problems, or mistake rules from \`knowledgeSignals\` (\`attachedFiles\`, \`activePlanTopics\`, \`pendingProblems\`, \`dueSample\`, \`weakSample\`, \`untrackedSample\`) and \`milestones\` (\`openTopics\`, \`notesHint\`).
+   - Do NOT invent problem numbers that aren't in the digest; cite what is present cleanly.
+3. No Overlaps & Subject Focus: Never overlap \`fixedEventsToday\`, meals, or sleep. Obey \`mutedSubjects\` (omit them) and prioritize \`focusSubjectsToday\` if set. Interleave at most \`maxSubjectsToday\` subjects.
+4. Sleep Continuity & Early-Waking Care: Check \`awakeWindow.earlyWakingDetected\` & \`actualLastSleepHours\`. If waking at 4-5 AM occurs or sleep was short, soften the first morning hour, place a 20-25m restorative midday power nap around 13:00 (NEVER after 14:30), and enforce the exact screen-off \`windDownBufferMin\` before \`recommendedBedtime\`.
+5. Hobbies, Gaming & Discreet Wellness Guardrails: Check \`lifestyleBalance\`.
+   - If \`gameBudgetMin > 0\`, schedule a clean bounded gaming slot STRICTLY BEFORE \`recommendedBedtime - gameCutoffBeforeBedMin\`.
+   - If \`wellnessGuardrail.enabled\` is true, subtly protect the listed \`riskWindows\` (e.g. late night / idle afternoon / post-stress) by placing structured wind-down, physical walk, or offline reading blocks with **100% discreet, neutral labels** on the timeline (never mention sensitive biological details on visible block titles).
+6. Match the user's language (Vietnamese if subjects/milestones are Vietnamese). Max 11 dynamic blocks.`;
 
 	const promptText = [
 		"Compact student state digest:",
@@ -1917,6 +2041,128 @@ export async function evaluateDailyJournalServer(
 		snapshot: readPlannerSnapshot({ ...opts, date, now }),
 		report,
 		parsedEntries: aiEntries,
+		modelLabel: resolved.modelLabel,
+	};
+}
+
+// ─── 6. AI / Smart Lifestyle, Hobby, Gaming & Sleep Balance Optimizer ────────
+
+const lifestyleSuggestionSchema = Type.Object({
+	hobbies: Type.Array(Type.String()),
+	dailyHobbyMin: Type.Number(),
+	gameBudgetMin: Type.Number(),
+	gameCutoffBeforeBedMin: Type.Number(),
+	windDownBufferMin: Type.Number(),
+	allowMiddayRecoveryNap: Type.Boolean(),
+	rationale: Type.String(),
+	tips: Type.Array(Type.String()),
+});
+
+export async function suggestLifestyleBalanceServer(
+	opts: PlannerReadOptions & {
+		useAi?: boolean;
+		preferredRole?: ModelRole;
+		engineOverride?: PiEngine;
+		signal?: AbortSignal;
+	},
+): Promise<{
+	hobbies: string[];
+	dailyHobbyMin: number;
+	gameBudgetMin: number;
+	gameCutoffBeforeBedMin: number;
+	windDownBufferMin: number;
+	allowMiddayRecoveryNap: boolean;
+	rationale: string;
+	tips: string[];
+	modelLabel: string;
+}> {
+	const now = opts.now ?? Date.now();
+	const date = localDateString(now);
+	const config = readPlannerConfig(opts.plannerFile);
+	const band = INTENSITY_STUDY_BOUNDS[config.intensity];
+	const sleep = config.lifestyle.sleep;
+	const earlyWake = Boolean(sleep.earlyWakingIssue);
+	const guard = config.lifestyle.wellnessGuardrail;
+
+	const localDailyHobby = Math.max(config.lifestyle.dailyHobbyMin, band.minHobbyMin);
+	const localGame = Math.min(config.lifestyle.gameBudgetMin ?? 30, config.intensity === "healthy" ? 45 : config.intensity === "balanced" ? 30 : 20);
+	const localCutoff = earlyWake ? 120 : 90;
+	const localWindDown = earlyWake ? 45 : 30;
+	const localTips: string[] = [
+		`Keep ${localGame > 0 ? `gaming <= ${localGame}m and stop at least ${localCutoff}m` : "screens off"} before bed (${sleep.targetBedtime}).`,
+		earlyWake
+			? "Waking early at 4-5 AM: keep morning light exposure early, allow a 25m nap around 13:00, and avoid napping past 14:30."
+			: "Protect your midday break right after lunch instead of forcing extra afternoon screen time.",
+	];
+	if (guard?.enabled) {
+		localTips.push(
+			`Pre-commit high-risk windows (${(guard.riskWindows ?? ["late_night"]).join(", ")}): replace immediately with ${guard.replacementProtocol || "10m walk, water & phone outside bedroom"}.`,
+		);
+	}
+
+	if (!opts.useAi) {
+		return {
+			hobbies: config.lifestyle.hobbies.length > 0 ? config.lifestyle.hobbies : ["Outdoor Walk / Sport", "Offline Reading"],
+			dailyHobbyMin: localDailyHobby,
+			gameBudgetMin: localGame,
+			gameCutoffBeforeBedMin: localCutoff,
+			windDownBufferMin: localWindDown,
+			allowMiddayRecoveryNap: true,
+			rationale: `Calibrated for ${config.intensity} intensity${earlyWake ? " + early-waking continuity care" : ""}${guard?.enabled ? " + discreet impulse/screen guardrails" : ""}.`,
+			tips: localTips,
+			modelLabel: "local:lifestyle-optimizer",
+		};
+	}
+
+	const resolved = opts.engineOverride
+		? { role: "prober" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
+		: resolvePlannerEngine("coach", opts.preferredRole);
+	if (!resolved) {
+		throw new PlannerAiUnavailable("No model is configured for AI lifestyle optimization.");
+	}
+
+	const recentNotes = Object.values(config.logs)
+		.sort((a, b) => b.date.localeCompare(a.date))
+		.slice(0, 5)
+		.map((l) => ({ date: l.date, slept: l.actualBedtime, woke: l.actualWakeTime, energy: l.energyScore, early: l.wokeEarlyUnintended }));
+
+	interface LifestyleSuggestionOut {
+		hobbies: string[];
+		dailyHobbyMin: number;
+		gameBudgetMin: number;
+		gameCutoffBeforeBedMin: number;
+		windDownBufferMin: number;
+		allowMiddayRecoveryNap: boolean;
+		rationale: string;
+		tips: string[];
+	}
+
+	const res = await runPlannerSubmit<LifestyleSuggestionOut>({
+		role: resolved.role,
+		engine: resolved.engine,
+		systemPrompt: "You are a supportive behavioral & sleep hygiene coach for a university competition student. Design a practical, sustainable Hobby + Gaming + Sleep Consolidation + Discreet Habit Moderation balance. Call submit_lifestyle_balance once. Keep all outward advice tasteful and constructive.",
+		promptText: JSON.stringify({
+			intensity: config.intensity,
+			currentLifestyle: config.lifestyle,
+			recentSleepLogs: recentNotes,
+		}),
+		toolName: "submit_lifestyle_balance",
+		toolDescription: "Submit calibrated lifestyle, gaming cutoff, and sleep continuity settings.",
+		parameters: lifestyleSuggestionSchema,
+		signal: opts.signal,
+		fill: (raw) => raw as LifestyleSuggestionOut,
+		validate: (v) => (v.rationale?.trim() ? null : "Provide rationale."),
+	});
+
+	return {
+		hobbies: res.hobbies.slice(0, 8).map((h) => String(h).trim()).filter(Boolean),
+		dailyHobbyMin: Math.max(20, Math.min(180, Math.round(res.dailyHobbyMin || localDailyHobby))),
+		gameBudgetMin: Math.max(0, Math.min(120, Math.round(res.gameBudgetMin || 0))),
+		gameCutoffBeforeBedMin: Math.max(45, Math.min(180, Math.round(res.gameCutoffBeforeBedMin || 90))),
+		windDownBufferMin: Math.max(20, Math.min(60, Math.round(res.windDownBufferMin || 35))),
+		allowMiddayRecoveryNap: Boolean(res.allowMiddayRecoveryNap),
+		rationale: res.rationale.trim().slice(0, 450),
+		tips: res.tips.slice(0, 5).map((t) => String(t).trim()).filter(Boolean),
 		modelLabel: resolved.modelLabel,
 	};
 }
