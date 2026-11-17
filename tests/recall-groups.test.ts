@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import { projectRecallGroups, validateRecallGroups, type RecallGroup, type RecallGroupSource } from "../src/core/recall-groups.ts";
 import { isIncompleteProviderResponse, normalizeConceptSearch, retryIncompleteOnce } from "../src/core/recall-mapping.ts";
+import { saveRecallGroupDraft, readRecallGroups, saveRecallGroups } from "../src/server/recall-groups-store.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const sources: RecallGroupSource[] = [
 	{ fingerprint: "v1", observation: { id: "1", chatId: "c", toolCallId: "1", subject: "Math", answeredAt: "2026-11-15T12:00:00Z", verdict: "partial", source: "ai", topic: "Limits" } },
@@ -10,6 +14,20 @@ const sources: RecallGroupSource[] = [
 	{ fingerprint: "v4", observation: { id: "4", chatId: "c", toolCallId: "4", subject: "Math", answeredAt: "2026-11-16T12:00:00Z", verdict: "uncertain", source: "ai", topic: "Limits" } },
 ];
 const group: RecallGroup = { id: "group", name: "Sequence limits", reason: "Related concepts", model: "synthetic", members: sources.map(({ observation, fingerprint }) => ({ id: observation.id, fingerprint })) };
+
+it("retains earlier paid suggestions and existing approvals across new runs", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-group-history-"));
+	try {
+		saveRecallGroups("Math", [group], sources, dir);
+		saveRecallGroupDraft("Math", [group], sources, dir);
+		const newer = { ...group, id: "new", name: "New proposal", model: "second" };
+		saveRecallGroupDraft("Math", [newer], sources, dir, "second");
+		const data = readRecallGroups(dir)[0]!;
+		assert.equal(data.groups[0]?.id, "group");
+		assert.equal(data.draft?.[0]?.id, "new");
+		assert.deepEqual(data.history?.map((run) => run.groups[0]?.id), ["group", "new"]);
+	} finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 it("keeps verdicts and original links, respects the time window and detects changed sources", () => {
 	const current = projectRecallGroups([group], sources, "last30", Date.parse("2026-11-17T12:00:00Z"))[0]!;

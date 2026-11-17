@@ -1678,8 +1678,12 @@ export function Chat({
 	// The recorded analyses for this session's answer cards (mistakes fork).
 	const sessionMistakes = useChatMistakes(chatId);
 	const sessionRecallGrades = useChatRecallGrades(chatId);
+	const [returnToRecall, setReturnToRecall] = useState(false);
+	useEffect(() => { try { setReturnToRecall(Boolean(sessionStorage.getItem("lh:recall-return-subject"))); } catch { /* storage unavailable */ } }, []);
 
 	return (
+		<>
+		{returnToRecall && <a href="/planner?recallReturn=1" className="fixed right-4 top-20 z-50 rounded border bg-card px-3 py-2 shadow">Return to Recall Analysis</a>}
 		<MistakesContext.Provider value={sessionMistakes}>
 		<RecallGradesContext.Provider value={sessionRecallGrades}>
 		<ChatActionsContext.Provider
@@ -2425,6 +2429,7 @@ export function Chat({
 		</ChatActionsContext.Provider>
 		</RecallGradesContext.Provider>
 		</MistakesContext.Provider>
+		</>
 	);
 }
 

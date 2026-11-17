@@ -45,7 +45,6 @@
 		"@streamdown/mermaid": "^1.0.2",
 		"@tanstack/react-virtual": "^3.14.26",
 		"@xyflow/react": "^12.11.3",
-		"ansi-to-react": "^6.2.6",
 		"aria-hidden": "1.2.6",
 		"class-variance-authority": "^0.7.1",
 		"clsx": "^2.1.1",
@@ -68,7 +67,7 @@
 		"micromark-extension-math": "3.1.0",
 		"motion": "^13.1.1",
 		"nanoid": "^6.0.1",
-		"next": "^16.4.3",
+		"next": "16.4.6",
 		"next-themes": "^0.4.6",
 		"pdfjs-dist": "^6.3.289",
 		"puppeteer-core": "^25.8.0",
@@ -88,7 +87,8 @@
 		"zod": "^4.4.3"
 	},
 	"overrides": {
-		"katex": "$katex"
+		"katex": "$katex",
+		"dompurify": "^3.4.18"
 	},
 	"devDependencies": {
 		"@next/eslint-plugin-next": "^16.4.3",

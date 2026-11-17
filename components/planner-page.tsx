@@ -162,7 +162,9 @@ export function PlannerPage() {
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 	const [examAdjustmentNotice, setExamAdjustmentNotice] = useState<string | null>(null);
 	useEffect(() => {
-		if (new URLSearchParams(window.location?.search ?? "").get("coach") === "1") setCoachOpen(true);
+		const query = new URLSearchParams(window.location?.search ?? "");
+		if (query.get("coach") === "1") setCoachOpen(true);
+		if (query.get("recallReturn") === "1") setCapacityOpen(true);
 	}, []);
 
 	useEffect(() => {

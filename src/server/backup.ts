@@ -31,6 +31,13 @@ export class BackupError extends Error {
 const ALLOWED_SINGLE_FILES = new Set([
 	"exam-prep.json",
 	"mistakes.json",
+	"recall-groups.json",
+	"recall-audits.json",
+	"recall-scan.json",
+	"recall-live-grades.json",
+	"recall-overrides.json",
+	"recall-fsrs.json",
+	"recall-mapping-suggestions.json",
 	"planner.json",
 	"settings.json",
 	"live-models-cache.json",

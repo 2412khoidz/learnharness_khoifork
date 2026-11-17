@@ -40,12 +40,13 @@ export function recallScanStatus(): RecallScanState {
 	return state.status === "running" && !active().controller ? { ...state, status: "paused" } : state;
 }
 
-function candidates() {
+export function recallAuditCandidates() {
 	return stores.chatStore.listChats().flatMap((chat) => {
 		const record = stores.chatStore.getChat(chat.id);
 		return record ? collectRecallCandidates(record.id, record.messages).map((c) => ({ ...c, sessionTitle: record.title })) : [];
 	});
 }
+const candidates = recallAuditCandidates;
 
 const assessmentSchema = Type.Object({
 	items: Type.Array(Type.Object({
@@ -64,13 +65,13 @@ const NO_ASSESSMENT = "The model did not submit recall assessments.";
 // network failure; a smaller batch may fit while preserving saved progress.
 const INCOMPLETE_JSON = "Incomplete JSON segment at the end";
 
-async function assess(batch: ReturnType<typeof candidates>, engine: PiEngine, signal: AbortSignal, onUsage?: (usage: { input: number; output: number; cacheRead: number; cacheWrite: number }) => void): Promise<Assessment[]> {
+export async function assessRecallBatch(batch: ReturnType<typeof candidates>, engine: PiEngine, signal: AbortSignal, onUsage?: (usage: { input: number; output: number; cacheRead: number; cacheWrite: number }) => void, auditContext?: ReadonlyMap<string, unknown>): Promise<Assessment[]> {
 	const ids = new Set(batch.map((c) => c.draft.id));
 	const response = await runSubmitAgent<{ items: Assessment[] }>({
 		role: "analyst", toolName: "submit_recall_assessments", toolDescription: "Return one grounded assessment for every supplied answer.",
 		parameters: assessmentSchema, fill: (v) => v as { items: Assessment[] }, engine, signal,
-		systemPrompt: "Assess each free-recall answer carefully using the question, committed answer, learner response and subsequent tutor feedback. Distinguish correct, partial, wrong, dont_know and uncertain. Give what was correct, what was missing, a correction, and specific evidence from the learner's answer; never invent reasoning or assume all answers are wrong. If the evidence or answer key is insufficient, use uncertain. Tutor feedback is evidence, not infallible. Return every exact id once. Use the learner's language. For correct or uncertain answers, errorType may be knowledge-gap but do not label them mistakes.",
-		prompt: JSON.stringify(batch.map(({ draft, feedback }) => ({ id: draft.id, question: draft.question, answer: draft.yourAnswer, committed: draft.correctAnswer, thinking: draft.thinking, tutorFeedback: feedback }))),
+		systemPrompt: "Assess each free-recall answer carefully using the question, committed answer, learner response and subsequent tutor feedback. Distinguish correct, partial, wrong, dont_know and uncertain. Give what was correct, what was missing, a correction, and specific evidence from the learner's answer; never invent reasoning or assume all answers are wrong. If the evidence or answer key is insufficient, use uncertain. Tutor feedback and previous assessments are evidence, not infallible; review them independently. Return every exact id once. Use the learner's language. For correct or uncertain answers, errorType may be knowledge-gap but do not label them mistakes.",
+		prompt: JSON.stringify(batch.map(({ draft, feedback }) => ({ id: draft.id, question: draft.question, answer: draft.yourAnswer, committed: draft.correctAnswer, thinking: draft.thinking, tutorFeedback: feedback, ...(auditContext?.has(draft.id) ? { previousAssessment: auditContext.get(draft.id) } : {}) }))),
 		onStep: (usage) => onUsage?.(usage), neverSubmitted: NO_ASSESSMENT,
 		validate: (value) => {
 			if (!Array.isArray(value.items) || value.items.length !== ids.size || new Set(value.items.map((v) => v.id)).size !== ids.size || value.items.some((v) => !ids.has(v.id))) return "Return exactly one result for each supplied id.";
@@ -80,6 +81,7 @@ async function assess(batch: ReturnType<typeof candidates>, engine: PiEngine, si
 	});
 	return response.items;
 }
+const assess = assessRecallBatch;
 
 /** Starts or resumes a sequential batch scan; completed results survive restarts. */
 export function startRecallScan(): RecallScanState {

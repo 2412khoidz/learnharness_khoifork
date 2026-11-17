@@ -87,7 +87,7 @@ jobs:
       - name: Test recall and Google stream changes
         env:
           NODE_ENV: test
-        run: node --import=tsx --test tests/google-stream-tail.test.ts tests/recall-fsrs.test.ts tests/recall-fsrs-ui.test.tsx tests/recall-insights.test.ts tests/recall-groups.test.ts tests/recall-analysis-ui.test.tsx
+        run: node --import=tsx --test tests/google-stream-tail.test.ts tests/recall-fsrs.test.ts tests/recall-fsrs-ui.test.tsx tests/recall-insights.test.ts tests/recall-groups.test.ts tests/recall-analysis-ui.test.tsx tests/recall-audit.test.ts tests/backup.test.ts
 
       - name: Check TypeScript
         run: npm run typecheck
@@ -119,6 +119,16 @@ jobs:
 
       - name: Create Windows installer
         run: npx electron-builder --win --x64 --publish never
+
+      - name: Verify Windows installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist\*.exe | Select-Object -First 1
+          if (-not $exe -or $exe.Length -lt 10MB) { throw "Installer missing or unexpectedly small" }
+          $header = [System.IO.File]::OpenRead($exe.FullName)
+          try { if ($header.ReadByte() -ne 77 -or $header.ReadByte() -ne 90) { throw "Installer is not a Windows executable" } } finally { $header.Dispose() }
+          $sha256 = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          Write-Output "Verified installer $($exe.Name), $($exe.Length) bytes, SHA256 $sha256"
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
@@ -153,4 +163,4 @@ jobs:
           )
           $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
           Set-Content -Path $notesFile -Value ($lines -join "`n") -Encoding utf8
-          gh release create $env:RELEASE_TAG $exe.FullName --target $env:GITHUB_SHA --title $title --notes-file $notesFile --latest
+          gh release create $env:RELEASE_TAG $exe.FullName --target $env:GITHUB_SHA --title $title --notes-file $notesFile --latest=false

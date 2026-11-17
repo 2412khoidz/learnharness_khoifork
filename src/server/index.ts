@@ -15,6 +15,7 @@ export * from "./recall-scan.ts";
 export { confirmRecallFsrs, recallFsrsReviewData, undoRecallFsrsBatch, suggestRecallMappings, suggestRecallMappingsSafely } from "./recall-fsrs.ts";
 export { recallOverrideInfo, saveRecallOverride, type RecallOverride } from "./recall-overrides.ts";
 export { approveRecallGroups, recallGroupPreview, suggestRecallGroups, saveRecallGroupsDraft } from "./recall-groups.ts";
+export { recallAuditPreview, recallAudits, startRecallAudit, resumeRecallAudit, pauseRecallAudit, applyRecallAudit, undoRecallAudit } from "./recall-audit.ts";
 export * from "./planner.ts";
 export { readMistakes, writeMistakes, updateMistakes } from "../store/mistakes.ts";
 export { AnalysisUnavailable } from "./mistake-analysis.ts";

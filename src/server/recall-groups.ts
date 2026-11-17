@@ -35,7 +35,7 @@ export function recallGroupPreview(subject: string, offset = 0) {
 		model: roles.find((entry) => entry.role === "analyst")?.modelLabel ?? "Analyst (not configured)",
 		availableRoles: roles,
 		items: eligible.map(toItem), allItems: sources.map(toItem),
-		groups: saved?.groups ?? [], draft: saved?.draft ?? null, approvedRevision: revisionOfGroups(saved?.groups ?? []),
+		groups: saved?.groups ?? [], draft: saved?.draft ?? null, history: saved?.history ?? [], approvedRevision: revisionOfGroups(saved?.groups ?? []),
 	};
 }
 
@@ -51,32 +51,44 @@ export async function suggestRecallGroups(subject: string, expected: Array<{ id:
 	const resolved = preferredRole ? resolvePlannerEngine("coach", preferredRole) : null;
 	if (preferredRole && resolved?.role !== preferredRole) throw new Error("The selected model is unavailable.");
 	const engine = recallGroupEngineOverride.current ?? resolved?.engine ?? analystEngine();
-	const allowed = new Map(preview.items.map((item) => [item.id, item]));
 	let model = preferredRole ? resolved!.modelLabel : preview.model;
-	const call = () => runSubmitAgent<Proposal>({
-		role: preferredRole ?? "analyst", engine, signal,
-		toolName: "submit_recall_topic_groups", toolDescription: "Propose evidence-based groups of semantically related recall topics.", parameters: schema,
-		fill: (value) => value as Proposal,
-		systemPrompt: "Group answers only when their existing topic and feedback provide specific evidence that they concern the same mathematical concept or recurring gap. Related words alone are not enough. Do not merge distinct concepts. Leave ambiguous answers ungrouped. When source is user, the learner's verdict takes precedence and old AI feedback may conflict. Keep correct, partially correct, incorrect, did-not-know and uncertain assessments distinct; never turn them into a score or infer independence. Each answer may appear in at most one group. Use only the exact supplied IDs, at least two per group. Explain each proposal briefly in Vietnamese. The learner must inspect and approve the proposals.",
-		prompt: JSON.stringify({ subject, assessments: preview.items.map(({ id, topic, errorType, verdict, source, feedback }) => ({ id, topic, errorType, verdict, source, feedback })) }),
-		onStep: (_usage, label) => { model = label; }, neverSubmitted: "The model did not submit groups.",
-		validate: (value) => {
-			const seen = new Set<string>();
-			for (const group of value.groups) {
-				if (!group.name.trim() || !group.reason.trim() || group.answerIds.length < 2) return "Every group needs a name, a reason, and at least two answers.";
-				for (const id of group.answerIds) { if (!allowed.has(id) || seen.has(id)) return "Use only supplied answer IDs, at most once."; seen.add(id); }
-			}
-			return null;
-		},
-	});
-	let result: Proposal;
-	try { result = await retryIncompleteOnce(call, signal); } catch (error) { throw new Error(mappingErrorMessage(error, signal)); }
-	const latest = recallGroupPreview(subject, offset);
-	if (expected.some((item, index) => item.id !== latest.items[index]?.id || item.fingerprint !== latest.items[index]?.fingerprint) || expected.length !== latest.items.length) throw new Error("The source assessments changed. Review the updated preview before trying again.");
-	const groups: RecallGroup[] = result.groups.map((group) => ({ id: randomUUID(), name: group.name.trim().slice(0, 160), reason: group.reason.trim().slice(0, 2000), model, members: group.answerIds.map((id) => ({ id, fingerprint: allowed.get(id)!.fingerprint })) }));
-	const { sources } = sourceFor(subject);
-	saveRecallGroupDraft(subject, groups, sources);
-	return { groups, model };
+	const groups: RecallGroup[] = [];
+	const failures: Array<{ offset: number; count: number; error: string }> = [];
+	// Short IDs and small independent batches bound output size. Successful
+	// batches are persisted before requesting the next one.
+	for (let offset = 0; offset < preview.items.length; offset += 20) {
+		if (signal?.aborted) { failures.push({ offset, count: preview.items.length - offset, error: "Request cancelled." }); break; }
+		const batch = preview.items.slice(offset, offset + 20);
+		const allowed = new Map(batch.map((item, index) => [`a${index}`, item]));
+		const call = () => runSubmitAgent<Proposal>({
+			role: preferredRole ?? "analyst", engine, signal,
+			toolName: "submit_recall_topic_groups", toolDescription: "Propose evidence-based groups of semantically related recall topics.", parameters: schema,
+			fill: (value) => value as Proposal,
+			systemPrompt: "Group answers only when their existing topic and feedback provide specific evidence that they concern the same mathematical concept or recurring gap. Related words alone are not enough. Do not merge distinct concepts. Leave ambiguous answers ungrouped. When source is user, the learner's verdict takes precedence and old AI feedback may conflict. Keep correct, partially correct, incorrect, did-not-know and uncertain assessments distinct; never turn them into a score or infer independence. Each answer may appear in at most one group. Use only the exact supplied IDs, at least two per group. Explain each proposal briefly in Vietnamese. The learner must inspect and approve the proposals.",
+			prompt: JSON.stringify({ subject, assessments: batch.map(({ topic, errorType, verdict, source, feedback }, index) => ({ id: `a${index}`, topic, errorType, verdict, source, feedback })) }),
+			onStep: (_usage, label) => { model = label; }, neverSubmitted: "The model did not submit groups.",
+			validate: (value) => {
+				const seen = new Set<string>();
+				for (const group of value.groups) {
+					if (!group.name.trim() || !group.reason.trim() || group.answerIds.length < 2) return "Every group needs a name, a reason, and at least two answers.";
+					for (const id of group.answerIds) { if (!allowed.has(id) || seen.has(id)) return "Use only supplied answer IDs, at most once."; seen.add(id); }
+				}
+				return null;
+			},
+		});
+		try {
+			const result = await retryIncompleteOnce(call, signal);
+			const latest = recallGroupPreview(subject, offset + (preview.offset || 0));
+			if (batch.some((item, index) => item.id !== latest.items[index]?.id || item.fingerprint !== latest.items[index]?.fingerprint)) throw new Error("The source assessments changed; review the preview again.");
+			groups.push(...result.groups.map((group) => ({ id: randomUUID(), name: group.name.trim().slice(0, 160), reason: group.reason.trim().slice(0, 2000), model, members: group.answerIds.map((id) => ({ id: allowed.get(id)!.id, fingerprint: allowed.get(id)!.fingerprint })) })));
+			const { sources } = sourceFor(subject);
+			saveRecallGroupDraft(subject, groups, sources, undefined, model);
+		} catch (error) {
+			failures.push({ offset, count: batch.length, error: error instanceof Error && error.message.startsWith("The source assessments changed") ? error.message : mappingErrorMessage(error, signal) });
+			break;
+		}
+	}
+	return { groups, model, failures };
 }
 
 /** Saves only reviewed groups; does not touch questions, graph, plan or FSRS. */

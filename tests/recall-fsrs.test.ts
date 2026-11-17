@@ -67,7 +67,7 @@ it("requires explicit concepts and ratings, replays original times, rejects dupl
 	const groupPreview = recallGroupPreview("Algebra");
 	assert.equal(groupPreview.items.length, 2); assert.equal(groupPreview.items.find((item) => item.id === drafts[0]!.id)?.verdict, "correct", "learner correction takes precedence");
 	const grouping = createFauxCore({ tokenSize: { min: 64, max: 64 } });
-	grouping.setResponses([fauxAssistantMessage([fauxToolCall("submit_recall_topic_groups", { groups: [{ name: "Matrix rank", reason: "Cùng xét hạng ma trận.", answerIds: drafts.map((draft) => draft.id) }] } as ToolCall["arguments"], { id: "grouping" })], { stopReason: "toolUse" })]);
+	grouping.setResponses([fauxAssistantMessage([fauxToolCall("submit_recall_topic_groups", { groups: [{ name: "Matrix rank", reason: "Cùng xét hạng ma trận.", answerIds: ["a0", "a1"] }] } as ToolCall["arguments"], { id: "grouping" })], { stopReason: "toolUse" })]);
 	recallGroupEngineOverride.current = { model: grouping.getModel(), streamFn: grouping.streamSimple };
 	const proposed = await suggestRecallGroups("Algebra", groupPreview.items.map(({ id, fingerprint }) => ({ id, fingerprint })));
 	assert.equal(proposed.groups.length, 1); assert.equal(recallGroupPreview("Algebra").draft?.length, 1, "AI proposals are stored as a local draft");
