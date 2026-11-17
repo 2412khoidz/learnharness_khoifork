@@ -286,6 +286,9 @@ export function AnsweredCard({
 					>
 						{whyOpen ? "Hide why" : "Why"}
 					</button>
+					{whyOpen && mistake && (analysis || mistake.status === "failed") && (
+						<p className="mt-1 text-xs text-muted-foreground" data-testid="mistake-analysis-model">Analysis model: {mistake.analysisModel ?? "not recorded for this older analysis"}</p>
+					)}
 					{whyOpen && analysis && mistake?.kind === "unanswered" && (
 						<div className="mt-1.5 rounded-lg border border-border/60 px-3 py-2.5 text-sm" data-testid="mistake-why">
 							<div className="text-xs text-muted-foreground">{analysis.topic}</div>

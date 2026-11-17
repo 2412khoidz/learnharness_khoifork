@@ -62,6 +62,10 @@ async function render(map: Map<string, MistakeRecord>, mistakeId?: string, open 
 }
 
 describe("AnsweredCard mistake analysis", () => {
+	it("identifies the analysis model when known and does not guess for older records", async () => {
+		assert.match(await render(new Map([["c1:q1", record({ analysisModel: "google:gemini-example" })]]), "c1:q1", true), /Analysis model: google:gemini-example/);
+		assert.match(await render(new Map([["c1:q1", record({})]]), "c1:q1", true), /not recorded for this older analysis/);
+	});
 	it("hides the analysis until Why is clicked", async () => {
 		const out = await render(new Map([["c1:q1", record({})]]), "c1:q1");
 		assert.match(out, /tucked-explanation/);
