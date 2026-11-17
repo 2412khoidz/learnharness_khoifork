@@ -69,3 +69,12 @@ it("retains only elapsed blocks from an earlier plan when a day is replanned", (
 	assert.equal(result.report.plannedStudyMin, 105);
 	assert.equal(result.report.scorable, true);
 });
+
+it("does not present the 40 percent realism floor as completed study", () => {
+ const config = sanitizePlannerConfig({ ...DEFAULT_PLANNER_CONFIG, realismFactor: 0.9 });
+ const plan = { date: "2026-11-15", blocks: [{ id: "study", type: "study", startMin: 600, endMin: 660, durationMin: 60 }], plannedStudyHours: 1, quotas: [] } as unknown as DailyStudyPlan;
+ const result = evaluatePlanVsActualLocal({ date: "2026-11-15", config, plan, journalText: "", now: new Date(2026, 10, 16, 21).getTime() });
+ assert.equal(result.report.actualStudyMin, 0); assert.equal(result.report.realismRatio, 0.4);
+ assert.match(result.report.nextDayAdvice, /Recorded 0m of study against 60m planned/);
+ assert.doesNotMatch(result.report.nextDayAdvice, /40% completed/);
+});

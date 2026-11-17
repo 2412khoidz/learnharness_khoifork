@@ -4406,7 +4406,8 @@ export function JournalAuditTab({
 								Actual {(compliance.actualStudyMin / 60).toFixed(1)}h / Planned {(compliance.plannedStudyMin / 60).toFixed(1)}h{auditHasScore ? ` · Realism ×${compliance.realismRatio}` : ""}
 							</span>
 						</div>
-						<p className="mt-1.5 text-foreground">{auditHasScore ? compliance.summary : "There is not enough scheduled study to evaluate this plan."}</p>
+						<p className="mt-1.5 text-foreground">{compliance.evaluatedBy === "llm" || auditHasScore ? compliance.summary : "There is not enough scheduled study to evaluate this plan."}</p>
+						{compliance.numericMismatch && <p role="status" className="mt-1 text-warning">The AI narrative may contain different numbers. Use the recorded timeline and totals above for the actual values.</p>}
 						<div className="mt-2 grid gap-2 sm:grid-cols-2">
 							{compliance.strengths.length > 0 && (
 								<div className="rounded-lg border bg-card p-2">
@@ -4418,7 +4419,7 @@ export function JournalAuditTab({
 									</ul>
 								</div>
 							)}
-							{auditHasScore && compliance.frictionPoints.length > 0 && (
+							{(auditHasScore || compliance.evaluatedBy === "llm") && compliance.frictionPoints.length > 0 && (
 								<div className="rounded-lg border bg-card p-2">
 									<div className="mb-1 text-[11px] font-medium text-warning">Friction & Distractions</div>
 									<ul className="space-y-0.5 text-[11px] text-muted-foreground">
@@ -4429,7 +4430,7 @@ export function JournalAuditTab({
 								</div>
 							)}
 						</div>
-						{auditHasScore && compliance.nextDayAdvice && (
+						{(auditHasScore || compliance.evaluatedBy === "llm") && compliance.nextDayAdvice && (
 							<div className="mt-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
 								<strong>Next-day calibration:</strong> {compliance.nextDayAdvice}
 							</div>

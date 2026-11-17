@@ -23,17 +23,20 @@ export function projectRecallGroups(groups: readonly RecallGroup[], sources: rea
 	});
 }
 
-/** Reject duplicate membership instead of double-counting the same answer. */
+/** Answers may belong to several topics; duplicates within one group are invalid. */
 export function validateRecallGroups(groups: readonly RecallGroup[], sources: readonly RecallGroupSource[]): string | null {
-	if (groups.length > 100) return "Too many groups.";
+	if (groups.length > 1000) return "Too many groups.";
 	const byId = new Map(sources.map((source) => [source.observation.id, source]));
-	const seen = new Set<string>(), groupIds = new Set<string>();
+	const groupIds = new Set<string>();
 	for (const group of groups) {
 		if (!group.id || groupIds.has(group.id) || !group.name.trim() || group.name.length > 160 || group.reason.length > 2000 || group.members.length < 2) return "Each group needs a distinct ID, a name and at least two answers.";
 		groupIds.add(group.id);
+		const seen = new Set<string>();
 		for (const member of group.members) {
 			const source = byId.get(member.id);
-			if (seen.has(member.id) || source?.fingerprint !== member.fingerprint) return "An answer is duplicated, unavailable or changed. Refresh before approving.";
+			if (seen.has(member.id)) return `An answer appears twice in “${group.name}”. Remove the duplicate in that group.`;
+			if (!source) return `An answer in “${group.name}” is unavailable. Review that group.`;
+			if (source.fingerprint !== member.fingerprint) return `An answer in “${group.name}” changed. Review the current assessment before approving.`;
 			if (!source.observation.verdict || source.observation.staleAssessment) return "An answer needs a current assessment before it can be grouped.";
 			seen.add(member.id);
 		}

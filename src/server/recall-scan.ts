@@ -6,6 +6,7 @@ import { runSubmitAgent } from "../agent/subagents/submit-agent.ts";
 import type { PiEngine } from "../agent/models.ts";
 import { collectRecallCandidates, mergeMistakes, ERROR_TYPES, type MistakeDraft, type RecallScanResult, type RecallScanState } from "../core/mistakes.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
+import { readMistakeDismissals, writeMistakeDismissals, isDismissedMistake } from "../store/mistake-dismissals.ts";
 import { readMistakes, updateMistakes } from "../store/mistakes.ts";
 import { analystEngine } from "./mistake-analysis.ts";
 import { effectiveSettings, stores } from "./stores.ts";
@@ -69,8 +70,8 @@ export async function assessRecallBatch(batch: ReturnType<typeof candidates>, en
 	const ids = new Set(batch.map((c) => c.draft.id));
 	const response = await runSubmitAgent<{ items: Assessment[] }>({
 		role: "analyst", toolName: "submit_recall_assessments", toolDescription: "Return one grounded assessment for every supplied answer.",
-		parameters: assessmentSchema, fill: (v) => v as { items: Assessment[] }, engine, signal,
-		systemPrompt: "Assess each free-recall answer carefully using the question, committed answer, learner response and subsequent tutor feedback. Distinguish correct, partial, wrong, dont_know and uncertain. Give what was correct, what was missing, a correction, and specific evidence from the learner's answer; never invent reasoning or assume all answers are wrong. If the evidence or answer key is insufficient, use uncertain. Tutor feedback and previous assessments are evidence, not infallible; review them independently. Return every exact id once. Use the learner's language. For correct or uncertain answers, errorType may be knowledge-gap but do not label them mistakes.",
+		parameters: assessmentSchema, fill: (v) => v as { items: Assessment[] }, engine, signal, ...(auditContext ? { maxTurns: 2 } : {}),
+		systemPrompt: "Assess each free-recall answer carefully using the question, committed answer, learner response and subsequent tutor feedback. Distinguish correct, partial, wrong, dont_know and uncertain. Give what was correct, what was missing, a correction, and specific evidence from the learner's answer; never invent reasoning or assume all answers are wrong. If the evidence or answer key is insufficient, use uncertain. Judge only what the original question explicitly asks. Do not infer that a learner stated a step they did not state, and do not treat a subsequent lesson as a missing requirement. Tutor feedback and previous assessments are evidence, not infallible; review them independently. Return every exact id once. Use the learner's language. For correct or uncertain answers, errorType may be knowledge-gap but do not label them mistakes.",
 		prompt: JSON.stringify(batch.map(({ draft, feedback }) => ({ id: draft.id, question: draft.question, answer: draft.yourAnswer, committed: draft.correctAnswer, thinking: draft.thinking, tutorFeedback: feedback, ...(auditContext?.has(draft.id) ? { previousAssessment: auditContext.get(draft.id) } : {}) }))),
 		onStep: (usage) => onUsage?.(usage), neverSubmitted: NO_ASSESSMENT,
 		validate: (value) => {
@@ -150,14 +151,18 @@ export function pauseRecallScan(): RecallScanState {
 export function saveRecallScanResults(ids: readonly string[]): number {
 	const selected = new Set(ids);
 	const results = readState().results.filter((r) => selected.has(r.id) && (r.verdict === "wrong" || r.verdict === "partial" || r.verdict === "dont_know"));
+	const dismissed = readMistakeDismissals(), approvedIds = new Set(results.map((result) => result.id));
+	if (dismissed.some((entry) => approvedIds.has(entry.id))) writeMistakeDismissals(dismissed.filter((entry) => !approvedIds.has(entry.id)));
 	return saveAssessedMistakes(results);
 }
 
 function saveAssessedMistakes(results: readonly RecallScanResult[]): number {
+	const dismissed = readMistakeDismissals();
 	let added = 0;
 	updateMistakes((existing) => {
 		let records = existing;
 		for (const r of results) {
+			if (isDismissedMistake(r.draft, dismissed)) continue;
 			const chat = stores.chatStore.getChat(r.draft.chatId);
 			if (!chat) continue;
 			const draft: MistakeDraft = { ...r.draft, kind: r.verdict === "dont_know" ? "unanswered" : "missed", verdict: r.verdict, strengths: r.strengths, missing: r.missing, correction: r.correction, evidence: r.evidence };

@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { runSubmitAgent } from "../agent/subagents/submit-agent.ts";
 import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
+import { retryIncompleteOnce } from "../core/recall-mapping.ts";
 import { resolveRoleSpec } from "../core/settings-resolution.ts";
 import { ERROR_TYPES, parseAnalysis, type MistakeAnalysis, type MistakeRecord } from "../core/mistakes.ts";
 import { providerKeyPresent } from "./keys.ts";
@@ -13,7 +14,7 @@ import { stores } from "./stores.ts";
  * and where the reasoning broke, with the real numbers, ending in one reusable rule.
  */
 
-const INSTRUCTIONS = `You are an error analyst inside a learning app. A learner got one item wrong (or could not answer it).
+const INSTRUCTIONS = `You are an error analyst inside a learning app. This item was flagged, but the flag may be wrong or the answer may be correct or partly correct. Judge only what the original question asked. Never invent a mistake; if the response is correct, say the flag may be incorrect.
 Write a SHORT diagnosis — the learner reads it right after the miss. Call submit_analysis once.
 
 Do NOT restate the answer key. Work out what the learner's answer implies and where their reasoning broke.
@@ -85,8 +86,9 @@ export async function analyzeMistake(
 	opts: { engine?: PiEngine; signal?: AbortSignal } = {},
 ): Promise<MistakeAnalysis> {
 	const engine = opts.engine ?? analystEngine();
-	return runSubmitAgent<MistakeAnalysis>({
+	return retryIncompleteOnce(() => runSubmitAgent<MistakeAnalysis>({
 		role: "analyst",
+		maxTurns: 2,
 		chatId: record.chatId,
 		toolName: "submit_analysis",
 		toolDescription: "Submit the short error analysis for this item.",
@@ -99,5 +101,5 @@ export async function analyzeMistake(
 		signal: opts.signal,
 		onStep: () => {},
 		neverSubmitted: "The analyst never submitted an analysis.",
-	});
+	}), opts.signal);
 }

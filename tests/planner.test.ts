@@ -1181,6 +1181,10 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		// recorded timeline and the plan rather than trusting its proposed score.
 		assert.equal(llmAudit.report.adherencePct, 100);
 		assert.equal(llmAudit.report.actualStudyMin, 180);
+		assert.equal(llmAudit.report.numericMismatch, true, "the difference is visible without discarding the AI narrative");
+		assert.equal(llmAudit.report.summary, "Completed solid proof session with minor afternoon phone drift.");
+		assert.equal(llmAudit.report.nextDayAdvice, "Move heavy proofs to 08:30 sharp.");
+		assert.equal(llmAudit.snapshot.config.logs["2026-11-16"]?.compliance?.numericMismatch, true, "mismatch survives saving");
 
 		// Research trace callback records linked_context, synthesizing, and done phases
 		const steps: string[] = [];

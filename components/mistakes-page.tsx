@@ -529,6 +529,7 @@ export function MistakeCard({
 					) : null}
 					{r.thinking && <AnalysisBlock label="Your reasoning" text={r.thinking} />}
 					{r.status === "failed" && r.error && <p className="text-xs text-muted-foreground" data-testid="mistake-error">{r.error}</p>}
+					{r.analysisModel && <p className="text-xs text-muted-foreground">Analysis model: {r.analysisModel}</p>}
 					<div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-2.5 font-ui text-[11px] text-muted-foreground">
 						<Link href={`/chat/${r.chatId}`} className="inline-flex items-center gap-1 hover:text-foreground" data-testid="mistake-session-link">
 							<BookOpenIcon className="size-3.5" />

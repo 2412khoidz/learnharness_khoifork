@@ -1,16 +1,19 @@
 import type { ModelRole } from "@/config";
-import { approveRecallGroups, recallGroupPreview, suggestRecallGroups, saveRecallGroupsDraft, recallFsrsReviewData, readMistakes } from "@/src/server";
+import { approveRecallGroups, recallGroupPreview, suggestRecallGroups, saveRecallGroupsDraft, readRecallAnswer, recallGroupJobs, startRecallGroupJob, resumeRecallGroupJob, pauseRecallGroupJob } from "@/src/server";
 import type { RecallGroup } from "@/src/core";
 
 export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
-	try { const params = new URL(request.url).searchParams; const answerId = params.get("answerId"); if (answerId) { const answer = recallFsrsReviewData().results.find((item) => item.id === answerId); if (!answer) throw new Error("This answer is unavailable or its assessment needs review."); const mistake = readMistakes().find((item) => item.id === answerId); return Response.json({ answer, mistake: mistake ? { status: mistake.status } : null }, { headers: { "Cache-Control": "no-store" } }); } const subject = params.get("subject") ?? ""; return Response.json(recallGroupPreview(subject, Number(params.get("offset") ?? 0)), { headers: { "Cache-Control": "no-store" } }); }
+	try { const params = new URL(request.url).searchParams; if (params.get("jobs") === "1") return Response.json({ jobs: recallGroupJobs(params.get("subject") ?? "") }, { headers: { "Cache-Control": "no-store" } }); const answerId = params.get("answerId"); if (answerId) return Response.json(readRecallAnswer(answerId), { headers: { "Cache-Control": "no-store" } }); const subject = params.get("subject") ?? ""; return Response.json(recallGroupPreview(subject, Number(params.get("offset") ?? 0)), { headers: { "Cache-Control": "no-store" } }); }
 	catch (error) { return Response.json({ error: error instanceof Error ? error.message : "Could not load preview." }, { status: 400 }); }
 }
 export async function POST(request: Request) {
 	try {
-		const body = await request.json() as { action?: string; subject?: string; expected?: Array<{ id: string; fingerprint: string }>; preferredRole?: ModelRole; groups?: RecallGroup[]; offset?: number; approvedRevision?: string };
+		const body = await request.json() as { action?: string; subject?: string; expected?: Array<{ id: string; fingerprint: string }>; preferredRole?: ModelRole; groups?: RecallGroup[]; offset?: number; approvedRevision?: string; jobId?: string; retrySkipped?: boolean };
 		if (typeof body.subject !== "string") throw new Error("Choose a subject.");
+		if (body.action === "start_job") return Response.json(startRecallGroupJob(body.subject, body.expected ?? [], body.preferredRole));
+		if (body.action === "resume_job" && body.jobId) return Response.json(resumeRecallGroupJob(body.jobId, body.preferredRole, body.retrySkipped === true));
+		if (body.action === "pause_job" && body.jobId) return Response.json(pauseRecallGroupJob(body.jobId));
 		if (body.action === "suggest") return Response.json(await suggestRecallGroups(body.subject, body.expected ?? [], body.preferredRole, request.signal, body.offset ?? 0));
 		if (body.action === "approve") return Response.json(approveRecallGroups(body.subject, body.groups ?? [], body.approvedRevision ?? ""));
 		if (body.action === "save_draft") return Response.json(saveRecallGroupsDraft(body.subject, body.groups ?? []));

@@ -87,7 +87,7 @@ jobs:
       - name: Test recall and Google stream changes
         env:
           NODE_ENV: test
-        run: node --import=tsx --test tests/google-stream-tail.test.ts tests/recall-fsrs.test.ts tests/recall-fsrs-ui.test.tsx tests/recall-insights.test.ts tests/recall-groups.test.ts tests/recall-analysis-ui.test.tsx tests/recall-audit.test.ts tests/backup.test.ts
+        run: node --import=tsx --test tests/google-stream-tail.test.ts tests/recall-fsrs.test.ts tests/recall-fsrs-ui.test.tsx tests/recall-insights.test.ts tests/recall-groups.test.ts tests/recall-group-job.test.ts tests/recall-analysis-ui.test.tsx tests/recall-audit.test.ts tests/recall-audit-ui.test.tsx tests/recall-scan.test.ts tests/mistakes.test.ts tests/planner.test.ts tests/planner-unscored.test.ts tests/planner-journal-ui.test.tsx tests/backup.test.ts
 
       - name: Check TypeScript
         run: npm run typecheck

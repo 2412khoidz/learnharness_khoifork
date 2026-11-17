@@ -1,8 +1,10 @@
 import { findExplainMistakeByCallId, findMistakes, mergeMistakes, restorePracticeAnswer, type MistakeDraft, type MistakeRecord } from "../core/mistakes.ts";
 import type { PiEngine } from "../agent/models.ts";
+import { readMistakeDismissals, writeMistakeDismissals, isDismissedMistake, mistakeSourceFingerprint } from "../store/mistake-dismissals.ts";
 import { readMistakes, updateMistakes } from "../store/mistakes.ts";
 import { effectiveSettings, stores } from "./stores.ts";
-import { analyzeMistake } from "./mistake-analysis.ts";
+import { recallFailureKind } from "../core/recall-mapping.ts";
+import { analyzeMistake, analystEngine } from "./mistake-analysis.ts";
 import { gradeLatestRecallAfterTurn } from "./recall-scan.ts";
 
 /**
@@ -54,9 +56,8 @@ function kindOf(kind: string | undefined): "teach" | "practice" | "chat" {
 	return kind === "practice" || kind === "chat" ? kind : "teach";
 }
 
-/** How many model calls the analyst has started in the rolling 24 hours.
- *  Every finished attempt stamps `analyzedAt` (ready or failed), so the cap
- *  counts real spend, not just successes. */
+/** How many analysis attempts finished in the rolling 24 hours. An incomplete
+ *  response may cause one additional model call within an attempt. */
 export function analysesInLastDay(now = Date.now(), records = readMistakes()): number {
 	const cutoff = now - DAY_MS;
 	return records.filter((r) => r.analyzedAt && Date.parse(r.analyzedAt) >= cutoff).length;
@@ -72,7 +73,8 @@ export function countNewMistakes(chatId: string): number {
 	const record = stores.chatStore.getChat(chatId);
 	if (!record) return 0;
 	const known = new Set(readMistakes().map((r) => r.id));
-	return findMistakes(chatId, record.messages).filter((d) => !known.has(d.id)).length;
+	const dismissals = readMistakeDismissals();
+	return findMistakes(chatId, record.messages).filter((d) => !known.has(d.id) && !isDismissedMistake(d, dismissals)).length;
 }
 
 function mergeSessionDrafts(
@@ -110,7 +112,8 @@ function mergeSessionDrafts(
 export function recordChatMistakes(chatId: string): string[] {
 	const record = stores.chatStore.getChat(chatId);
 	if (!record) return [];
-	const drafts = findMistakes(chatId, record.messages);
+	const dismissals = readMistakeDismissals();
+	const drafts = findMistakes(chatId, record.messages).filter((draft) => !isDismissedMistake(draft, dismissals));
 	return mergeSessionDrafts(record, drafts).map((r) => r.id);
 }
 
@@ -121,6 +124,8 @@ export function recordExplainMistake(chatId: string, toolCallId: string): { mist
 	if (!record) return null;
 	const draft = findExplainMistakeByCallId(chatId, record.messages, toolCallId);
 	if (!draft) return null;
+	const dismissed = readMistakeDismissals();
+	if (dismissed.some((entry) => entry.id === draft.id)) writeMistakeDismissals(dismissed.filter((entry) => entry.id !== draft.id));
 	const added = mergeSessionDrafts(record, [draft]);
 	const mistake = readMistakes().find((r) => r.id === draft.id);
 	if (!mistake) return null;
@@ -178,14 +183,18 @@ export function enqueueAnalyses(ids: readonly string[]): void {
 		s.running.add(id);
 		s.total += 1;
 		void (async () => {
+			let analysisModel: string | undefined;
 			try {
-				const analysis = await analyzeMistake(record, { engine: analysisEngineOverride.current, signal: controller.signal });
-				patch(id, { status: "ready", analysis, error: undefined, analyzedAt: new Date().toISOString() });
+				const engine = analysisEngineOverride.current ?? analystEngine();
+				analysisModel = `${engine.model.provider}:${engine.model.id}`;
+				const analysis = await analyzeMistake(record, { engine, signal: controller.signal });
+				patch(id, { status: "ready", analysis, analysisModel, error: undefined, analyzedAt: new Date().toISOString() });
 			} catch (err) {
 				const aborted = err instanceof Error && err.name === "AbortError";
 				patch(id, {
 					status: "failed",
-					error: aborted ? "Cancelled." : err instanceof Error ? err.message : "Analysis failed.",
+					error: aborted ? "Cancelled." : recallFailureKind(err) === "split" ? "The AI response was incomplete or invalid. Retry analysis or choose another Analyst model." : recallFailureKind(err) === "quota" ? "The model has reached its quota or rate limit." : recallFailureKind(err) === "auth" ? "The Analyst model could not authenticate." : "Analysis could not be completed. Check the model connection or retry later.",
+					...(analysisModel ? { analysisModel } : {}),
 					analyzedAt: new Date().toISOString(),
 				});
 			} finally {
@@ -224,7 +233,12 @@ export function cancelAnalyses(): void {
 }
 
 export function deleteMistake(id: string): boolean {
-	let found = false;
-	updateMistakes((records) => records.filter((r) => (r.id === id ? ((found = true), false) : true)));
-	return found;
+	const record = readMistakes().find((item) => item.id === id);
+	if (!record) return false;
+	if (record.origin === "explain" || record.origin === "recall") {
+		const dismissed = readMistakeDismissals();
+		writeMistakeDismissals([...dismissed.filter((entry) => entry.id !== id), { id, fingerprint: mistakeSourceFingerprint(record), dismissedAt: new Date().toISOString() }]);
+	}
+	updateMistakes((records) => records.filter((item) => item.id !== id));
+	return true;
 }

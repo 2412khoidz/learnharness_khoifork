@@ -1026,7 +1026,7 @@ export function AgentSection({
 				</SettingsRow>
 				<SettingsRow
 					label="Daily analysis limit"
-					hint={`${MISTAKE_ANALYSIS_DAILY_CAP_MIN}–${MISTAKE_ANALYSIS_DAILY_CAP_MAX} cheap-model calls per 24 hours`}
+					hint={`${MISTAKE_ANALYSIS_DAILY_CAP_MIN}–${MISTAKE_ANALYSIS_DAILY_CAP_MAX} analyses per 24 hours; an incomplete response may retry once`}
 					testid="mistake-analysis-cap-row"
 				>
 					<CommitInput

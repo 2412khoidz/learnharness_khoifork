@@ -109,6 +109,8 @@ export interface MistakeRecord extends MistakeDraft {
 	sources: string[];
 	createdAt: string;
 	status: MistakeStatus;
+	/** Model used for the most recent analysis attempt, when recorded. */
+	analysisModel?: string;
 	analysis?: MistakeAnalysis;
 	/** When the last analysis ATTEMPT finished (ready or failed) — the
 	 *  rolling 24-hour cost cap counts these. */

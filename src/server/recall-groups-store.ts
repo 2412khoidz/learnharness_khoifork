@@ -27,7 +27,7 @@ export function saveRecallGroups(subject: string, groups: RecallGroup[], sources
 }
 
 /** Drafts stay local and are never included in the report or sent to Coach. */
-export function saveRecallGroupDraft(subject: string, draft: RecallGroup[], sources: readonly RecallGroupSource[], dir = PATHS.data, newRunModel?: string): void {
+export function saveRecallGroupDraft(subject: string, draft: RecallGroup[], sources: readonly RecallGroupSource[], dir = PATHS.data, newRunModel?: string, runId?: string): void {
 	if (!subject.trim()) throw new Error("Choose a subject.");
 	const problem = validateRecallGroups(draft, sources);
 	if (problem) throw new Error(problem);
@@ -36,8 +36,12 @@ export function saveRecallGroupDraft(subject: string, draft: RecallGroup[], sour
 	const groups = old?.groups ?? [];
 	const history = [...(old?.history ?? [])];
 	if (newRunModel) {
-		if (old?.draft?.length && !history.some((run) => JSON.stringify(run.groups) === JSON.stringify(old.draft))) history.push({ id: randomUUID(), createdAt: new Date().toISOString(), model: "Previous draft", groups: old.draft });
-		history.push({ id: randomUUID(), createdAt: new Date().toISOString(), model: newRunModel, groups: draft });
+		const existing = runId ? history.findIndex((run) => run.id === runId) : -1;
+		if (existing >= 0) history[existing] = { ...history[existing]!, model: newRunModel, groups: draft };
+		else {
+			if (old?.draft?.length && !history.some((run) => JSON.stringify(run.groups) === JSON.stringify(old.draft))) history.push({ id: randomUUID(), createdAt: new Date().toISOString(), model: "Previous draft", groups: old.draft });
+			history.push({ id: runId ?? randomUUID(), createdAt: new Date().toISOString(), model: newRunModel, groups: draft });
+		}
 	}
 	fs.mkdirSync(dir, { recursive: true });
 	writeFileAtomicSync(path.join(dir, "recall-groups.json"), JSON.stringify({ version: 1, subjects: [...previous.filter((row) => row.subject !== subject), { subject, groups, draft, history }] }), { allowInPlaceFallback: true });

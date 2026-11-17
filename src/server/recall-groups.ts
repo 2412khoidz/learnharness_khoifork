@@ -11,7 +11,7 @@ import { listAvailablePlannerRoles, readPlannerLearningCapacityServer, resolvePl
 import { readRecallGroups, saveRecallGroups, saveRecallGroupDraft } from "./recall-groups-store.ts";
 
 export const recallGroupEngineOverride: { current?: PiEngine } = {};
-const LIMIT = 300;
+const LIMIT = 100000;
 const revisionOfGroups = (groups: readonly RecallGroup[]) => createHash("sha256").update(JSON.stringify(groups)).digest("hex");
 
 function sourceFor(subject: string, offset = 0) {
@@ -27,7 +27,10 @@ function sourceFor(subject: string, offset = 0) {
 export function recallGroupPreview(subject: string, offset = 0) {
 	if (!Number.isInteger(offset) || offset < 0 || offset > 1000000) throw new Error("Invalid batch offset.");
 	const { sources, eligible, totalEligible } = sourceFor(subject, offset);
-	const roles = listAvailablePlannerRoles();
+	const roles = listAvailablePlannerRoles().map((entry) => {
+		const cost = resolvePlannerEngine("coach", entry.role)?.engine.model.cost;
+		return { ...entry, pricing: cost && Number.isFinite(cost.input) && Number.isFinite(cost.output) && cost.input > 0 && cost.output > 0 ? { input: cost.input, output: cost.output } : null };
+	});
 	const saved = readRecallGroups().find((entry) => entry.subject === subject);
 	const toItem = ({ observation, fingerprint }: RecallGroupSource) => ({ id: observation.id, fingerprint, topic: observation.topic ?? "", errorType: observation.errorType ?? "", verdict: observation.verdict, source: observation.source, feedback: observation.feedback ?? "", needsReview: observation.staleAssessment ?? false, chatId: observation.chatId, sourceMessageId: observation.sourceMessageId, toolCallId: observation.toolCallId });
 	return {
@@ -42,53 +45,69 @@ export function recallGroupPreview(subject: string, offset = 0) {
 const schema = Type.Object({ groups: Type.Array(Type.Object({ name: Type.String(), reason: Type.String(), answerIds: Type.Array(Type.String()) })) });
 type Proposal = { groups: Array<{ name: string; reason: string; answerIds: string[] }> };
 
-/** The client must present the preview before explicitly invoking this paid operation. */
+export type RecallGroupItem = ReturnType<typeof recallGroupPreview>["items"][number];
+export function recallGroupSourceSnapshot(subject: string) { return sourceFor(subject).sources; }
+
+/** Keep later requests bounded while giving related earlier topics first chance. */
+function relevantPriorGroups(batch: RecallGroupItem[], groups: RecallGroup[]): RecallGroup[] {
+ const words = (value: string) => value.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length > 2);
+ const current = new Set(batch.flatMap((item) => words(`${item.topic} ${item.feedback}`)));
+ const ranked = groups.map((group, index) => ({ group, index, score: new Set(words(`${group.name} ${group.reason.slice(0, 200)}`).filter((word) => current.has(word))).size }))
+  .sort((a, b) => b.score - a.score || a.index - b.index);
+ const selected: RecallGroup[] = [];
+ let chars = 0;
+ for (const { group } of ranked) {
+  const size = group.name.length + Math.min(group.reason.length, 200) + 40;
+  if (selected.length >= 30 || chars + size > 6000) continue;
+  selected.push(group); chars += size;
+ }
+ return selected;
+}
+
+/** One bounded request. IDs are aliases, so user records never need to be echoed by the model. */
+export async function suggestRecallGroupBatch(subject: string, batch: RecallGroupItem[], engine: PiEngine, role: ModelRole, signal?: AbortSignal, onStep?: (usage: { input: number; output: number }, label: string) => void, priorGroups: RecallGroup[] = []) {
+ const allowed = new Map(batch.map((item, index) => [`a${index}`, item]));
+ const prior = new Map(relevantPriorGroups(batch, priorGroups).map((group, index) => [`p${index}`, group]));
+ let model = `${engine.model.provider}:${engine.model.id}`;
+ const result = await runSubmitAgent<Proposal>({
+  role, engine, signal, maxTurns: 2,
+  toolName: "submit_recall_topic_groups", toolDescription: "Propose evidence-based groups of semantically related recall topics.", parameters: schema,
+  fill: (value) => value as Proposal,
+  systemPrompt: "Group answers only when their existing topic and feedback provide specific evidence that they concern the same concept or recurring gap. Related words alone are not enough. Do not merge distinct concepts. Leave ambiguous answers ungrouped. Learner corrections take precedence. Keep correct, partial, wrong, did-not-know and uncertain distinct; never infer independence. An answer may belong to several genuinely distinct topics; avoid duplicate groups. Use only supplied IDs, at least two distinct answers per group. Previous group IDs represent all answers in that group; use them only when new answers genuinely belong to that topic. Explain briefly in Vietnamese. All suggestions require learner approval.",
+  prompt: JSON.stringify({ subject, previousGroups: [...prior].map(([id, group]) => ({ id, name: group.name, reason: group.reason.slice(0, 200) })), assessments: batch.map(({ topic, errorType, verdict, source, feedback }, index) => ({ id: `a${index}`, topic, errorType, verdict, source, feedback })) }),
+  onStep: (usage, label) => { model = label; onStep?.(usage, label); }, neverSubmitted: "The model did not submit groups.",
+  validate: (value) => {
+   for (const group of value.groups) {
+    const seen = new Set<string>();
+    if (!group.name.trim() || !group.reason.trim() || group.answerIds.length < 2) return "Every group needs a name, a reason, and at least two answers.";
+    for (const id of group.answerIds) { if ((!allowed.has(id) && !prior.has(id)) || seen.has(id)) return "Use only supplied answer IDs, at most once within each group."; seen.add(id); }
+   }
+   return null;
+  },
+ });
+ return { model, groups: result.groups.map((group) => ({ id: randomUUID(), name: group.name.trim().slice(0, 160), reason: group.reason.trim().slice(0, 2000), model, members: [...new Map(group.answerIds.flatMap((id) => { const old = prior.get(id); const current = allowed.get(id); return old ? old.members : current ? [{ id: current.id, fingerprint: current.fingerprint }] : []; }).map((member) => [member.id, member])).values()] })).filter((group) => group.members.length >= 2) };
+}
+
+/** Backward-compatible single request; newer UI uses a persisted group job. */
 export async function suggestRecallGroups(subject: string, expected: Array<{ id: string; fingerprint: string }>, preferredRole?: ModelRole, signal?: AbortSignal, offset = 0) {
-	const preview = recallGroupPreview(subject, offset);
-	if (!Array.isArray(expected) || expected.length !== preview.items.length || expected.some((item, index) => item.id !== preview.items[index]?.id || item.fingerprint !== preview.items[index]?.fingerprint)) throw new Error("The preview changed. Review the updated input before requesting suggestions.");
-	if (preview.items.length < 2) throw new Error("At least two assessed answers with topic or feedback are needed.");
-	if (preferredRole && !preview.availableRoles.some((entry) => entry.role === preferredRole)) throw new Error("The selected model is unavailable.");
-	const resolved = preferredRole ? resolvePlannerEngine("coach", preferredRole) : null;
-	if (preferredRole && resolved?.role !== preferredRole) throw new Error("The selected model is unavailable.");
-	const engine = recallGroupEngineOverride.current ?? resolved?.engine ?? analystEngine();
-	let model = preferredRole ? resolved!.modelLabel : preview.model;
-	const groups: RecallGroup[] = [];
-	const failures: Array<{ offset: number; count: number; error: string }> = [];
-	// Short IDs and small independent batches bound output size. Successful
-	// batches are persisted before requesting the next one.
-	for (let offset = 0; offset < preview.items.length; offset += 20) {
-		if (signal?.aborted) { failures.push({ offset, count: preview.items.length - offset, error: "Request cancelled." }); break; }
-		const batch = preview.items.slice(offset, offset + 20);
-		const allowed = new Map(batch.map((item, index) => [`a${index}`, item]));
-		const call = () => runSubmitAgent<Proposal>({
-			role: preferredRole ?? "analyst", engine, signal,
-			toolName: "submit_recall_topic_groups", toolDescription: "Propose evidence-based groups of semantically related recall topics.", parameters: schema,
-			fill: (value) => value as Proposal,
-			systemPrompt: "Group answers only when their existing topic and feedback provide specific evidence that they concern the same mathematical concept or recurring gap. Related words alone are not enough. Do not merge distinct concepts. Leave ambiguous answers ungrouped. When source is user, the learner's verdict takes precedence and old AI feedback may conflict. Keep correct, partially correct, incorrect, did-not-know and uncertain assessments distinct; never turn them into a score or infer independence. Each answer may appear in at most one group. Use only the exact supplied IDs, at least two per group. Explain each proposal briefly in Vietnamese. The learner must inspect and approve the proposals.",
-			prompt: JSON.stringify({ subject, assessments: batch.map(({ topic, errorType, verdict, source, feedback }, index) => ({ id: `a${index}`, topic, errorType, verdict, source, feedback })) }),
-			onStep: (_usage, label) => { model = label; }, neverSubmitted: "The model did not submit groups.",
-			validate: (value) => {
-				const seen = new Set<string>();
-				for (const group of value.groups) {
-					if (!group.name.trim() || !group.reason.trim() || group.answerIds.length < 2) return "Every group needs a name, a reason, and at least two answers.";
-					for (const id of group.answerIds) { if (!allowed.has(id) || seen.has(id)) return "Use only supplied answer IDs, at most once."; seen.add(id); }
-				}
-				return null;
-			},
-		});
-		try {
-			const result = await retryIncompleteOnce(call, signal);
-			const latest = recallGroupPreview(subject, offset + (preview.offset || 0));
-			if (batch.some((item, index) => item.id !== latest.items[index]?.id || item.fingerprint !== latest.items[index]?.fingerprint)) throw new Error("The source assessments changed; review the preview again.");
-			groups.push(...result.groups.map((group) => ({ id: randomUUID(), name: group.name.trim().slice(0, 160), reason: group.reason.trim().slice(0, 2000), model, members: group.answerIds.map((id) => ({ id: allowed.get(id)!.id, fingerprint: allowed.get(id)!.fingerprint })) })));
-			const { sources } = sourceFor(subject);
-			saveRecallGroupDraft(subject, groups, sources, undefined, model);
-		} catch (error) {
-			failures.push({ offset, count: batch.length, error: error instanceof Error && error.message.startsWith("The source assessments changed") ? error.message : mappingErrorMessage(error, signal) });
-			break;
-		}
-	}
-	return { groups, model, failures };
+ const preview = recallGroupPreview(subject, offset);
+ if (!Array.isArray(expected) || expected.length !== preview.items.length || expected.some((item, index) => item.id !== preview.items[index]?.id || item.fingerprint !== preview.items[index]?.fingerprint)) throw new Error("The preview changed. Review the updated input before requesting suggestions.");
+ if (preview.items.length < 2) throw new Error("At least two assessed answers with topic or feedback are needed.");
+ if (preferredRole && !preview.availableRoles.some((entry) => entry.role === preferredRole)) throw new Error("The selected model is unavailable.");
+ const resolved = preferredRole ? resolvePlannerEngine("coach", preferredRole) : null;
+ if (preferredRole && resolved?.role !== preferredRole) throw new Error("The selected model is unavailable.");
+ const engine = recallGroupEngineOverride.current ?? resolved?.engine ?? analystEngine();
+ let model = preferredRole ? resolved!.modelLabel : preview.model;
+ const groups: RecallGroup[] = [], failures: Array<{ offset: number; count: number; error: string }> = [];
+ const sources = recallGroupSourceSnapshot(subject);
+ for (let index = 0; index < preview.items.length; index += 20) {
+  if (signal?.aborted) { failures.push({ offset: index, count: preview.items.length - index, error: "Request cancelled." }); break; }
+  const batch = preview.items.slice(index, index + 20);
+  if (batch.length < 2) break;
+  try { const result = await retryIncompleteOnce(() => suggestRecallGroupBatch(subject, batch, engine, preferredRole ?? "analyst", signal), signal); model = result.model; groups.push(...result.groups); saveRecallGroupDraft(subject, groups, sources, undefined, model); }
+  catch (error) { failures.push({ offset: index, count: batch.length, error: mappingErrorMessage(error, signal) }); break; }
+ }
+ return { groups, model, failures };
 }
 
 /** Saves only reviewed groups; does not touch questions, graph, plan or FSRS. */

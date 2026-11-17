@@ -157,6 +157,8 @@ export interface PlanComplianceReport {
 	evaluatedAt: string;
 	evaluatedBy: "local" | "llm";
 	modelLabel?: string;
+	/** AI prose is retained even when its numbers disagree with the recorded timeline. */
+	numericMismatch?: boolean;
 	adherencePct: number;
 	/** False when no study was due, so no percentage can be meaningfully calculated. */
 	scorable?: boolean;
@@ -941,6 +943,7 @@ function sanitizeComplianceReport(raw: unknown, dateFallback: string): PlanCompl
 		evaluatedAt: typeof r.evaluatedAt === "string" ? r.evaluatedAt : new Date().toISOString(),
 		evaluatedBy: r.evaluatedBy === "llm" ? "llm" : "local",
 		...(typeof r.modelLabel === "string" && r.modelLabel.trim() ? { modelLabel: r.modelLabel.trim().slice(0, 120) } : {}),
+		...(r.numericMismatch === true ? { numericMismatch: true } : {}),
 		adherencePct: clamp(Math.round(Number(r.adherencePct) || 0), 0, 100),
 		scorable: typeof r.scorable === "boolean" ? r.scorable : plannedStudyMin > 0,
 		plannedStudyMin,
@@ -4369,7 +4372,7 @@ export function evaluatePlanVsActualLocal(opts: {
 	const nextDayAdvice = !scorable ? "No study is due for this plan yet; capacity remains unchanged. Reassess after a planned session." : isPartialMiddayLog
 		? `Remaining ${(remainingPlannedMin / 60).toFixed(1)}h planned later today — focus on your next scheduled study block and re-score tonight.`
 		: observedRealism < 0.75
-			? `Plan was slightly ambitious (${Math.round(observedRealism * 100)}% completed). Tomorrow's adaptive cap scales smoothly to ${(suggestedRealismFactor * 100).toFixed(0)}% capacity.`
+			? `Recorded ${actualStudyMin}m of study against ${plannedStudyMin}m planned. Tomorrow's adaptive capacity is ${(suggestedRealismFactor * 100).toFixed(0)}%.`
 			: observedRealism > 1.15
 				? "Strong momentum! You exceeded today's target cleanly without overreaching."
 				: "Balanced pacing — keep alternating peak deep blocks with deliberate breaks.";

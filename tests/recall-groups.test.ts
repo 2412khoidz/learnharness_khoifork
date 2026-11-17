@@ -43,7 +43,8 @@ it("allows edits and splits only with unique, current answer identities", () => 
 	const first = { ...group, name: "Edited", members: group.members.slice(0, 2) };
 	const second = { ...group, id: "second", name: "Split", members: group.members.slice(2) };
 	assert.equal(validateRecallGroups([first, second], sources), null);
-	assert.match(validateRecallGroups([first, { ...second, members: [group.members[0]!, group.members[2]!] }], sources)!, /duplicated/);
+	assert.equal(validateRecallGroups([first, { ...second, members: [group.members[0]!, group.members[2]!] }], sources), null, "one answer can belong to multiple topics");
+	assert.match(validateRecallGroups([{ ...first, members: [first.members[0]!, first.members[0]!] }], sources)!, /twice/);
 	assert.match(validateRecallGroups([{ ...first, members: [{ ...first.members[0]!, fingerprint: "stale" }, first.members[1]!] }], sources)!, /changed/);
 	assert.match(validateRecallGroups([{ ...first, members: first.members.slice(0, 1) }], sources)!, /at least two/);
 	assert.match(validateRecallGroups([first], [{ ...sources[0]!, observation: { ...sources[0]!.observation, verdict: undefined, staleAssessment: true } }, ...sources.slice(1)])!, /current assessment/);

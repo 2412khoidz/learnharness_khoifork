@@ -2374,7 +2374,7 @@ export async function evaluateDailyJournalServer(
 		role: resolved.role,
 		engine: resolved.engine,
 		systemPrompt:
-			"You are a candid, supportive Student Study Auditor. Parse free-form Vietnamese or English journal text into timeline entries and give concise practical advice. Clock abbreviations such as 8r mean 08:30. Use only explicitly stated time points: do not invent start or end times or fill gaps. When the journal says until now on the current day, actualClockTime may be the endpoint. Preserve meaningful activity descriptions and do not collapse a whole activity into a generic private label. If scorable is false, say there is not enough data to rate adherence and do not invent a percentage in your explanation. If isPartialMiddayLog is true, score only elapsed planned study and never treat upcoming blocks as skipped; focus advice on the remaining blocks. Call submit_journal_evaluation once.",
+			"You are a candid, supportive Student Study Auditor. Parse free-form journal text into timeline entries and give concise practical advice. Write summary, strengths, friction points and advice in the primary language of the learner’s journal. Acknowledge feelings without inventing causes. Treat recorded numbers as provisional. Clock abbreviations such as 8r mean 08:30. Use only explicitly stated time points: do not invent start or end times or fill gaps. When the journal says until now on the current day, actualClockTime may be the endpoint. Preserve meaningful activity descriptions and do not collapse a whole activity into a generic private label. If scorable is false, say there is not enough data to rate adherence and do not invent a percentage in your explanation. If isPartialMiddayLog is true, score only elapsed planned study and never treat upcoming blocks as skipped; focus advice on the remaining blocks. Call submit_journal_evaluation once.",
 		promptText: prompt,
 		toolName: "submit_journal_evaluation",
 		toolDescription: "Submit 24h Plan vs Actual compliance evaluation and extracted timeline.",
@@ -2437,10 +2437,11 @@ export async function evaluateDailyJournalServer(
 		plannedStudyMin: groundedEval.report.plannedStudyMin,
 		actualStudyMin,
 		realismRatio: Math.round(observedRealism * 100) / 100,
-		summary: !scorable ? "Not enough data to score this plan yet." : mismatchedStudyMinutes ? `Recorded ${(actualStudyMin / 60).toFixed(1)}h of study against ${(localEval.report.plannedStudyMin / 60).toFixed(1)}h planned. Review the recorded entries for details.` : maskOut(aiOut.summary.trim()).slice(0, 600),
-		strengths: mismatchedStudyMinutes ? [] : aiOut.strengths.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
-		frictionPoints: scorable && !mismatchedStudyMinutes ? aiOut.frictionPoints.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean) : [],
-		nextDayAdvice: scorable && !mismatchedStudyMinutes ? maskOut(aiOut.nextDayAdvice.trim()).slice(0, 260) : groundedEval.report.nextDayAdvice,
+		...(mismatchedStudyMinutes ? { numericMismatch: true } : {}),
+		summary: maskOut(aiOut.summary.trim()).slice(0, 600),
+		strengths: aiOut.strengths.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
+		frictionPoints: aiOut.frictionPoints.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
+		nextDayAdvice: maskOut(aiOut.nextDayAdvice.trim()).slice(0, 260),
 	};
 
 	const updated = applyJournalEvaluationToConfig(current, date, {
@@ -2987,7 +2988,7 @@ export async function diagnoseLearningCapacityWithAiServer(
 		engine: resolved.engine,
 		systemPrompt: `You are a Cognitive Science & Learning Analytics Coach inside ChronoHarness.
 Interpret the student's quantitative Learning Capacity telemetry (FSRS-6 Stability/Difficulty/Retention, Brier Metacognitive Calibration & Confidence Bias, Problem-Solving Velocity, Graph Foundation Risk, Error Taxonomy, Circadian Adherence) and call submit_capacity_diagnosis ONCE.
-Be strictly honest about sample counts: never invent data. recallEvidence and recallInsights summarize the same answers, not independent samples. recallInsights combines provisional AI assessments and learner corrections; distinguish their sources, and separate partial and uncertain answers. It is not an FSRS review or a validated capacity score. Suggest topics from approvedRecallGroups when available; group membership is user-approved but underlying AI assessments remain provisional. Elapsed question-to-answer time includes breaks and is not solving speed. A readinessBaseline or paceBaseline is a default, not a measurement of the student's ability. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
+Be strictly honest about sample counts: never invent data. recallEvidence and recallInsights summarize the same answers, not independent samples. recallInsights combines provisional AI assessments and learner corrections; distinguish their sources, and separate partial and uncertain answers. It is not an FSRS review or a validated capacity score. Suggest topics from approvedRecallGroups when available; group membership is user-approved but underlying AI assessments remain provisional. Topic groups may overlap: count unique answer IDs once in subject totals and never add group counts as independent samples. Elapsed question-to-answer time includes breaks and is not solving speed. A readinessBaseline or paceBaseline is a default, not a measurement of the student's ability. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
 		promptText: JSON.stringify({
 			learningCapacityReport: { ...report, subjectBreakdown: capacitySubjectsForAi(report) },
 			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 5) ?? [],

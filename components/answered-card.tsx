@@ -325,7 +325,7 @@ export function AnsweredCard({
 					)}
 					{whyOpen && !analysis && !answer.explanation && mistake?.status === "failed" && (
 						<div className="mt-1.5 text-xs text-muted-foreground" data-testid="mistake-why-failed">
-							{mistake.error || "Analysis unavailable."}
+							{/incomplete json segment at the end|unexpected end of json input/i.test(mistake.error ?? "") ? "AI explanation was interrupted or incomplete. Retry analysis in Mistakes or choose another Analyst model." : mistake.error || "Analysis unavailable."}
 						</div>
 					)}
 				</div>

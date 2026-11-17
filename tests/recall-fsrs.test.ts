@@ -21,6 +21,7 @@ it("requires explicit concepts and ratings, replays original times, rejects dupl
 	const { graphView } = await import("../src/server/graph.ts");
 	const { readPlannerLearningCapacityServer, capacitySubjectsForAi, matchRecallSubject } = await import("../src/server/planner.ts");
 	const { recallOverrideInfo, saveRecallOverride } = await import("../src/server/recall-overrides.ts");
+	const { readRecallAnswer } = await import("../src/server/recall-answer.ts");
 	const { recallGroupPreview, suggestRecallGroups, approveRecallGroups, recallGroupEngineOverride } = await import("../src/server/recall-groups.ts");
 	const route = await import("../app/api/mistakes/recall-fsrs/route.ts");
 	const chat = stores.chatStore.createChat("Algebra");
@@ -60,6 +61,9 @@ it("requires explicit concepts and ratings, replays original times, rejects dupl
 	const savedCorrection = saveRecallOverride({ id: drafts[0]!.id, fingerprint: correction.fingerprint, expectedUpdatedAt: null, verdict: "correct", help: "independent", timerMs: 60000 });
 	assert.throws(() => saveRecallOverride({ id: drafts[0]!.id, fingerprint: correction.fingerprint, expectedUpdatedAt: null, verdict: "wrong" }), /changed/);
 	assert.equal(savedCorrection.verdict, "correct");
+	const inline = readRecallAnswer(drafts[0]!.id);
+	assert.equal(inline.answer.effectiveVerdict, "correct"); assert.equal(inline.answer.assessmentSource, "user");
+	assert.equal(inline.answer.draft.question, drafts[0]!.question);
 	const evidenceReport = readPlannerLearningCapacityServer({ now }).report.subjectBreakdown.find((item) => item.subject === "Algebra");
 	assert.equal(evidenceReport?.recallInsights.allTime.correct, 1); assert.equal(evidenceReport?.recallInsights.allTime.partial, 1);
 	assert.equal(evidenceReport?.recallInsights.allTime.confirmed, 1); assert.equal(evidenceReport?.recallInsights.allTime.timerCount, 1);
@@ -72,7 +76,7 @@ it("requires explicit concepts and ratings, replays original times, rejects dupl
 	const proposed = await suggestRecallGroups("Algebra", groupPreview.items.map(({ id, fingerprint }) => ({ id, fingerprint })));
 	assert.equal(proposed.groups.length, 1); assert.equal(recallGroupPreview("Algebra").draft?.length, 1, "AI proposals are stored as a local draft");
 	assert.equal(readPlannerLearningCapacityServer({ now }).report.subjectBreakdown.find((item) => item.subject === "Algebra")?.approvedRecallGroups?.allTime.length, 0);
-	assert.throws(() => approveRecallGroups("Algebra", [{ ...proposed.groups[0]!, members: [proposed.groups[0]!.members[0]!, proposed.groups[0]!.members[0]!] }], groupPreview.approvedRevision), /duplicated/);
+	assert.throws(() => approveRecallGroups("Algebra", [{ ...proposed.groups[0]!, members: [proposed.groups[0]!.members[0]!, proposed.groups[0]!.members[0]!] }], groupPreview.approvedRevision), /twice/);
 	assert.equal(approveRecallGroups("Algebra", proposed.groups, groupPreview.approvedRevision).saved, 1);
 	assert.throws(() => approveRecallGroups("Algebra", proposed.groups, groupPreview.approvedRevision), /changed elsewhere/);
 	const approvedGroup = readPlannerLearningCapacityServer({ now }).report.subjectBreakdown.find((item) => item.subject === "Algebra")?.approvedRecallGroups?.allTime[0];
