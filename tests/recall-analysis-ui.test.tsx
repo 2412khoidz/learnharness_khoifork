@@ -16,13 +16,19 @@ it("shows independent recall, previews exact inputs and requires approval before
 	const preview = { subject: "Math", totalAnswers: 2, totalEligible: 2, limit: 300, offset: 0, model: "fake:model", availableRoles: [], items, allItems: items, groups: [], draft: null, approvedRevision: "revision" };
 	const previousFetch = globalThis.fetch;
 	let requests = 0, approvals = 0;
-	globalThis.fetch = async (_input, init) => {
+	const savedProgress = new Map<string, { sequence: number; value: unknown }>();
+	globalThis.fetch = async (input, init) => {
+		if (String(input).includes("recall-progress")) {
+			if (init?.method === "POST") { const body = JSON.parse(String(init.body)); savedProgress.set(body.key, { sequence: body.sequence, value: body.value }); return new Response(JSON.stringify({ saved: true })); }
+			const key = new URL(String(input), "http://localhost").searchParams.get("key") ?? "";
+			return new Response(JSON.stringify({ progress: savedProgress.get(key) ?? null }));
+		}
 		if (init?.method !== "POST") return new Response(JSON.stringify(preview));
 		const body = JSON.parse(String(init.body));
 		if (body.action === "suggest") { requests++; assert.deepEqual(body.expected.map((item: { id: string }) => item.id), ["1", "2"]); return new Response(JSON.stringify({ model: "fake:model", groups: [{ id: "g", name: "Limits", reason: "Related", model: "fake:model", members: items.map(({ id, fingerprint }) => ({ id, fingerprint })) }] })); }
 		approvals++; return new Response(JSON.stringify({ saved: 1 }));
 	};
-	const root = createRoot(document.querySelector("main")!);
+	let root = createRoot(document.querySelector("main")!);
 	try {
 		await act(async () => root.render(<RecallAnalysis report={report} onRefresh={async () => {}} />));
 		assert.match(document.body.textContent ?? "", /Recall Analysis/); assert.equal(requests, 0);
@@ -34,5 +40,13 @@ it("shows independent recall, previews exact inputs and requires approval before
 		assert.equal(requests, 1); assert.equal(approvals, 0);
 		const save = [...document.querySelectorAll("button")].find((button) => button.textContent === "Save approved groups");
 		assert.ok(save?.disabled, "a proposal is not approved automatically");
+		assert.ok(savedProgress.has("group:Math"), "review progress is saved to the application data service");
+		await act(async () => root.unmount());
+		root = createRoot(document.querySelector("main")!);
+		await act(async () => root.render(<RecallAnalysis report={report} onRefresh={async () => {}} />));
+		const reopen = [...document.querySelectorAll("button")].find((button) => button.textContent === "Review AI grouping input");
+		await act(async () => reopen?.click());
+		assert.match(document.body.textContent ?? "", /Related/, "the previous proposal is restored even without browser storage");
+		assert.equal(requests, 1, "restoring progress never calls the model again");
 	} finally { await act(async () => root.unmount()); globalThis.fetch = previousFetch; }
 });

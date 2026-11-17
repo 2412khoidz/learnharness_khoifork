@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { RecallScanResult } from "@/src/core";
 import { ToolContentResponse } from "@/components/ai-elements/message";
 
@@ -21,6 +21,9 @@ export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
  const [busy, setBusy] = useState(false);
  const [error, setError] = useState("");
  const [notice, setNotice] = useState("");
+ const progressSequence = useRef(0);
+ const restoreGeneration = useRef(0);
+ const [progressStatus, setProgressStatus] = useState("");
  const refresh = useCallback(async () => {
   const res = await fetch("/api/planner/recall-audit", { cache: "no-store" });
   const body = await res.json() as { runs?: Run[]; error?: string };
@@ -31,9 +34,27 @@ export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
  useEffect(() => { void refresh().catch((err) => setError(err instanceof Error ? err.message : "Could not load audits.")); }, [refresh]);
  useEffect(() => {
   if (!activeId) return;
-  try { const saved = JSON.parse(localStorage.getItem(`lh:recall-audit-review:${activeId}`) ?? "null"); setSelected(saved?.selected ?? {}); setRemove(saved?.remove ?? {}); setPage(saved?.page ?? 0); } catch { setSelected({}); setRemove({}); setPage(0); }
+  type Saved = { selected: Record<string, boolean>; remove: Record<string, boolean>; page: number; sequence?: number };
+  const generation = ++restoreGeneration.current, unchanged = progressSequence.current;
+  let local: Saved | null = null;
+  try { local = JSON.parse(localStorage.getItem(`lh:recall-audit-review:${activeId}`) ?? "null"); } catch { /* unreadable legacy progress */ }
+  setSelected(local?.selected ?? {}); setRemove(local?.remove ?? {}); setPage(local?.page ?? 0);
+  void fetch(`/api/planner/recall-progress?key=${encodeURIComponent(`audit:${activeId}`)}`, { cache: "no-store" }).then(async (response) => {
+   if (!response.ok) throw new Error("Could not restore review progress.");
+   const body = await response.json() as { progress?: { sequence: number; value: Saved } | null };
+   if (restoreGeneration.current !== generation || progressSequence.current !== unchanged) return;
+   if (body.progress && body.progress.sequence > (local?.sequence ?? 0)) { const saved = body.progress.value; setSelected(saved.selected ?? {}); setRemove(saved.remove ?? {}); setPage(saved.page ?? 0); }
+  }).catch(() => setProgressStatus("Could not restore saved audit progress."));
+  return () => { restoreGeneration.current++; };
  }, [activeId]);
- const saveProgress = (nextSelected: Record<string, boolean>, nextRemove: Record<string, boolean>, nextPage: number) => { try { localStorage.setItem(`lh:recall-audit-review:${activeId}`, JSON.stringify({ selected: nextSelected, remove: nextRemove, page: nextPage })); } catch { setError("Could not save review progress on this device."); } };
+ const saveProgress = (nextSelected: Record<string, boolean>, nextRemove: Record<string, boolean>, nextPage: number) => {
+  const sequence = Math.max(progressSequence.current + 1, Date.now() * 1000); progressSequence.current = sequence;
+  const value = { selected: nextSelected, remove: nextRemove, page: nextPage, sequence };
+  try { localStorage.setItem(`lh:recall-audit-review:${activeId}`, JSON.stringify(value)); } catch { /* server copy remains authoritative */ }
+  setProgressStatus("Saving review progress…");
+  const payload = JSON.stringify({ key: `audit:${activeId}`, sequence, value });
+  void fetch("/api/planner/recall-progress", { method: "POST", headers: { "Content-Type": "application/json" }, body: payload, keepalive: payload.length < 60000 }).then((response) => { if (!response.ok) throw new Error("save failed"); if (progressSequence.current === sequence) setProgressStatus("Review progress saved on this device."); }).catch(() => { if (progressSequence.current === sequence) setProgressStatus("Could not save review progress; keep this window open and try again."); });
+ };
  const active = runs.find((run) => run.id === activeId);
  useEffect(() => {
   if (active?.status !== "running") return;
@@ -82,6 +103,7 @@ export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
    <div className="flex gap-3"><button type="button" disabled={page === 0} onClick={() => { setPage(page - 1); saveProgress(selected, remove, page - 1); }}>Previous</button><span>{page + 1} / {Math.max(1, Math.ceil(active.results.length / PAGE))}</span><button type="button" disabled={(page + 1) * PAGE >= active.results.length} onClick={() => { setPage(page + 1); saveProgress(selected, remove, page + 1); }}>Next</button></div>
    <button type="button" disabled={busy || active.status === "running" || !chosen.length || chosen.length > 100} onClick={() => void post({ action: "apply", id: active.id, choices: chosen })} className="rounded bg-primary px-3 py-1.5 text-primary-foreground disabled:opacity-40">Apply reviewed assessments ({chosen.length})</button>
   </div>}
+  {progressStatus && <p role="status">{progressStatus}</p>}
   {error && <p role="alert" className="text-destructive">{error}</p>}{notice && <p role="status">{notice}</p>}
  </section>;
 }

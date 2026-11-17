@@ -33,6 +33,7 @@ const ALLOWED_SINGLE_FILES = new Set([
 	"mistakes.json",
 	"recall-groups.json",
 	"recall-audits.json",
+	"recall-review-progress.json",
 	"recall-scan.json",
 	"recall-live-grades.json",
 	"recall-overrides.json",

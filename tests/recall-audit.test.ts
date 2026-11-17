@@ -72,3 +72,15 @@ it("saves successful audit batches and resumes only the unfinished answers after
  undoRecallAudit(run.id, reviewed.reviewId);
  recallAuditEngineOverride.current = undefined;
 });
+
+
+it("persists review selections across server reads and rejects older out-of-order saves", async () => {
+ const { readReviewProgress, saveReviewProgress } = await import("../src/server/recall-review-progress.ts");
+ const key = "group:Synthetic subject";
+ const value = { groups: [{ id: "group-1", name: "Edited" }], approved: { "group-1": true }, splitSelection: { "answer-1": true }, revision: "original" };
+ saveReviewProgress(key, 200, value);
+ saveReviewProgress(key, 199, { groups: [] });
+ assert.deepEqual(readReviewProgress(key), { sequence: 200, value });
+ assert.equal(readReviewProgress("audit:other"), null);
+ assert.throws(() => saveReviewProgress("unknown:key", 201, value), /Invalid/);
+});
