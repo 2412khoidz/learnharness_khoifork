@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, it } from "node:test";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
 import type { PiEngine } from "../src/agent/models.ts";
-import { chatWithPlannerCoachServer, checkInPlannerHabit, patchPlannerConfig, readPlannerConfig, readPlannerSnapshot, savePlannerConfig, undoPlannerCoachChangeServer } from "../src/server/planner.ts";
+import { chatWithPlannerCoachServer, checkInPlannerHabit, confirmPlannerCoachProposal, patchPlannerConfig, readPlannerConfig, readPlannerSnapshot, savePlannerConfig, undoPlannerCoachChangeServer } from "../src/server/planner.ts";
 import { readExamPrepConfig, writeExamPrepConfig } from "../src/server/exam-prep.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-coach-permissions-"));
@@ -26,6 +26,51 @@ function fixture(name: string) {
 	] }, { plannerFile, examPrepFile, now });
 	return { plannerFile, examPrepFile, now, date };
 }
+
+it("previews actual changes without saving, applies only after confirmation and supports undo", async () => {
+	const files = fixture("approval");
+	const before = readPlannerConfig(files.plannerFile);
+	const result = await chatWithPlannerCoachServer({ ...files, requireConfirmation: true, message: "Sửa ca sáng môn A thành 07:00–09:40", engineOverride: engine({ reply: "Đã sửa. Bạn nên nghỉ giữa hai ca.", shouldApplyChanges: true, weeklyEventOperations: [{ action: "update", id: "wed", startTime: "07:00", endTime: "09:40" }] }) });
+	assert.ok(result.proposal);
+	assert.equal(result.proposal.advice, "Bạn nên nghỉ giữa hai ca.");
+	assert.deepEqual(readPlannerConfig(files.plannerFile), before, "preview must not write planner data");
+	assert.equal(readPlannerConfig(files.plannerFile).fixedEvents.find((event) => event.id === "wed")?.startTime, "07:15");
+	assert.ok(result.proposal.changes.fixedEvents);
+	const confirmed = confirmPlannerCoachProposal(result.proposal.id);
+	assert.equal(confirmed.snapshot.config.fixedEvents.find((event) => event.id === "wed")?.startTime, "07:00");
+	assert.throws(() => confirmPlannerCoachProposal(result.proposal!.id), /expired/i);
+	assert.equal(undoPlannerCoachChangeServer({ ...files, messageId: confirmed.assistantMessage.id }).undone, true);
+	assert.deepEqual(readPlannerConfig(files.plannerFile).fixedEvents, before.fixedEvents);
+});
+
+it("rejects an approved proposal if the underlying planner was edited meanwhile", async () => {
+	const files = fixture("approval-stale");
+	const result = await chatWithPlannerCoachServer({ ...files, requireConfirmation: true, message: "Sửa ca sáng môn A", engineOverride: engine({ reply: "Đã sửa.", shouldApplyChanges: true, weeklyEventOperations: [{ action: "update", id: "wed", startTime: "07:00", endTime: "09:40" }] }) });
+	assert.ok(result.proposal);
+	checkInPlannerHabit({ date, energyScore: 4 }, files);
+	assert.throws(() => confirmPlannerCoachProposal(result.proposal!.id), /changed/i);
+	assert.equal(readPlannerConfig(files.plannerFile).fixedEvents.find((event) => event.id === "wed")?.startTime, "07:15");
+	assert.equal(readPlannerConfig(files.plannerFile).logs[date]?.energyScore, 4);
+});
+
+it("previews explicit untimed habit counts and saves them only after confirmation", async () => {
+	const files = fixture("approval-habit-count");
+	const result = await chatWithPlannerCoachServer({ ...files, requireConfirmation: true, message: "Ghi 3 lần hoạt động riêng", engineOverride: engine({ reply: "Mình sẽ ghi lại.", shouldApplyChanges: true, habitCountOperations: [{ action: "add", date, name: "Private activity", count: 3 }] }) });
+	assert.ok(result.proposal);
+	assert.equal(readPlannerConfig(files.plannerFile).logs[date]?.habitCounts, undefined);
+	const applied = confirmPlannerCoachProposal(result.proposal.id);
+	assert.equal(applied.snapshot.config.logs[date]?.habitCounts?.[0]?.count, 3);
+	assert.equal(applied.snapshot.config.logs[date]?.actualEntries?.length ?? 0, 0);
+	assert.equal(undoPlannerCoachChangeServer({ ...files, messageId: applied.assistantMessage.id }).undone, true);
+});
+
+it("records an earlier habit without creating a plan for that earlier day", () => {
+	const files = fixture("past-habit");
+	const result = checkInPlannerHabit({ date: "2026-11-01", snapshotDate: date, habitCounts: [{ id: "private-count", name: "Activity", count: 2 }] }, files);
+	assert.equal(result.plan.date, date);
+	assert.equal(result.config.logs["2026-11-01"]?.habitCounts?.[0]?.count, 2);
+	assert.equal(result.config.plans["2026-11-01"], undefined);
+});
 
 it("sees and updates recurring class IDs, leaves afternoon unchanged and can undo", async () => {
 	const files = fixture("weekly"); let prompt = "";

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { SurfaceRegion, usePageSurfaceBoundary, useSurfaceChromeStyle } from "./plugin-surfaces";
 import { CornerDownLeftIcon, DumbbellIcon } from "lucide-react";
 import { GraphView } from "@/components/graph-view";
+import { GlobalPlannerCoach } from "@/components/global-planner-coach";
 import { MinimalHome } from "@/components/minimal-home";
 import { SetupDialog } from "@/components/setup-dialog";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
@@ -40,6 +41,7 @@ export function Home({
 }) {
 	const controller = useOptionalInteractionLayers();
 	const router = useRouter();
+	const [globalCoachOpen, setGlobalCoachOpen] = useState(false);
 	const pathname = usePathname();
 	const bodyRef = useRef<HTMLDivElement>(null);
 	const surfaceTarget = usePageSurfaceBoundary({ active: pathname === "/", viewKey: "/", bodyRef });
@@ -229,6 +231,8 @@ export function Home({
 					/>
 				)}
 			</main>
+			<button type="button" onClick={() => setGlobalCoachOpen(true)} className="absolute bottom-36 right-6 z-30 rounded-full border bg-card px-3 py-2 text-xs shadow-md hover:bg-accent" title="Open Coach">Coach</button>
+			{globalCoachOpen && <GlobalPlannerCoach onClose={() => setGlobalCoachOpen(false)} />}
 
 
 			{/* New session — same floating blob as the chat composer, docked

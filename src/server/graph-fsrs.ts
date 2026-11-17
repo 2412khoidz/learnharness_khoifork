@@ -11,6 +11,8 @@ import {
 import { BUNDLED_FSRS_SCHEDULER } from "../core/fsrs-scheduler.ts";
 import type { GraphSnapshot } from "../core/contracts.ts";
 import { graphView } from "./graph.ts";
+import { projectRecallFsrs } from "../core/recall-fsrs.ts";
+import { readRecallFsrsEvents } from "./recall-fsrs-store.ts";
 
 export interface FlashcardsSchedulerModule {
 	rate(
@@ -51,11 +53,28 @@ export function readFlashcardsSnapshot(
 	try {
 		raw = fs.readFileSync(/* turbopackIgnore: true */ flashcardsFile, "utf8");
 	} catch {
-		return { propositions: {} };
+		raw = JSON.stringify({ propositions: {} });
 	}
 	try {
 		const parsed = JSON.parse(raw) as FlashcardsStoreSnapshot;
-		return parsed && typeof parsed === "object" ? parsed : null;
+		if (!parsed || typeof parsed !== "object") return null;
+		// Recall histories are projected in memory only. They never add cards to
+		// the Flashcards store or overwrite a separately reviewed card schedule.
+		if (flashcardsFile === defaultFlashcardsStorePath()) {
+			try {
+				const projection = projectRecallFsrs(readRecallFsrsEvents(), parsed.settings);
+				parsed.propositions ??= {};
+				const used = new Set<string>();
+				for (const [id, schedule] of Object.entries(projection.schedules)) {
+					const current = parsed.propositions[id];
+					if ((current?.schedule?.reps ?? 0) > 0) continue;
+					parsed.propositions[id] = { ...current, id, schedule, recallOnly: true };
+					used.add(id);
+				}
+				parsed.reviews = [...(Array.isArray(parsed.reviews) ? parsed.reviews : []), ...projection.reviews.filter((review) => used.has(review.propositionId))];
+			} catch { /* keep genuine Flashcards data if the separate ledger is unreadable */ }
+		}
+		return parsed;
 	} catch {
 		return null;
 	}

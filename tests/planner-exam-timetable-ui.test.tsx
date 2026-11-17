@@ -22,7 +22,7 @@ it("preserves an exam draft after a failed save and validates a cleared title", 
 	try {
 		await act(async () => root.render(<PlannerExamTimetable entries={[]} busy={false} onSave={async () => { calls++; return false; }} />));
 		const title = document.querySelector("input") as HTMLInputElement;
-		const button = [...document.querySelectorAll("button")].find((item) => item.textContent === "Thêm lịch thi")!;
+		const button = [...document.querySelectorAll("button")].find((item) => item.textContent === "Add exam")!;
 		await setInput(title, "Đại số");
 		await act(async () => button.click());
 		assert.equal(calls, 1);
@@ -30,7 +30,7 @@ it("preserves an exam draft after a failed save and validates a cleared title", 
 		await setInput(title, "");
 		await act(async () => button.click());
 		assert.equal(calls, 1, "empty titles are not submitted");
-		assert.match(document.querySelector('[role="alert"]')?.textContent ?? "", /nhập tên/i);
+		assert.match(document.querySelector('[role="alert"]')?.textContent ?? "", /enter a subject/i);
 	} finally {
 		await act(async () => root.unmount());
 	}

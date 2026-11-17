@@ -467,6 +467,9 @@ export interface QuestionAnswerData {
 	/** Host-owned explicit image channels; never inferred from text or paths. */
 	images?: PluginSubmissionImages;
 	confidence?: number; // quiz only: the learner's stated probability (0-100, raw) that his selected answer is correct — never sent on "I don't know" (owner, 2026-10-01)
+	/** Optional learner-controlled recall timer; interrupted timers need review. */
+	recallTiming?: { timerMs: number; interrupted?: boolean };
+	recallHelp?: "independent" | "assisted" | "unknown";
 	correct?: boolean; // quiz only
 	correctIndices?: number[]; // quiz only (rendering)
 	committed?: string; // explain only (rendering): the model's committed answer
@@ -494,6 +497,8 @@ export interface AnswerRequest {
 	thinking?: string; // the reasoning-on-the-question channel (was `note`)
 	readingThinking?: string; // the thinking-while-reading channel (check answers)
 	confidence?: number; // quiz only: 0-100 raw probability — 50 is a real coin flip, always sent (owner, 2026-10-01)
+	recallTiming?: { timerMs: number; interrupted?: boolean };
+	recallHelp?: "independent" | "assisted" | "unknown";
 }
 
 /** The confidence slider's snap stops (owner, 2026-10-01): raw probability
@@ -750,6 +755,8 @@ export function buildAnswer(qd: QuestionData, req: AnswerRequest, tool?: string)
 		// No client grading — the model grades in its reply, against the
 		// commitment. The commitment snapshots for the reveal + rendering.
 		base.committed = qd.committedAnswer;
+		if (req.recallTiming && Number.isFinite(req.recallTiming.timerMs) && req.recallTiming.timerMs >= 0 && req.recallTiming.timerMs <= 7 * 86400_000) base.recallTiming = { timerMs: Math.round(req.recallTiming.timerMs), ...(req.recallTiming.interrupted ? { interrupted: true } : {}) };
+		if (req.recallHelp && ["independent", "assisted", "unknown"].includes(req.recallHelp)) base.recallHelp = req.recallHelp;
 	}
 	return base;
 }

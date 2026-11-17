@@ -1171,10 +1171,11 @@ export function buildMobileHtml(uploadEndpoint: string): string {
         compBox.innerHTML = "";
       } else {
         compBox.classList.remove("hidden");
-        var cls = comp.adherencePct >= 75 ? "ok" : (comp.adherencePct >= 45 ? "warn" : "err");
+        var hasScore = comp.scorable !== false && comp.plannedStudyMin > 0;
+        var cls = hasScore ? (comp.adherencePct >= 75 ? "ok" : (comp.adherencePct >= 45 ? "warn" : "err")) : "muted";
         compBox.innerHTML =
           "<div class='row-between' style='margin-bottom:4px'>" +
-            "<strong style='font-size:13px'>Adherence Score: <span class='" + cls + "'>" + comp.adherencePct + "%</span></strong>" +
+            "<strong style='font-size:13px'>Adherence Score: <span class='" + cls + "'>" + (hasScore ? comp.adherencePct + "%" : "Not enough data") + "</span></strong>" +
             "<span class='mono muted' style='font-size:11px'>" + comp.actualStudyMin + "m / " + comp.plannedStudyMin + "m</span>" +
           "</div>" +
           "<div class='rich' style='font-size:12px;margin-bottom:4px'>" + renderRichMath(comp.summary || "") + "</div>" +

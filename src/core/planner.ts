@@ -121,6 +121,7 @@ export interface LifestyleConfig {
 	sleep: SleepRecoveryProfile;
 	meals: MealSlot[];
 	hobbies: string[];
+	hobbyPreferences?: Record<string, { dailyMin: number; preferredWindow: "auto" | "morning" | "afternoon" | "evening" }>;
 	dailyHobbyMin: number; // user baseline; adjusted gently per intensity
 	gameBudgetMin?: number; // bounded guilt-free gaming window (scheduled before bedtime cutoff)
 	gameCutoffBeforeBedMin?: number; // min minutes before bedtime when gaming/screens stop (default 90m)
@@ -157,6 +158,8 @@ export interface PlanComplianceReport {
 	evaluatedBy: "local" | "llm";
 	modelLabel?: string;
 	adherencePct: number;
+	/** False when no study was due, so no percentage can be meaningfully calculated. */
+	scorable?: boolean;
 	plannedStudyMin: number;
 	actualStudyMin: number;
 	realismRatio: number;
@@ -185,6 +188,8 @@ export interface DailyHabitLog {
 	note?: string;
 	journalText?: string;
 	actualEntries?: JournalActivityEntry[];
+	/** Explicitly recorded counts; no time or duration is inferred. */
+	habitCounts?: Array<{ id: string; name: string; count: number }>;
 	compliance?: PlanComplianceReport;
 	updatedAt?: string;
 }
@@ -334,7 +339,14 @@ export interface CoachUndoSnapshot {
 	afterPlanner?: PlannerConfig;
 	beforeExam?: import("./exam-prep.ts").ExamPrepConfig;
 	afterExam?: import("./exam-prep.ts").ExamPrepConfig;
+	sessionChanges?: Array<{ id: string; before: CoachSessionMetadata; after: CoachSessionMetadata }>;
+	graphChanges?: CoachGraphChange[];
+	beforeSettings?: import("./settings.ts").UserSettings;
+	afterSettings?: import("./settings.ts").UserSettings;
 }
+
+export interface CoachSessionMetadata { title: string; notes: string; pinned: boolean; archived: boolean }
+export interface CoachGraphChange { id: string; before: { name: string; statement: string }; after: { name: string; statement: string }; beforeHash: string; afterHash: string }
 
 export interface PlannerConfig {
 	version: 1;
@@ -346,6 +358,7 @@ export interface PlannerConfig {
 	lifestyle: LifestyleConfig;
 	logs: Record<string, DailyHabitLog>;
 	plans: Record<string, DailyStudyPlan>;
+	planHistory?: Record<string, Array<{ replacedAt: string; plan: DailyStudyPlan }>>;
 	dayOverrides?: Record<string, DayOverride>;
 	dismissedExamProfileIds?: string[];
 	mutedSubjects?: string[];
@@ -929,6 +942,7 @@ function sanitizeComplianceReport(raw: unknown, dateFallback: string): PlanCompl
 		evaluatedBy: r.evaluatedBy === "llm" ? "llm" : "local",
 		...(typeof r.modelLabel === "string" && r.modelLabel.trim() ? { modelLabel: r.modelLabel.trim().slice(0, 120) } : {}),
 		adherencePct: clamp(Math.round(Number(r.adherencePct) || 0), 0, 100),
+		scorable: typeof r.scorable === "boolean" ? r.scorable : plannedStudyMin > 0,
 		plannedStudyMin,
 		actualStudyMin,
 		realismRatio: clamp(Math.round((Number(r.realismRatio) || 1) * 100) / 100, 0.35, 1.45),
@@ -984,6 +998,16 @@ function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIF
 	const hobbies = Array.isArray(obj.hobbies)
 		? sanitizeStringArray(obj.hobbies, 12, 60)
 		: [...fallback.hobbies];
+	const hobbyPreferences: NonNullable<LifestyleConfig["hobbyPreferences"]> = {};
+	const prefs = obj.hobbyPreferences && typeof obj.hobbyPreferences === "object" && !Array.isArray(obj.hobbyPreferences) ? obj.hobbyPreferences as Record<string, unknown> : {};
+	for (const hobby of hobbies) {
+		const pref = prefs[hobby];
+		if (!pref || typeof pref !== "object" || Array.isArray(pref)) continue;
+		const value = pref as Record<string, unknown>;
+		if (typeof value.dailyMin !== "number" || !Number.isFinite(value.dailyMin)) continue;
+		const window = value.preferredWindow;
+		hobbyPreferences[hobby] = { dailyMin: clamp(Math.round(value.dailyMin), 0, 240), preferredWindow: window === "morning" || window === "afternoon" || window === "evening" ? window : "auto" };
+	}
 
 	const rawGuard = obj.wellnessGuardrail as Record<string, unknown> | undefined;
 	const wellnessGuardrail: WellnessGuardrailConfig | undefined =
@@ -1016,6 +1040,7 @@ function sanitizeLifestyle(raw: unknown, fallback: LifestyleConfig = DEFAULT_LIF
 		sleep,
 		meals,
 		hobbies,
+		...(Object.keys(hobbyPreferences).length ? { hobbyPreferences } : {}),
 		dailyHobbyMin: clamp(Math.round(Number(obj.dailyHobbyMin ?? fallback.dailyHobbyMin)), 0, 240),
 		...(typeof obj.gameBudgetMin === "number" && Number.isFinite(obj.gameBudgetMin)
 			? { gameBudgetMin: clamp(Math.round(obj.gameBudgetMin), 0, 180) }
@@ -1034,8 +1059,7 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
 	const entries = Object.entries(raw as Record<string, unknown>)
 		.filter(([date]) => DATE_RE.test(date))
-		.sort(([a], [b]) => b.localeCompare(a))
-		.slice(0, 365);
+		.sort(([a], [b]) => b.localeCompare(a));
 	const out: Record<string, DailyHabitLog> = {};
 	for (const [date, val] of entries) {
 		if (!val || typeof val !== "object" || Array.isArray(val)) continue;
@@ -1055,6 +1079,12 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			}
 		}
 		const actualEntries = sanitizeActualEntries(v.actualEntries, date);
+		const habitCounts = Array.isArray(v.habitCounts) ? v.habitCounts.flatMap((raw) => {
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+			const item = raw as Record<string, unknown>;
+			if (typeof item.id !== "string" || typeof item.name !== "string" || !item.id.trim() || !item.name.trim() || typeof item.count !== "number" || !Number.isInteger(item.count) || item.count < 0 || item.count > 1000) return [];
+			return [{ id: item.id.trim().slice(0, 80), name: item.name.trim().slice(0, 120), count: item.count }];
+		}).slice(0, 100) : [];
 		const compliance = sanitizeComplianceReport(v.compliance, date);
 		out[date] = {
 			date,
@@ -1076,9 +1106,10 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			hobbyDone: Boolean(v.hobbyDone),
 			mealsOk: typeof v.mealsOk === "boolean" ? v.mealsOk : false,
 			...(typeof v.sleepOnTarget === "boolean" ? { sleepOnTarget: v.sleepOnTarget } : {}),
-			...(typeof v.note === "string" && v.note.trim() ? { note: v.note.trim().slice(0, 400) } : {}),
+			...(typeof v.note === "string" && v.note.trim() ? { note: v.note.trim().slice(0, 4000) } : {}),
 			...(typeof v.journalText === "string" && v.journalText.trim() ? { journalText: v.journalText.trim().slice(0, 4000) } : {}),
 			...(actualEntries.length > 0 ? { actualEntries } : {}),
+			...(habitCounts.length > 0 ? { habitCounts } : {}),
 			...(compliance ? { compliance } : {}),
 			...(typeof v.updatedAt === "string" ? { updatedAt: v.updatedAt } : {}),
 		};
@@ -1100,6 +1131,51 @@ function sanitizePlans(raw: unknown): Record<string, DailyStudyPlan> {
 		out[date] = p as unknown as DailyStudyPlan;
 	}
 	return out;
+}
+
+function sanitizePlanHistory(raw: unknown): NonNullable<PlannerConfig["planHistory"]> {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+	const out: NonNullable<PlannerConfig["planHistory"]> = {};
+	for (const [date, records] of Object.entries(raw)) {
+		if (!DATE_RE.test(date) || !Array.isArray(records)) continue;
+		const valid = records.flatMap((record) => {
+			if (!record || typeof record !== "object" || Array.isArray(record)) return [];
+			const item = record as { replacedAt?: unknown; plan?: unknown };
+			if (typeof item.replacedAt !== "string" || !Number.isFinite(Date.parse(item.replacedAt))) return [];
+			const plan = sanitizePlans({ [date]: item.plan })[date];
+			return plan ? [{ replacedAt: item.replacedAt, plan }] : [];
+		});
+		if (valid.length) out[date] = valid;
+	}
+	return out;
+}
+
+/** Preserve prior plans without inventing records for dates whose plan was never saved. */
+export function archivePlannerPlan(config: PlannerConfig, date: string, now: number): PlannerConfig {
+	const plan = config.plans[date];
+	if (!plan || localDateString(now) !== date || !Number.isFinite(Date.parse(plan.generatedAt)) || Date.parse(plan.generatedAt) > now) return config;
+	const versions = config.planHistory?.[date] ?? [];
+	if (versions.some((entry) => entry.plan.generatedAt === plan.generatedAt && JSON.stringify(entry.plan.blocks) === JSON.stringify(plan.blocks))) return config;
+	return { ...config, planHistory: { ...config.planHistory, [date]: [...versions, { replacedAt: new Date(now).toISOString(), plan: structuredClone(plan) }] } };
+}
+
+/** Past versions contribute only blocks that ended while that version was active. */
+export function studyBlocksForAudit(config: PlannerConfig, date: string, plan?: DailyStudyPlan): PlannedBlock[] {
+	const history = (config.planHistory?.[date] ?? []).flatMap(({ plan: prior, replacedAt }) => {
+		const generated = Date.parse(prior.generatedAt), replaced = Date.parse(replacedAt);
+		if (!Number.isFinite(generated) || !Number.isFinite(replaced) || replaced < generated) return [];
+		const startDate = localDateString(generated), endDate = localDateString(replaced);
+		if (startDate > date || endDate < date) return [];
+		const start = startDate < date ? 0 : new Date(generated).getHours() * 60 + new Date(generated).getMinutes();
+		const end = endDate > date ? 1440 : new Date(replaced).getHours() * 60 + new Date(replaced).getMinutes();
+		return prior.blocks.filter((block) => block.type === "study" && block.startMin >= start && block.endMin <= end);
+	});
+	const result: PlannedBlock[] = [], seen = new Set<string>();
+	for (const block of [...history, ...(plan?.blocks ?? []).filter((item) => item.type === "study")]) {
+		const key = `${block.startMin}:${block.endMin}:${block.subject ?? ""}`;
+		if (!seen.has(key)) { seen.add(key); result.push(block); }
+	}
+	return result;
 }
 
 function sanitizeDayOverrides(raw: unknown): Record<string, DayOverride> {
@@ -1262,6 +1338,25 @@ function sanitizeCoachUndo(raw: unknown): CoachUndoSnapshot | undefined {
 	};
 	const beforePlanner = plannerSnapshot(obj.beforePlanner);
 	const afterPlanner = plannerSnapshot(obj.afterPlanner);
+	const sessionChanges = Array.isArray(obj.sessionChanges) ? obj.sessionChanges.flatMap((raw) => {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+		const item = raw as Record<string, unknown>;
+		const meta = (value: unknown): CoachSessionMetadata | null => {
+			if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+			const m = value as Record<string, unknown>;
+			return typeof m.title === "string" && typeof m.notes === "string" && typeof m.pinned === "boolean" && typeof m.archived === "boolean" ? { title: m.title, notes: m.notes, pinned: m.pinned, archived: m.archived } : null;
+		};
+		const before = meta(item.before), after = meta(item.after);
+		return typeof item.id === "string" && item.id && before && after ? [{ id: item.id.slice(0, 120), before, after }] : [];
+	}).slice(0, 20) : [];
+	const graphChanges = Array.isArray(obj.graphChanges) ? obj.graphChanges.flatMap((raw) => {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+		const item = raw as Record<string, unknown>, before = item.before as Record<string, unknown> | null, after = item.after as Record<string, unknown> | null;
+		if (typeof item.id !== "string" || !before || !after || typeof before.name !== "string" || typeof before.statement !== "string" || typeof after.name !== "string" || typeof after.statement !== "string" || typeof item.beforeHash !== "string" || typeof item.afterHash !== "string" || !/^[a-f0-9]{64}$/.test(item.beforeHash) || !/^[a-f0-9]{64}$/.test(item.afterHash)) return [];
+		return [{ id: item.id, before: { name: before.name, statement: before.statement }, after: { name: after.name, statement: after.statement }, beforeHash: item.beforeHash, afterHash: item.afterHash }];
+	}).slice(0, 20) : [];
+	const settingsRecord = (value: unknown): import("./settings.ts").UserSettings | undefined => value && typeof value === "object" && !Array.isArray(value) && typeof (value as { version?: unknown }).version === "number" ? value as import("./settings.ts").UserSettings : undefined;
+	const beforeSettings = settingsRecord(obj.beforeSettings), afterSettings = settingsRecord(obj.afterSettings);
 	return {
 		messageId,
 		date,
@@ -1275,6 +1370,9 @@ function sanitizeCoachUndo(raw: unknown): CoachUndoSnapshot | undefined {
 		...(Array.isArray(obj.prevPinnedSubjects) ? { prevPinnedSubjects: sanitizeStringArray(obj.prevPinnedSubjects, 40, 80) } : {}),
 		...(beforePlanner && afterPlanner ? { beforePlanner, afterPlanner } : {}),
 		...(obj.beforeExam && obj.afterExam ? { beforeExam: obj.beforeExam as CoachUndoSnapshot["beforeExam"], afterExam: obj.afterExam as CoachUndoSnapshot["afterExam"] } : {}),
+		...(sessionChanges.length ? { sessionChanges } : {}),
+		...(graphChanges.length ? { graphChanges } : {}),
+		...(beforeSettings && afterSettings ? { beforeSettings, afterSettings } : {}),
 	};
 }
 
@@ -1321,6 +1419,7 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		lifestyle: sanitizeLifestyle(obj.lifestyle, fallback.lifestyle),
 		logs: sanitizeLogs(obj.logs),
 		plans: sanitizePlans(obj.plans),
+		planHistory: sanitizePlanHistory(obj.planHistory),
 		dayOverrides: sanitizeDayOverrides(obj.dayOverrides),
 		dismissedExamProfileIds: sanitizeStringArray(obj.dismissedExamProfileIds, 60, 64),
 		mutedSubjects: sanitizeStringArray(obj.mutedSubjects, 40, 80),
@@ -1339,6 +1438,38 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 export function normalizeBedtimeMin(hhmm: string): number {
 	const raw = parseClockMin(hhmm) ?? 23 * 60 + 30;
 	return raw < 15 * 60 ? raw + 1440 : raw;
+}
+
+/** Recognize a single explicit clock marker, never a duration or a time range. */
+function journalSleepMarkers(text: string | undefined, kind: "bed" | "wake"): string[] {
+	if (!text) return [];
+	const times: string[] = [];
+	for (const line of text.split(/\r?\n/)) {
+		const match = line.match(/^\s*(\d{1,2})(?::|h)(\d{1,2})?\s*:?\s*(.+)$/i);
+		if (!match) continue;
+		const minutes = Number(match[1]) * 60 + Number(match[2] ?? 0);
+		if (Number(match[1]) > 23 || Number(match[2] ?? 0) > 59) continue;
+		const textNorm = normalizeSubjectKey(match[3]!);
+		if (kind === "bed" ? /^(?:di )?(?:ngu|sleep|bedtime)(?:\s|$)/.test(textNorm) : /^(?:thuc day|day|wake(?: up)?)(?:\s|$)/.test(textNorm)) times.push(formatClockMin(minutes));
+	}
+	return [...new Set(times)];
+}
+
+/** Bedtime belongs to the night starting on date; early clocks belong to its next morning. */
+export function journalBedtimeForNight(logs: Record<string, DailyHabitLog>, date: string): { time: string; source: "check-in" | "journal" } | null {
+	const explicit = logs[date]?.actualBedtime;
+	if (explicit && parseClockMin(explicit) !== null) return { time: explicit, source: "check-in" };
+	const evening = journalSleepMarkers(logs[date]?.journalText, "bed").filter((time) => (parseClockMin(time) ?? 0) >= 15 * 60);
+	const morning = journalSleepMarkers(logs[addDaysToDate(date, 1)]?.journalText, "bed").filter((time) => (parseClockMin(time) ?? 1440) < 15 * 60);
+	const candidates = [...new Set([...evening, ...morning])];
+	return candidates.length === 1 ? { time: candidates[0]!, source: "journal" } : null;
+}
+
+export function journalWakeForDate(logs: Record<string, DailyHabitLog>, date: string): { time: string; source: "check-in" | "journal" } | null {
+	const explicit = logs[date]?.actualWakeTime;
+	if (explicit && parseClockMin(explicit) !== null) return { time: explicit, source: "check-in" };
+	const candidates = journalSleepMarkers(logs[date]?.journalText, "wake");
+	return candidates.length === 1 ? { time: candidates[0]!, source: "journal" } : null;
 }
 
 export interface SleepScheduleCalc {
@@ -1365,7 +1496,7 @@ export function computeSleepAnchorForDate(
 	dayOverride?: DayOverride,
 ): SleepScheduleCalc {
 	const pastLogs = Object.values(logs)
-		.filter((l) => l.date < date && (l.actualBedtime || l.actualWakeTime))
+		.filter((l) => l.date < date && (journalBedtimeForNight(logs, l.date) || l.actualWakeTime))
 		.sort((a, b) => b.date.localeCompare(a.date));
 	const latest = pastLogs[0];
 	const todayLog = logs[date];
@@ -1380,13 +1511,16 @@ export function computeSleepAnchorForDate(
 	const windDownMin = clamp(Math.round(sleep.windDownBufferMin ?? (sleep.earlyWakingIssue ? 40 : 25)), 15, 60);
 
 	// Anchor current bedtime from the most recent logged bedtime (or profile setting)
-	const baselineBedNorm = normalizeBedtimeMin(latest?.actualBedtime ?? sleep.currentBedtime);
+	const previousNight = journalBedtimeForNight(logs, addDaysToDate(date, -1));
+	const latestBedtime = previousNight?.time ?? (latest ? journalBedtimeForNight(logs, latest.date)?.time : undefined);
+	const baselineBedNorm = normalizeBedtimeMin(latestBedtime ?? sleep.currentBedtime);
 	const targetBedNorm = normalizeBedtimeMin(sleep.targetBedtime);
 
 	// Today's actual/estimated/overridden wake time
 	let todayWakeMin: number;
 	const overrideWake = parseClockMin(dayOverride?.wakeTime);
-	const explicitTodayWake = parseClockMin(todayLog?.actualWakeTime);
+	const todayWake = journalWakeForDate(logs, date);
+	const explicitTodayWake = parseClockMin(todayWake?.time);
 	const latestWake = parseClockMin(latest?.actualWakeTime);
 	if (overrideWake !== null) {
 		todayWakeMin = clamp(overrideWake, 4 * 60, 15 * 60);
@@ -1400,8 +1534,8 @@ export function computeSleepAnchorForDate(
 	}
 
 	let actualLastSleepHours: number | null = null;
-	if (latest?.actualBedtime && (todayLog?.actualWakeTime || latest?.actualWakeTime)) {
-		const prevBed = normalizeBedtimeMin(latest.actualBedtime);
+	if (previousNight && todayWake) {
+		const prevBed = normalizeBedtimeMin(previousNight.time);
 		const wakeOnAxis = todayWakeMin < 15 * 60 ? todayWakeMin + 1440 : todayWakeMin;
 		const sleptMin = wakeOnAxis - prevBed;
 		if (sleptMin >= 120 && sleptMin <= 840) {
@@ -2271,7 +2405,8 @@ function carveAwakeScheduleBaseline(
 
 	const freeBeforeHobby = awakeIntervals.reduce((acc, iv) => acc + Math.max(0, iv.endMin - iv.startMin), 0);
 	const band = INTENSITY_STUDY_BOUNDS[config.intensity];
-	const baseHobby = config.lifestyle.dailyHobbyMin;
+	const configuredHobbies = config.lifestyle.hobbies.filter((name) => config.lifestyle.hobbyPreferences?.[name]);
+	const baseHobby = configuredHobbies.length ? configuredHobbies.reduce((sum, name) => sum + config.lifestyle.hobbyPreferences![name]!.dailyMin, 0) : config.lifestyle.dailyHobbyMin;
 	const targetHobbyMin =
 		config.intensity === "healthy"
 			? Math.max(baseHobby, band.minHobbyMin)
@@ -2669,8 +2804,24 @@ export function computeLocalPlannerPlan(
 	}
 
 	// Place wellness / hobby recharge block in post-dinner dip window (when enabled) or evening where longest gap >= pureHobbyMin
-	const pureHobbyMin = Math.max(0, Math.min(baseCarve.hobbyMin - gameMin, config.intensity === "healthy" ? Math.max(config.lifestyle.dailyHobbyMin, band.minHobbyMin) : baseCarve.hobbyMin));
-	if (pureHobbyMin >= 20 && awakeIntervals.length > 0) {
+	const configuredHobbies = config.lifestyle.hobbies.filter((name) => config.lifestyle.hobbyPreferences?.[name]);
+	const baseHobby = configuredHobbies.length ? configuredHobbies.reduce((sum, name) => sum + config.lifestyle.hobbyPreferences![name]!.dailyMin, 0) : config.lifestyle.dailyHobbyMin;
+	const pureHobbyMin = Math.max(0, Math.min(baseCarve.hobbyMin - gameMin, config.intensity === "healthy" ? Math.max(baseHobby, band.minHobbyMin) : baseCarve.hobbyMin));
+	if (configuredHobbies.length) {
+		let remaining = pureHobbyMin;
+		for (const name of configuredHobbies) {
+			const pref = config.lifestyle.hobbyPreferences![name]!;
+			const duration = Math.min(pref.dailyMin, remaining);
+			if (duration < 5) continue;
+			const preferred = pref.preferredWindow === "morning" ? 9 * 60 : pref.preferredWindow === "afternoon" ? 14 * 60 : 19 * 60 + 30;
+			const candidates = awakeIntervals.map((iv, index) => ({ iv, index })).filter(({ iv }) => iv.endMin - iv.startMin >= duration).sort((a, b) => Math.abs(clamp(preferred, a.iv.startMin, a.iv.endMin - duration) - preferred) - Math.abs(clamp(preferred, b.iv.startMin, b.iv.endMin - duration) - preferred));
+			const slot = candidates[0]; if (!slot) continue;
+			const startMin = clamp(preferred, slot.iv.startMin, slot.iv.endMin - duration), endMin = startMin + duration;
+			awakeIntervals = subtractInterval(awakeIntervals, { startMin, endMin });
+			hobbyBlocks.push({ id: `blk_hobby_${date}_${hobbyBlocks.length}`, date, startTime: formatClockMin(startMin), endTime: formatClockMin(endMin), startMin, endMin, durationMin: duration, type: "hobby", title: name, reason: `Hobby budget ${pref.dailyMin}m · preferred ${pref.preferredWindow}` });
+			remaining -= duration;
+		}
+	} else if (pureHobbyMin >= 20 && awakeIntervals.length > 0) {
 		const preferredEveningStart = dipInfo.dipWindow ? dipInfo.dipWindow.startMin : 19 * 60 + 30;
 		let chosenIdx = -1;
 		let chosenStart = 0;
@@ -3034,6 +3185,7 @@ export function buildCompactPlannerDigest(
 			.map((b) => `${b.startTime}-${b.endTime} ${b.title}`),
 		lifestyleBalance: {
 			hobbies: config.lifestyle.hobbies,
+			hobbyPreferences: config.lifestyle.hobbyPreferences,
 			dailyHobbyMin: config.lifestyle.dailyHobbyMin,
 			gameBudgetMin: config.lifestyle.gameBudgetMin ?? 0,
 			gameCutoffBeforeBedMin: config.lifestyle.gameCutoffBeforeBedMin ?? 90,
@@ -3351,11 +3503,13 @@ export function applyLlmPlanOutput(
 
 export interface HabitCheckInPatch {
 	date?: string;
+	/** Optional date for the returned view; does not change the date being recorded. */
+	snapshotDate?: string;
 	toggleBlockId?: string;
 	toggleChecklistId?: string;
 	addStudyMin?: { subject: string; minutes: number; milestoneId?: string };
-	actualBedtime?: string;
-	actualWakeTime?: string;
+	actualBedtime?: string | null;
+	actualWakeTime?: string | null;
 	sleepQuality?: 1 | 2 | 3 | 4 | 5;
 	wokeEarlyUnintended?: boolean;
 	energyScore?: 1 | 2 | 3 | 4 | 5;
@@ -3370,6 +3524,7 @@ export interface HabitCheckInPatch {
 	note?: string;
 	journalText?: string;
 	actualEntries?: JournalActivityEntry[];
+	habitCounts?: DailyHabitLog["habitCounts"];
 }
 
 export function applyHabitCheckIn(
@@ -3468,10 +3623,10 @@ export function applyHabitCheckIn(
 
 	const nextLog: DailyHabitLog = {
 		...existing,
-		...(patch.actualBedtime !== undefined && parseClockMin(patch.actualBedtime) !== null
+		...(patch.actualBedtime === null ? { actualBedtime: undefined } : patch.actualBedtime !== undefined && parseClockMin(patch.actualBedtime) !== null
 			? { actualBedtime: normalizeClockString(patch.actualBedtime, existing.actualBedtime ?? "23:30") }
 			: {}),
-		...(patch.actualWakeTime !== undefined && parseClockMin(patch.actualWakeTime) !== null
+		...(patch.actualWakeTime === null ? { actualWakeTime: undefined } : patch.actualWakeTime !== undefined && parseClockMin(patch.actualWakeTime) !== null
 			? { actualWakeTime: normalizeClockString(patch.actualWakeTime, existing.actualWakeTime ?? "07:00") }
 			: {}),
 		...(patch.sleepQuality !== undefined ? { sleepQuality: patch.sleepQuality } : {}),
@@ -3485,9 +3640,10 @@ export function applyHabitCheckIn(
 		...(patch.hobbyDone !== undefined ? { hobbyDone: patch.hobbyDone } : { hobbyDone }),
 		...(patch.mealsOk !== undefined ? { mealsOk: patch.mealsOk } : {}),
 		...(patch.sleepOnTarget !== undefined ? { sleepOnTarget: patch.sleepOnTarget } : {}),
-		...(patch.note !== undefined ? { note: patch.note.trim().slice(0, 400) } : {}),
+		...(patch.note !== undefined ? { note: patch.note.trim().slice(0, 4000) } : {}),
 		...(patch.journalText !== undefined ? { journalText: patch.journalText.trim().slice(0, 4000) } : {}),
 		...(patch.actualEntries !== undefined ? { actualEntries: sanitizeActualEntries(patch.actualEntries, date) } : {}),
+		...(patch.habitCounts !== undefined ? { habitCounts: patch.habitCounts } : {}),
 		completedBlockIds: [...completedBlockIds],
 		completedChecklistIds: [...completedChecklistIds],
 		loggedStudyMinBySubject,
@@ -3952,27 +4108,24 @@ const SENSITIVE_JOURNAL_RE =
  */
 export function redactSensitiveJournalText(text: string): string {
 	if (!text) return "";
-	let sanitized = text.replace(SENSITIVE_JOURNAL_RE, "[Personal reset]");
-	// Collapse ASCII fallback via normalized matching on individual comma/newline segments if accented tokens missed
-	const lines = sanitized.split(/\r?\n/);
-	return lines
-		.map((line) => {
-			const norm = normalizeSubjectKey(line);
-			if (
-				/\b(thu dam|quay tay|soc lo|xem sex|phim sex|porn|hentai|fetish|masturbat|jerk off|libido|nung|pmo)\b/.test(
-					norm,
-				)
-			) {
-				const rangeMatch = line.match(
-					/^\s*(\d{1,2}\s*(?::|h)\s*\d{0,2}\s*(?:-|–|—|to|den|đến)\s*\d{1,2}\s*(?::|h)\s*\d{0,2}\s*:?)/i,
-				);
-				const rangePrefix = rangeMatch?.[1]?.trim();
-				return rangePrefix ? `${rangePrefix} [Personal reset]` : "[Personal reset]";
-			}
-			return line;
-		})
-		.join("\n")
-		.trim();
+	let normalized = "";
+	const offsets: Array<{ start: number; end: number }> = [];
+	for (let index = 0; index < text.length;) {
+		const character = String.fromCodePoint(text.codePointAt(index)!);
+		const end = index + character.length;
+		const plain = character.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/đ/g, "d");
+		normalized += plain;
+		for (let unit = 0; unit < plain.length; unit++) offsets.push({ start: index, end });
+		index = end;
+	}
+	let result = "", cursor = 0;
+	SENSITIVE_JOURNAL_RE.lastIndex = 0;
+	for (const match of normalized.matchAll(SENSITIVE_JOURNAL_RE)) {
+		const first = offsets[match.index], last = offsets[match.index + match[0].length - 1];
+		if (!first || !last) continue;
+		result += text.slice(cursor, first.start) + "[private]"; cursor = last.end;
+	}
+	return result + text.slice(cursor);
 }
 
 function classifyJournalLine(text: string, knownSubjects: readonly string[]): {
@@ -4094,6 +4247,16 @@ export function parseJournalTextLocal(
 	return out;
 }
 
+/** Explicit clock points in natural text, including Vietnamese 8r = 08:30. */
+export function journalClockPoints(text: string): Set<string> {
+	const points = new Set<string>();
+	for (const match of text.matchAll(/\b(\d{1,2})\s*(?:(:|h)\s*(\d{1,2})?|([rR])\b)/gi)) {
+		const hour = Number(match[1]), minute = match[4] ? 30 : Number(match[3] ?? 0);
+		if (hour <= 23 && minute <= 59) points.add(formatClockMin(hour * 60 + minute));
+	}
+	return points;
+}
+
 /**
  * Deterministic (0-token) Plan-vs-Actual compliance evaluator comparing today's
  * planned study blocks & habits against the student's 24h journal + check-in log,
@@ -4122,11 +4285,14 @@ export function evaluatePlanVsActualLocal(opts: {
 		];
 
 	const journalStr = (opts.journalText ?? log?.journalText ?? "").trim();
-	const parsedFromText = journalStr ? parseJournalTextLocal(journalStr, date, known) : [];
+	// An untimed sentence is useful context, but it must not acquire an invented clock interval.
+	const explicitTimeLines = journalStr.split(/\r?\n|;+/).filter((line) => /\d{1,2}\s*(?::|h)\s*\d{0,2}\s*(?:-|–|—|to|den|đến)\s*\d{1,2}\s*(?::|h)/i.test(line));
+	const parsedFromText = explicitTimeLines.length ? parseJournalTextLocal(explicitTimeLines.join("\n"), date, known) : [];
 	const manual = (opts.manualEntries ?? log?.actualEntries ?? []).filter((e) => e.source === "manual");
-	const combinedEntries = [...manual, ...parsedFromText.filter((p) => !manual.some((m) => m.id === p.id))];
+	const savedAi = journalStr === (log?.journalText ?? "").trim() ? (log?.actualEntries ?? []).filter((entry) => entry.source === "ai_extracted" && !manual.some((item) => item.startTime === entry.startTime && item.endTime === entry.endTime)) : [];
+	const combinedEntries = [...manual, ...savedAi, ...parsedFromText.filter((entry) => ![...manual, ...savedAi].some((item) => item.startTime === entry.startTime && item.endTime === entry.endTime))];
 
-	const plannedStudyBlocks = (plan?.blocks ?? []).filter((b) => b.type === "study");
+	const plannedStudyBlocks = studyBlocksForAudit(config, date, plan);
 	const plannedStudyMin =
 		plannedStudyBlocks.length > 0
 			? plannedStudyBlocks.reduce((a, b) => a + b.durationMin, 0)
@@ -4136,17 +4302,15 @@ export function evaluatePlanVsActualLocal(opts: {
 	const isToday = date === localDateString(nowMs);
 	const nowDateObj = new Date(nowMs);
 	const nowClockMin = nowDateObj.getHours() * 60 + nowDateObj.getMinutes();
-	const lastLoggedEndMin = combinedEntries.reduce((mx, e) => {
-		const m = parseClockMin(e.endTime);
-		return m !== null ? Math.max(mx, m) : mx;
-	}, 0);
-	const cutoffMin = Math.max(isToday ? nowClockMin : 24 * 60, lastLoggedEndMin);
-	const remainingPlannedBlocks = isToday ? plannedStudyBlocks.filter((b) => b.startMin >= cutoffMin) : [];
-	const remainingPlannedMin = remainingPlannedBlocks.reduce((a, b) => a + b.durationMin, 0);
+	// A future interval mentioned in a journal is not evidence that the
+	// corresponding plan has already come due.
+	const cutoffMin = isToday ? nowClockMin : 24 * 60;
+	const remainingPlannedBlocks = isToday ? plannedStudyBlocks.filter((b) => b.endMin > cutoffMin) : [];
+	const remainingPlannedMin = remainingPlannedBlocks.reduce((a, b) => a + Math.max(0, b.endMin - Math.max(b.startMin, cutoffMin)), 0);
 	const plannedSoFarMin = isToday
-		? plannedStudyBlocks.filter((b) => b.startMin < cutoffMin).reduce((a, b) => a + b.durationMin, 0)
+		? plannedStudyBlocks.filter((b) => b.endMin <= cutoffMin).reduce((a, b) => a + b.durationMin, 0)
 		: plannedStudyMin;
-	const isPartialMiddayLog = isToday && cutoffMin < 20 * 60 && remainingPlannedMin >= 30;
+	const isPartialMiddayLog = isToday && remainingPlannedMin > 0;
 
 	const journalStudyMin = combinedEntries
 		.filter((e) => e.category === "study")
@@ -4162,10 +4326,11 @@ export function evaluatePlanVsActualLocal(opts: {
 		.reduce((a, e) => a + e.minutes, 0);
 
 	const evalTargetMin = isPartialMiddayLog ? plannedSoFarMin : plannedStudyMin;
+	const scorable = plannedStudyMin > 0 && (!isToday || plannedSoFarMin > 0);
 	const denom = Math.max(30, evalTargetMin);
 	const volumeScore = evalTargetMin === 0 ? (actualStudyMin > 0 ? 1 : 0.75) : Math.min(1.08, actualStudyMin / denom);
 	const elapsedBlockCount = isPartialMiddayLog
-		? plannedStudyBlocks.filter((b) => b.startMin < cutoffMin).length
+		? plannedStudyBlocks.filter((b) => b.endMin <= cutoffMin).length
 		: plannedStudyBlocks.length;
 	const blockScore = elapsedBlockCount > 0 ? Math.min(1, completedBlockCount / elapsedBlockCount) : volumeScore;
 	const distractionPenalty = distractionMin > 45 ? Math.min(0.22, (distractionMin - 45) / 300) : 0;
@@ -4174,8 +4339,8 @@ export function evaluatePlanVsActualLocal(opts: {
 	const adherencePct = clamp(Math.round(rawAdherence), 0, 100);
 
 	const prevRealism = config.realismFactor ?? 1.0;
-	const observedRealism = isPartialMiddayLog ? prevRealism : clamp(actualStudyMin / Math.max(30, plannedStudyMin), 0.4, 1.35);
-	const suggestedRealismFactor = isPartialMiddayLog
+	const observedRealism = isPartialMiddayLog || !scorable ? prevRealism : clamp(actualStudyMin / Math.max(30, plannedStudyMin), 0.4, 1.35);
+	const suggestedRealismFactor = isPartialMiddayLog || !scorable
 		? prevRealism
 		: clamp(Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100, 0.65, 1.25);
 
@@ -4191,7 +4356,7 @@ export function evaluatePlanVsActualLocal(opts: {
 		strengths.push(`Met study pace: ${(actualStudyMin / 60).toFixed(1)}h actual vs ${(evalTargetMin / 60).toFixed(1)}h expected so far.`);
 	} else if (actualStudyMin > 0) {
 		frictionPoints.push(`Shortfall of ${Math.max(0, evalTargetMin - actualStudyMin)}m compared to ${(evalTargetMin / 60).toFixed(1)}h expected.`);
-	} else if (!isPartialMiddayLog || plannedSoFarMin > 0) {
+	} else if (scorable && (!isPartialMiddayLog || plannedSoFarMin > 0)) {
 		frictionPoints.push("No study minutes logged or detected in journal yet.");
 	}
 
@@ -4201,7 +4366,7 @@ export function evaluatePlanVsActualLocal(opts: {
 	if (log?.hobbyDone) strengths.push("Protected recharge / hobby rest.");
 	if (log?.mealsOk) strengths.push("Kept regular meal timing.");
 
-	const nextDayAdvice = isPartialMiddayLog
+	const nextDayAdvice = !scorable ? "No study is due for this plan yet; capacity remains unchanged. Reassess after a planned session." : isPartialMiddayLog
 		? `Remaining ${(remainingPlannedMin / 60).toFixed(1)}h planned later today — focus on your next scheduled study block and re-score tonight.`
 		: observedRealism < 0.75
 			? `Plan was slightly ambitious (${Math.round(observedRealism * 100)}% completed). Tomorrow's adaptive cap scales smoothly to ${(suggestedRealismFactor * 100).toFixed(0)}% capacity.`
@@ -4215,10 +4380,11 @@ export function evaluatePlanVsActualLocal(opts: {
 			evaluatedAt: new Date(nowMs).toISOString(),
 			evaluatedBy: "local",
 			adherencePct,
+			scorable,
 			plannedStudyMin,
 			actualStudyMin,
 			realismRatio: Math.round(observedRealism * 100) / 100,
-			summary: isPartialMiddayLog
+			summary: !scorable ? "Not enough data to score this plan yet." : isPartialMiddayLog
 				? `Mid-day snapshot (${adherencePct}%): ${(actualStudyMin / 60).toFixed(1)}h studied before ${formatClockMin(cutoffMin)} (${(remainingPlannedMin / 60).toFixed(1)}h planned later today).`
 				: `Adherence ${adherencePct}% · ${(actualStudyMin / 60).toFixed(1)}h studied vs ${(plannedStudyMin / 60).toFixed(1)}h planned${distractionMin > 0 ? ` · ${distractionMin}m distraction` : ""}.`,
 			strengths,

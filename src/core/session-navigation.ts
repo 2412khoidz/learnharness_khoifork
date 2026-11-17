@@ -7,6 +7,15 @@ export function messageAnchorId(messageId: string): string {
 	return `message-${messageId}`;
 }
 
+export function recallAnswerAnchorId(messageId: string, toolCallId: string): string {
+	return `recall-${encodeURIComponent(messageId)}-${encodeURIComponent(toolCallId)}`;
+}
+
+export function recallAnswerHref(chatId: string, messageId?: string, toolCallId?: string): string {
+	const base = `/chat/${encodeURIComponent(chatId)}`;
+	return messageId && toolCallId ? `${base}?recallAnswer=${encodeURIComponent(toolCallId)}#${encodeURIComponent(messageAnchorId(messageId))}` : base;
+}
+
 export function messageIdFromHash(hash: string): string | null {
 	try {
 		const anchor = decodeURIComponent(hash.replace(/^#/, ""));

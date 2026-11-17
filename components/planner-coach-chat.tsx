@@ -17,6 +17,14 @@ import {
 } from "lucide-react";
 
 type FocusArea = "schedule" | "lifestyle" | "general";
+export interface CoachProposalPreview { id: string; summary: string; advice?: string; changes: Record<string, { before: unknown; after: unknown }> }
+
+function ProposalValue({ value }: { value: unknown }) {
+	if (value === null || value === undefined) return <span className="text-muted-foreground">None</span>;
+	if (Array.isArray(value)) return value.length ? <ul className="space-y-1 border-l pl-2">{value.map((item, index) => <li key={index}><ProposalValue value={item} /></li>)}</ul> : <span className="text-muted-foreground">None</span>;
+	if (typeof value === "object") return <dl className="space-y-1">{Object.entries(value).map(([key, item]) => <div key={key}><dt className="font-medium">{key.replace(/([a-z])([A-Z])/g, "$1 $2")}</dt><dd className="pl-2"><ProposalValue value={item} /></dd></div>)}</dl>;
+	return <span className="whitespace-pre-wrap break-words">{String(value)}</span>;
+}
 
 const QUICK_PROMPTS: Record<FocusArea, string[]> = {
 	schedule: [
@@ -54,6 +62,9 @@ export function PlannerCoachChat({
 	onUndo,
 	onClear,
 	onClose,
+	embedded = false,
+	proposal,
+	onProposalDecision,
 }: {
 	messages: CoachChatMessage[];
 	lastUndoMessageId?: string;
@@ -71,11 +82,16 @@ export function PlannerCoachChat({
 	onUndo: (messageId: string) => Promise<void>;
 	onClear: () => Promise<void>;
 	onClose: () => void;
+	embedded?: boolean;
+	proposal?: CoachProposalPreview | null;
+	onProposalDecision?: (apply: boolean) => Promise<void>;
 }) {
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const fileRef = useRef<HTMLInputElement>(null);
 	const [files, setFiles] = useState<File[]>([]);
+	const [reviewingId, setReviewingId] = useState<string | null>(null);
+	const reviewingProposal = !!proposal && reviewingId === proposal.id;
 
 	useEffect(() => {
 		const el = scrollRef.current;
@@ -95,7 +111,7 @@ export function PlannerCoachChat({
 	return (
 		<aside
 			data-testid="planner-coach-drawer"
-			className="flex h-full min-h-0 w-full shrink-0 flex-col border-l bg-card sm:w-[390px] xl:w-[430px]"
+			className={cn("flex h-full min-h-0 w-full min-w-0 shrink-0 flex-col bg-card", embedded ? "border-0" : "border-l sm:w-[390px] xl:w-[430px]")}
 		>
 			{/* Header */}
 			<div className="flex items-center justify-between gap-2 border-b px-3.5 py-2.5">
@@ -123,8 +139,9 @@ export function PlannerCoachChat({
 					<button
 						type="button"
 						onClick={onClose}
+						aria-label="Close Coach"
 						title="Close Coach Side Chat"
-						className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+						className="lh-no-drag rounded p-2 text-muted-foreground hover:bg-accent hover:text-foreground"
 					>
 						<XIcon className="size-3.5" />
 					</button>
@@ -180,13 +197,13 @@ export function PlannerCoachChat({
 				{messages.length === 0 ? (
 					<div className="flex flex-col gap-2.5 text-muted-foreground">
 						<div className="rounded-lg border border-dashed bg-muted/20 p-3 leading-relaxed">
-							<p className="font-medium text-foreground">Nói chuyện trực tiếp với Coach AI để chỉnh lịch & thói quen:</p>
+							<p className="font-medium text-foreground">Ask Coach about your plan and habits</p>
 							<p className="mt-1 text-[11px]">
-								Coach đọc toàn bộ Knowledge Graph, Past Chat Sessions, trọng số FSRS-6, lỗi sai, điểm lực học và lịch ngủ gần đây. Bạn chỉ cần mô tả tình trạng hôm nay hoặc thói quen muốn sửa — Coach sẽ tự cập nhật lịch & Routine cho bạn (có nút Undo 1 chạm).
+								Coach receives planner data, graph concepts, learning summaries and selected session excerpts. The tabs change suggested prompts and focus, not permissions. Changes to Planner, existing graph concepts, session details and supported settings require review and can be undone. Graph creation/deletion and transcript rewriting are not supported here.
 							</p>
 						</div>
 						<div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-							Gợi ý nhanh ({focusArea === "schedule" ? "Lịch hôm nay" : focusArea === "lifestyle" ? "Ngủ & Thói quen" : "Tư vấn tổng hợp"})
+							Suggested prompts ({focusArea === "schedule" ? "Schedule" : focusArea === "lifestyle" ? "Sleep & Habits" : "General"})
 						</div>
 						<div className="flex flex-col gap-1.5">
 							{QUICK_PROMPTS[focusArea].map((prompt) => (
@@ -279,6 +296,7 @@ export function PlannerCoachChat({
 					))
 				)}
 
+				{proposal && <div className="rounded-lg border bg-muted/30 p-3 text-xs"><p className="font-medium">Changes awaiting review</p><p className="mt-1 text-muted-foreground">No changes have been applied. Review the proposed before and after values, then choose whether to apply them.</p><button type="button" className="mt-2 rounded border px-2 py-1" onClick={() => setReviewingId(reviewingProposal ? null : proposal.id)}>{reviewingProposal ? "Hide details" : "Review changes"}</button>{reviewingProposal && <>{proposal.advice && <div className="mt-2 rounded border bg-background p-2"><p className="font-medium">Coach advice</p><HostMarkdown text={proposal.advice} /></div>}<p className="mt-2 whitespace-pre-wrap">{proposal.summary}</p><div className="mt-2 max-h-72 space-y-3 overflow-auto rounded border bg-background p-2">{Object.entries(proposal.changes).map(([name, change]) => <details key={name}><summary className="cursor-pointer font-medium">{name.replace(/([a-z])([A-Z])/g, "$1 $2")}</summary><div className="mt-2 grid grid-cols-2 gap-2"><div><p className="mb-1 font-medium">Before</p><ProposalValue value={change.before} /></div><div><p className="mb-1 font-medium">After</p><ProposalValue value={change.after} /></div></div></details>)}</div><button type="button" disabled={sending} onClick={() => void onProposalDecision?.(true)} className="mt-2 rounded bg-primary px-3 py-1.5 text-primary-foreground">Confirm and apply</button></>}<button type="button" disabled={sending} onClick={() => void onProposalDecision?.(false)} className="ml-2 mt-2 rounded border px-3 py-1.5">Discard</button></div>}
 				{sending && (
 					<div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
 						<BrailleSpinner /> Reading Graph, Sessions, FSRS & adjusting plan...
@@ -290,7 +308,7 @@ export function PlannerCoachChat({
 			<div className="border-t bg-background p-3">
 				{!coachAvailable ? (
 					<div className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] text-warning">
-						Chưa cấu hình API key / Model cho Coach. Vào Settings → Models để bật trước khi chat.
+						No Coach model configured. Open Settings → Models to set one up.
 					</div>
 				) : (
 					<div className="flex flex-col gap-1.5">
@@ -309,13 +327,13 @@ export function PlannerCoachChat({
 							}}
 							placeholder={
 								focusArea === "lifestyle"
-									? "Nhắn về giấc ngủ, giờ ăn, hobby, game cutoff..."
-									: "Hôm nay thế nào? Kể để Coach chỉnh lịch, wake/sleep, bữa ăn..."
+									? "Ask about sleep, meals, hobbies or gaming..."
+									: "Tell Coach what you need help with..."
 							}
 							className="w-full resize-none rounded-lg border bg-card px-2.5 py-2 text-xs focus:border-primary focus:outline-none"
 						/>
 						<div className="flex items-center justify-between text-[10px] text-muted-foreground">
-							<button type="button" className="inline-flex items-center gap-1 rounded border px-2 py-1 hover:bg-accent" onClick={() => fileRef.current?.click()} disabled={sending}><PaperclipIcon className="size-3" /> Ảnh / tệp</button>
+							<button type="button" className="inline-flex items-center gap-1 rounded border px-2 py-1 hover:bg-accent" onClick={() => fileRef.current?.click()} disabled={sending}><PaperclipIcon className="size-3" /> Images / files</button>
 							<button
 								type="button"
 								disabled={sending || (!draftText.trim() && files.length === 0)}

@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, it } from "node:test";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
 import type { PiEngine } from "../src/agent/models.ts";
-import { checkInPlannerHabit, chatWithPlannerCoachServer, evaluateDailyJournalServer, generatePlannerSchedule, readPlannerSnapshot } from "../src/server/planner.ts";
+import { checkInPlannerHabit, chatWithPlannerCoachServer, evaluateDailyJournalServer, generatePlannerSchedule, readPlannerSnapshot, savePlannerConfig } from "../src/server/planner.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-replan-ai-"));
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -24,6 +24,19 @@ function fakeEngine(toolName: string, args: unknown, capture: (prompt: string) =
 		},
 	};
 }
+
+it("archives the elapsed part of a saved plan before AI replanning", async () => {
+	const plannerFile = path.join(dir, "archived-plan.json");
+	const morning = new Date(2026, 10, 16, 9).getTime();
+	const initial = readPlannerSnapshot({ plannerFile, date, now: morning });
+	const old = { ...initial.plan, generatedAt: new Date(morning).toISOString(), plannedStudyHours: 1, blocks: [{ id: "prior-study", date, type: "study" as const, title: "Previous study", startTime: "10:00", endTime: "11:00", startMin: 600, endMin: 660, durationMin: 60 }] };
+	savePlannerConfig({ ...initial.config, plans: { ...initial.config.plans, [date]: old } }, plannerFile);
+	const result = await generatePlannerSchedule({ mode: "llm", date, plannerFile, now, engineOverride: fakeEngine("submit_daily_plan", { coachSummary: "A fresh plan.", minDailyStudyHours: 0, quotas: [], blocks: [] }, () => {}) });
+	assert.equal(result.snapshot.config.planHistory?.[date]?.[0]?.plan.blocks[0]?.id, "prior-study");
+	const audit = await evaluateDailyJournalServer({ plannerFile, date, now, mode: "local", journalText: "" });
+	assert.equal(audit.report.plannedStudyMin, 60);
+	assert.equal(audit.report.scorable, true);
+});
 
 it("uses saved journal, energy and local clock for AI schedule and validates the saved result", async () => {
 	const plannerFile = path.join(dir, "generate.json");
@@ -92,5 +105,35 @@ it("passes raw journal to the auditor while preserving editable manual entries",
 	assert.match(prompt, /thủ dâm/);
 	assert.equal(result.snapshot.config.logs[date]?.journalText, journal);
 	assert.deepEqual(result.snapshot.config.logs[date]?.actualEntries?.filter((e) => e.source === "manual"), [manual]);
-	assert.equal(result.snapshot.config.logs[date]?.actualEntries?.length, 1);
+	// Explicitly timed journal entries remain visible alongside the manual entry.
+	assert.equal(result.snapshot.config.logs[date]?.actualEntries?.length, 4);
+});
+
+it("does not invent a timeline or study minutes from untimed journal text", async () => {
+	const plannerFile = path.join(dir, "audit-untimed.json");
+	const result = await evaluateDailyJournalServer({
+		date, plannerFile, now, mode: "llm", journalText: "Hôm nay thấy mệt", manualEntries: [],
+		engineOverride: fakeEngine("submit_journal_evaluation", { adherencePct: 100, actualStudyMin: 60, summary: "Đã học", strengths: [], frictionPoints: [], nextDayAdvice: "Nghỉ", entries: [{ startTime: "08:00", endTime: "09:00", category: "study", title: "Học", minutes: 60 }] }, () => {}),
+	});
+	assert.equal(result.parsedEntries.length, 0);
+	assert.equal(result.report.actualStudyMin, 0);
+});
+
+it("extracts clock points from a natural journal while rejecting unsupported times", async () => {
+	const plannerFile = path.join(dir, "audit-natural.json");
+	const journalText = "Sáng dậy 7h40, sinh hoạt tới 8r rồi ăn sáng đến 10h; sau đó nghỉ tới 10h40.";
+	const result = await evaluateDailyJournalServer({
+		date, plannerFile, now, mode: "llm", journalText,
+		engineOverride: fakeEngine("submit_journal_evaluation", { adherencePct: 0, actualStudyMin: 0, summary: "Đã ghi nhận", strengths: [], frictionPoints: [], nextDayAdvice: "Nghỉ", entries: [
+			{ startTime: "07:40", endTime: "08:30", category: "other", title: "Sinh hoạt", minutes: 50 },
+			{ startTime: "08:30", endTime: "10:00", category: "meal", title: "Ăn sáng", minutes: 90 },
+			{ startTime: "10:00", endTime: "10:20", category: "study", title: "Không có trong nhật ký", minutes: 20 },
+		] }, () => {}),
+	});
+	assert.deepEqual(result.parsedEntries.map((entry) => `${entry.startTime}-${entry.endTime}`), ["07:40-08:30", "08:30-10:00"]);
+	assert.equal(result.snapshot.config.logs[date]?.journalText, journalText);
+	const local = await evaluateDailyJournalServer({ date, plannerFile, now, mode: "local", journalText });
+	assert.equal(local.parsedEntries.length, 2, "saved AI entries remain available on later local audits");
+	const changed = await evaluateDailyJournalServer({ date, plannerFile, now, mode: "local", journalText: "A different untimed entry." });
+	assert.equal(changed.parsedEntries.length, 0, "changed text must not retain stale extracted intervals");
 });

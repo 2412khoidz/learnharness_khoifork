@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MistakeRecord, RecallScanState } from "@/src/core";
 import { ToolContentResponse } from "@/components/ai-elements/message";
+import { RecallAssessmentEditor } from "@/components/recall-assessment-editor";
+import { RecallFsrsReview } from "@/components/recall-fsrs-review";
 
 const labels: Record<string, string> = { correct: "Correct", partial: "Partly correct", wrong: "Incorrect", dont_know: "Did not know", uncertain: "Needs review" };
 const PAGE_SIZE = 20;
@@ -16,6 +18,7 @@ export function RecallScanPanel({ records, onSaved }: { records: MistakeRecord[]
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [message, setMessage] = useState<string | null>(null);
+	const [showFsrs, setShowFsrs] = useState(false);
 	const refresh = useCallback(async () => {
 		const res = await fetch("/api/mistakes/recall-scan", { cache: "no-store" });
 		if (!res.ok) throw new Error("Could not load recall scan.");
@@ -49,6 +52,8 @@ export function RecallScanPanel({ records, onSaved }: { records: MistakeRecord[]
 				{scan?.status === "running" ? <button disabled={busy} onClick={() => void action("pause")} className="rounded-md border px-3 py-1.5 text-xs">Pause</button> : <button disabled={busy || !scan} onClick={() => void action("start")} className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground">{scan && scan.results.length > 0 ? "Resume scan" : "Scan free recall with AI"}</button>}
 			</div>
 			<p className="text-xs text-muted-foreground" role="status">{scan ? `${scan.status}: ${scan.results.length} / ${scan.total} answers assessed` : "Loading scan…"}. The configured analyst model receives the relevant saved answers; scanning can take time and use model quota.</p>
+			<button type="button" onClick={() => setShowFsrs((value) => !value)} className="rounded-md border px-3 py-1.5 text-xs">{showFsrs ? "Close FSRS review" : "Review recall for FSRS"}</button>
+			{showFsrs && <RecallFsrsReview />}
 			{scan?.usage && <p className="text-xs text-muted-foreground">Reported usage: {scan.usage.input.toLocaleString()} input · {scan.usage.output.toLocaleString()} output · {scan.usage.cacheRead.toLocaleString()} cache-read · {scan.usage.cacheWrite.toLocaleString()} cache-write tokens ({scan.usage.modelCalls} model responses). Provider billing may differ.</p>}
 			{(error || scan?.error) && <p role="alert" className="text-xs text-destructive">{error || scan?.error}</p>}
 			{message && <p role="status" className="text-xs">{message}</p>}
@@ -67,6 +72,7 @@ export function RecallScanPanel({ records, onSaved }: { records: MistakeRecord[]
 							{result.missing && <div><strong>What was missing:</strong><ToolContentResponse>{result.missing}</ToolContentResponse></div>}
 							{result.correction && <div><strong>Correction:</strong><ToolContentResponse>{result.correction}</ToolContentResponse></div>}
 							<div><strong>Evidence:</strong><ToolContentResponse>{result.evidence}</ToolContentResponse></div>
+							<RecallAssessmentEditor id={result.id} verdict={result.verdict} />
 							{known.has(result.id) ? <p>Already saved to Mistakes.</p> : eligible ? <label className="inline-flex items-center gap-2"><input type="checkbox" checked={selected.has(result.id)} onChange={(e) => setSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(result.id); else next.delete(result.id); return next; })} /> Save this assessment</label> : <p className="text-muted-foreground">This assessment is not a confirmed mistake.</p>}
 						</div>
 					</details>;

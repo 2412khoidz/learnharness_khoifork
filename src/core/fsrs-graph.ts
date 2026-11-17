@@ -67,6 +67,7 @@ export interface FlashcardsStoreSnapshot {
 	};
 	propositions?: Record<string, {
 		id?: string;
+		recallOnly?: boolean;
 		cues?: Array<{ deleted?: boolean }>;
 		schedule?: FlashcardsScheduleSnapshot;
 	}>;
@@ -203,7 +204,7 @@ export function computeGraphFsrsSummary(
 		const isFoundation = dependentCount >= 1;
 		const prop = flashcards.propositions[node.id];
 		const hasActiveCues = Array.isArray(prop?.cues) && prop.cues.some((c) => !c.deleted);
-		if (!prop || !hasActiveCues || !prop.schedule) {
+		if (!prop || (!hasActiveCues && !prop.recallOnly) || !prop.schedule) {
 			if (isFoundation) {
 				nodes[node.id] = {
 					id: node.id,

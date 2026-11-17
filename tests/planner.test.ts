@@ -1177,7 +1177,10 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 			engineOverride: aiEvalEngine,
 		});
 		assert.equal(llmAudit.report.evaluatedBy, "llm");
-		assert.equal(llmAudit.report.adherencePct, 82);
+		// The model's narrative is retained, but adherence is computed from the
+		// recorded timeline and the plan rather than trusting its proposed score.
+		assert.equal(llmAudit.report.adherencePct, 100);
+		assert.equal(llmAudit.report.actualStudyMin, 180);
 
 		// Research trace callback records linked_context, synthesizing, and done phases
 		const steps: string[] = [];
@@ -1854,11 +1857,17 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 					{ id: "p1", role: "assistant", content: [{ type: "toolCall", id: "tc_dp1", name: "problem", arguments: { statement: "Series" } }], timestamp: t0 + 60_000 },
 					// 5 days later concluded -> should count outcome but ignore 5-day gap from avgMinutes!
 					{ id: "c1", role: "assistant", content: [{ type: "toolCall", id: "tc_dc1", name: "conclude", arguments: { outcome: "solved" } }], timestamp: t0 + 5 * 24 * 3600_000 },
-					{ id: "e1", role: "toolResult", toolName: "recall", details: { kind: "explain", dontKnow: false }, timestamp: t0 + 61_000 },
+					{ id: "e1", role: "toolResult", toolCallId: "recall-1", toolName: "recall", details: { kind: "explain", dontKnow: false, questionText: "Recall?", text: "Answer", committed: "Key", answeredAt: new Date(t0 + 61_000).toISOString() }, timestamp: t0 + 61_000 },
 				],
 			}),
 		);
 
+		const recallDraft = { id: "chat_dse_prac:recall-1", chatId: "chat_dse_prac", question: "Recall?", yourAnswer: "Answer", correctAnswer: "Key", answeredAt: new Date(t0 + 61_000).toISOString() };
+		fs.writeFileSync(path.join(dir, "recall-scan.json"), JSON.stringify({ version: 1, status: "complete", total: 2, results: [
+			{ id: "chat_dse_prac:recall-1", draft: recallDraft, verdict: "partial" },
+			{ id: "chat_dse_prac:recall-1", draft: recallDraft, verdict: "partial" },
+			{ id: "stale", draft: { chatId: "missing-session" }, verdict: "correct" },
+		] }));
 		const cap = readPlannerLearningCapacityServer({
 			plannerFile,
 			examPrepFile,
@@ -1873,6 +1882,18 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 
 		const aiRow = cap.report.subjectBreakdown.find((r) => r.subject === "Cơ sở toán AI");
 		const dseRow = cap.report.subjectBreakdown.find((r) => r.subject === "Lập trình xử lý dữ liệu");
+		assert.deepEqual(dseRow?.recallEvidence, { responses: 1, assessed: 1, correct: 0, partial: 1, wrong: 0, dontKnow: 0, uncertain: 0 });
+		assert.equal(dseRow?.retentionPct, null, "a tentative recall assessment must not create an FSRS review");
+		// A newer live assessment supersedes the scan, and a tutor flag in the
+		// session takes precedence without counting the same answer twice.
+		fs.writeFileSync(path.join(dir, "recall-live-grades.json"), JSON.stringify([{ result: { id: "chat_dse_prac:recall-1", draft: recallDraft, verdict: "correct" } }]));
+		const reread = () => readPlannerLearningCapacityServer({ plannerFile, examPrepFile, flashcardsFile, mistakesFile, chatsDir, date: "2026-11-16" }).report.subjectBreakdown.find((r) => r.subject === "Lập trình xử lý dữ liệu")!.recallEvidence;
+		assert.equal(reread().correct, 1);
+		const dsePath = path.join(chatsDir, "chat_dse_prac.json");
+		const dseChat = JSON.parse(fs.readFileSync(dsePath, "utf8"));
+		dseChat.messages.push({ id: "flag", role: "toolResult", toolName: "flag_mistake", details: { targetToolCallId: "recall-1", verdict: "wrong" } });
+		fs.writeFileSync(dsePath, JSON.stringify(dseChat));
+		assert.deepEqual(reread(), { responses: 1, assessed: 1, correct: 0, partial: 0, wrong: 1, dontKnow: 0, uncertain: 0 });
 		assert.ok(aiRow, "Cơ sở toán AI should receive concluded problems from 'Luyện bài tập cơ sở toán học'");
 		assert.equal(aiRow!.solveRatePct, 0);
 		assert.equal(aiRow!.avgMinPerProblem, 13); // (10m + 15m) / 2
@@ -1894,8 +1915,8 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 
 		const masked = redactSensitiveJournalText(rawDiary);
 		assert.ok(!/thủ\s*dâm|thu\s*dam/i.test(masked));
-		assert.ok(masked.includes("08:00-08:15: [Personal reset]"));
-		assert.ok(masked.includes("10h30-11h00: [Personal reset]"));
+		assert.ok(masked.includes("08:00-08:15: [private]"));
+		assert.ok(masked.includes("10h30-11h00: Nghỉ và [private]"));
 
 		const parsed = parseJournalTextLocal(rawDiary, "2026-11-16", ["Dạy giải tích olympic sinh viên"]);
 		// "đọc linh tinh chứ cũng không học" MUST NOT be misclassified as study!

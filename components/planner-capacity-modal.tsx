@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { LearningCapacityReport } from "@/src/core";
+import { recallAnswerHref } from "@/src/core";
 import { BrailleSpinner } from "@/components/braille-spinner";
 import { cn } from "@/lib/utils";
 import {
@@ -31,6 +32,22 @@ interface CapacityResponse {
 	};
 }
 
+function RecallInsightsDetail({ insights, range }: { insights: LearningCapacityReport["subjectBreakdown"][number]["recallInsights"]; range: "last30" | "allTime" }) {
+	const data = insights[range];
+	const patterns = range === "last30" ? insights.patterns : insights.allTimePatterns;
+	return <div className="mt-2 min-w-56 space-y-1 text-muted-foreground">
+		<p>{data.days} days · {Math.max(0, data.responses - data.assessed)} not assessed{data.needsReview ? ` (${data.needsReview} changed answers need review)` : ""}</p>
+		{data.staleExamples.length > 0 && <p>Changed answers: {data.staleExamples.map((item, index) => <a key={`${item.chatId}:${item.toolCallId ?? index}`} className="underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>open answer {index + 1} </a>)}</p>}
+		<p>{data.correct} correct · {data.partial} partial · {data.wrong} incorrect · {data.dontKnow} did not know · {data.uncertain} uncertain</p>
+		<p>{data.ai} provisional AI assessments · {data.confirmed} learner corrections</p>
+		<p>Help: {data.independent} independent · {data.assisted} assisted · {data.helpUnknown} unknown</p>
+		{data.medianTimerMin !== null && <p>Recorded timer: median {data.medianTimerMin} min ({data.timerCount} answers; may include other activities).</p>}
+		{data.medianElapsedMin !== null && <p>Elapsed question-to-answer: median {data.medianElapsedMin} min ({data.elapsedCount} answers; {data.elapsedOver3h} over 3h). This includes breaks and is not solving time.</p>}
+		{range === "last30" && <p>{insights.trend ? `Compared with the previous 30 days: correct ${insights.trend.correctRateDelta >= 0 ? "+" : ""}${insights.trend.correctRateDelta} pp, partial ${insights.trend.partialRateDelta >= 0 ? "+" : ""}${insights.trend.partialRateDelta} pp. Question difficulty may differ.` : "Not enough assessed answers across both periods to compare trends."}</p>}
+		{patterns.length > 0 && <div>Recurring topics (AI labels): {patterns.map((pattern) => <div key={`${pattern.topic}:${pattern.errorType}`}>{pattern.topic} · {pattern.errorType} · {pattern.count} {pattern.examples.map((item, index) => <a key={`${item.chatId}:${item.toolCallId ?? index}`} className="underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>answer {index + 1} </a>)}</div>)}</div>}
+	</div>;
+}
+
 export function PlannerCapacityModal({
 	open,
 	onClose,
@@ -55,6 +72,7 @@ export function PlannerCapacityModal({
 	const [calibrating, setCalibrating] = useState(false);
 	const [statusMsg, setStatusMsg] = useState<string | null>(null);
 	const [errMsg, setErrMsg] = useState<string | null>(null);
+	const [recallRange, setRecallRange] = useState<"last30" | "allTime">("last30");
 
 	const fetchReport = useCallback(async () => {
 		setLoading(true);
@@ -146,7 +164,7 @@ export function PlannerCapacityModal({
 						</div>
 						<div>
 							<h2 className="text-sm font-semibold text-foreground">
-								Cognitive &amp; Learning Capacity Diagnostics (&ldquo;Lực học cá nhân&rdquo;)
+								Learning Capacity Diagnostics
 							</h2>
 							<p className="text-[11px] text-muted-foreground">
 								Scientific metrics synthesized from FSRS-6 weights, Quiz Brier Calibration, Graph Foundations, Mistakes &amp; Past Sessions
@@ -346,9 +364,11 @@ export function PlannerCapacityModal({
 							{r.subjectBreakdown.length > 0 && (
 								<div>
 									<h3 className="mb-1.5 text-xs font-semibold text-foreground">Per-Subject Calibration Breakdown</h3>
+									<p className="mb-2 text-[11px] text-muted-foreground">FSRS uses confirmed reviews. Recall evidence is independent of FSRS and of the composite score. Practice solve rates and estimated minutes use Practice problems only; a dash means no eligible Practice data.</p>
+									<div className="mb-2 flex items-center gap-2 text-[11px]"><span>Recall period:</span><button type="button" aria-pressed={recallRange === "last30"} onClick={() => setRecallRange("last30")} className={cn("rounded border px-2 py-1", recallRange === "last30" && "bg-accent")}>Last 30 days</button><button type="button" aria-pressed={recallRange === "allTime"} onClick={() => setRecallRange("allTime")} className={cn("rounded border px-2 py-1", recallRange === "allTime" && "bg-accent")}>All time</button></div>
 									{r.dataCoverage.trackedPropositions < 5 && r.dataCoverage.graphNodes > 10 && (
 										<p className="mb-2 text-[11px] text-muted-foreground">
-											Mẹo: Mở tab <strong>FLASHCARDS</strong> chọn các cụm/node Graph để tạo thẻ ôn tập (hiện mới có {r.dataCoverage.trackedPropositions}/{r.dataCoverage.graphNodes} khái niệm có lịch FSRS), hoặc mở Practice từ node Graph để <code>conclude</code> tự ghi điểm FSRS.
+											Tip: Use Flashcards to create reviews from graph concepts ({r.dataCoverage.trackedPropositions}/{r.dataCoverage.graphNodes} currently tracked), or complete a Practice problem to record a review.
 										</p>
 									)}
 									<div className="overflow-x-auto rounded-xl border">
@@ -359,8 +379,9 @@ export function PlannerCapacityModal({
 													<th className="px-2 py-1.5 font-medium">Readiness</th>
 													<th className="px-2 py-1.5 font-medium">FSRS Ret. / S</th>
 													<th className="px-2 py-1.5 font-medium">Diff D</th>
-													<th className="px-2 py-1.5 font-medium">Solve / Min</th>
+													<th className="px-2 py-1.5 font-medium">Practice solve / est. min</th>
 													<th className="px-2 py-1.5 font-medium">Meta Bias</th>
+															<th className="px-2 py-1.5 font-medium">Recall evidence</th>
 													<th className="px-2.5 py-1.5 font-medium">Pace</th>
 												</tr>
 											</thead>
@@ -368,7 +389,7 @@ export function PlannerCapacityModal({
 												{r.subjectBreakdown.map((sub) => (
 													<tr key={sub.subject} className="hover:bg-muted/20">
 														<td className="px-2.5 py-1.5 font-medium text-foreground">{sub.subject}</td>
-														<td className="px-2 py-1.5 tabular-nums">{sub.readinessPct}%</td>
+																<td className="px-2 py-1.5 tabular-nums">{sub.readinessPct}%{sub.readinessBaseline ? " baseline" : ""}{sub.graphConcepts > 0 && <div className="text-muted-foreground">{sub.reviewedConcepts}/{sub.graphConcepts} reviewed</div>}</td>
 														<td className="px-2 py-1.5 tabular-nums">
 															{sub.retentionPct !== null ? `${sub.retentionPct}%` : "—"}
 															{sub.avgStabilityDays !== null ? ` · ${sub.avgStabilityDays}d` : ""}
@@ -385,7 +406,8 @@ export function PlannerCapacityModal({
 																? `${sub.quizBiasPct > 0 ? "+" : ""}${sub.quizBiasPct}%`
 																: "—"}
 														</td>
-														<td className="px-2.5 py-1.5 font-medium tabular-nums text-primary">{sub.paceFactor}×</td>
+															<td className="px-2 py-1.5 tabular-nums">{sub.recallInsights && sub.recallInsights[recallRange].responses ? <details><summary className="cursor-pointer">{sub.recallInsights[recallRange].responses} answers · {sub.recallInsights[recallRange].assessed} assessed</summary><RecallInsightsDetail insights={sub.recallInsights} range={recallRange} /></details> : "—"}</td>
+																<td className="px-2.5 py-1.5 font-medium tabular-nums text-primary">{sub.paceFactor}×{sub.paceBaseline ? " baseline" : ""}</td>
 													</tr>
 												))}
 											</tbody>
@@ -481,6 +503,7 @@ export function PlannerCapacityModal({
 								<MessageSquareTextIcon className="size-3 text-primary" /> Discuss in Coach Chat
 							</button>
 						)}
+						{r && <button type="button" onClick={() => { onClose(); onAskCoachWithReport("Hãy phân tích bằng chứng free recall theo từng môn trong báo cáo, phân biệt đúng, đúng một phần và chưa chắc; chỉ ra chủ đề nên luyện tiếp kèm số mẫu và mức độ tin cậy. Không tự sửa lịch hay dữ liệu."); }} className="inline-flex items-center gap-1 rounded-md border bg-background px-2.5 py-1.5 text-[11px] hover:bg-accent"><MessageSquareTextIcon className="size-3 text-primary" /> Discuss recall with Coach</button>}
 					</div>
 					<div className="flex items-center gap-2">
 						<button

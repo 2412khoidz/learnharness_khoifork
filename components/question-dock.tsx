@@ -13,6 +13,7 @@ import { PhoneUploadButton } from "@/components/phone-upload-button";
 import { MalformedQuestion } from "@/components/malformed-question";
 import { ToolContentResponse } from "@/components/ai-elements/message";
 import { QuestionPreview } from "@/components/question-preview";
+import { useRecallTimer } from "@/components/use-recall-timer";
 import { cn } from "@/lib/utils";
 import {
 	buildAnswer,
@@ -67,6 +68,7 @@ import { CONFIDENCE_COLORS, confidenceRailStyle } from "@/components/confidence-
  */
 
 export interface QuestionDockProps {
+	chatId?: string;
 	/** Private click-time view read: no draft save or dictation flush. */
 	viewReader?: ViewReaderRef<NativeQuestionViewState>;
 	toolName: "quiz" | "probe" | "ask_user_question" | "explain" | "recall";
@@ -114,6 +116,7 @@ export interface QuestionDockProps {
 }
 
 export function QuestionDock({
+	chatId = "unknown",
 	viewReader,
 	toolName,
 	toolCallId,
@@ -173,6 +176,8 @@ export function QuestionDock({
 			)}
 			<div className={expanded ? "dock-variant" : "invisible h-0 overflow-hidden"}>
 				<QuestionDockForm
+					key={`${chatId}:${toolCallId}`}
+					chatId={chatId}
 					viewReader={viewReader}
 					toolName={toolName}
 					toolCallId={toolCallId}
@@ -266,6 +271,7 @@ export function QuestionDockBar({
 
 /** The expanded question: label, question, options, and the unified bottom row. */
 function QuestionDockForm({
+	chatId = "unknown",
 	viewReader,
 	toolName,
 	toolCallId,
@@ -284,6 +290,8 @@ function QuestionDockForm({
 	workingRef,
 }: Omit<QuestionDockProps, "expanded" | "onExpand" | "reveal">) {
 	const kind = toolQuestionKind(toolName);
+	const timer = useRecallTimer(`${chatId}:${toolCallId}`, kind === "explain" && dictationClaim);
+	const [manualMinutes, setManualMinutes] = useState("");
 	const controller = useOptionalInteractionLayers();
 	const rootRef = useRef<HTMLDivElement>(null);
 
@@ -448,6 +456,7 @@ function QuestionDockForm({
 			// Always sent on quiz answers (owner: 50 must mean 50, never
 			// "untouched"); buildAnswer drops it on "I don't know".
 			confidence: kind === "quiz" ? CONFIDENCE_STOPS[confIdx] : undefined,
+			...(kind === "explain" ? timer.snapshot() : {}),
 		};
 		// Snapshot before optimistic submission unmounts the form. Ref values
 		// include the dictation finals that just landed, unlike stale closures.
@@ -894,6 +903,14 @@ function QuestionDockForm({
 			    send. Select modes get "Your thinking" (Enter makes a newline — it
 			    is for dumping, soon dictated; the button submits); text mode
 			    keeps "Your answer" with Enter-to-submit. */}
+			{kind === "explain" && timer.timer && <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-3 py-2 text-xs text-muted-foreground">
+				<span>Recall timer: {Math.floor(timer.elapsedMs / 60000)}:{String(Math.floor(timer.elapsedMs / 1000) % 60).padStart(2, "0")}</span>
+				<button type="button" className="rounded border px-2 py-1" onClick={timer.timer.runningSince === null ? timer.resume : timer.pause}>{timer.timer.runningSince === null ? "Resume" : "Pause"}</button>
+				<label>Minutes <input aria-label="Adjust recall time in minutes" type="number" min="0" max="10080" step="0.1" value={manualMinutes} onChange={(event) => setManualMinutes(event.target.value)} className="w-16 rounded border bg-background px-1 py-1" /></label>
+				<button type="button" disabled={!manualMinutes.trim()} onClick={() => { timer.adjust(Number(manualMinutes)); setManualMinutes(""); }} className="rounded border px-2 py-1 disabled:opacity-40">Set time</button>
+				<label>Help <select value={timer.timer.help} onChange={(event) => timer.setHelp(event.target.value as "unknown" | "independent" | "assisted")} className="rounded border bg-background p-1"><option value="unknown">Unknown</option><option value="independent">Independent</option><option value="assisted">Assisted</option></select></label>
+				{timer.timer.interrupted && <span>Timer interrupted; set the time to confirm it.</span>}
+			</div>}
 			<form
 				className="border-t border-border/60 p-1.5"
 				onSubmit={(e) => {

@@ -12,6 +12,8 @@ export * from "./graph-fsrs.ts";
 export * from "./exam-prep.ts";
 export * from "./mistakes.ts";
 export * from "./recall-scan.ts";
+export { confirmRecallFsrs, recallFsrsReviewData, undoRecallFsrsBatch, suggestRecallMappings } from "./recall-fsrs.ts";
+export { recallOverrideInfo, saveRecallOverride, type RecallOverride } from "./recall-overrides.ts";
 export * from "./planner.ts";
 export { readMistakes, writeMistakes, updateMistakes } from "../store/mistakes.ts";
 export { AnalysisUnavailable } from "./mistake-analysis.ts";

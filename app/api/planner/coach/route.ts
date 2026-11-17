@@ -5,6 +5,8 @@ import {
 	PlannerAiUnavailable,
 	undoPlannerCoachChangeServer,
 	prepareCoachAttachments,
+	confirmPlannerCoachProposal,
+	discardPlannerCoachProposal,
 } from "@/src/server";
 import { FormBodyLimitError, readBoundedFormData } from "@/lib/bounded-form-data.ts";
 
@@ -30,6 +32,13 @@ export async function POST(request: Request) {
 
 	const action = typeof body.action === "string" ? body.action : "send";
 	const date = typeof body.date === "string" ? body.date : undefined;
+	if (action === "confirm" || action === "discard") {
+		const id = typeof body.proposalId === "string" ? body.proposalId : "";
+		if (!id) return Response.json({ error: "Proposal ID is required." }, { status: 400 });
+		if (action === "discard") { discardPlannerCoachProposal(id); return Response.json({ discarded: true }); }
+		try { return Response.json(confirmPlannerCoachProposal(id), { headers: { "Cache-Control": "no-store" } }); }
+		catch (error) { return Response.json({ error: error instanceof Error ? error.message : "Could not apply proposal." }, { status: 409 }); }
+	}
 
 	if (action === "undo") {
 		const messageId = typeof body.messageId === "string" ? body.messageId : undefined;
@@ -64,6 +73,7 @@ export async function POST(request: Request) {
 			message,
 			focusArea,
 			preferredRole,
+			requireConfirmation: true,
 			date,
 			attachments: prepared.attachments,
 			attachmentText: prepared.attachmentText,

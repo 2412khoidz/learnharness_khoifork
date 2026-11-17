@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { useStickToBottomContext, type StickToBottomContext } from "use-stick-to-bottom";
-import { messageAnchorId, messageIdFromHash } from "@/src/core";
+import { messageAnchorId, messageIdFromHash, recallAnswerAnchorId } from "@/src/core";
 import type { VirtualTranscriptHandle } from "./virtual-transcript";
 
 export type SessionScrollContext = Pick<StickToBottomContext, "scrollRef" | "stopScroll">;
@@ -62,12 +62,14 @@ export function SessionMessageNavigation({ virtualTranscriptRef }: { virtualTran
 		if (virtualTranscriptRef?.current && lastJump.current?.hash === hash) return true;
 		const messageId = messageIdFromHash(hash);
 		const main = scrollRef.current;
-		const target = messageId ? document.getElementById(messageAnchorId(messageId)) : null;
+		const recallCall = new URLSearchParams(window.location.search).get("recallAnswer");
+		const targetId = messageId ? (recallCall ? recallAnswerAnchorId(messageId, recallCall) : messageAnchorId(messageId)) : null;
+		const target = targetId ? document.getElementById(targetId) : null;
 		if (!target && messageId && virtualTranscriptRef?.current && mounting.current !== messageId) {
 			mounting.current = messageId;
 			void virtualTranscriptRef.current.revealMessage(messageId).then(element => {
 				mounting.current = null;
-				if (element && document.getElementById(messageAnchorId(messageId)) && window.location.hash === hash) jumpRef.current();
+				if (element && targetId && document.getElementById(targetId) && window.location.hash === hash) jumpRef.current();
 			});
 		}
 		if (!main || !target || !main.contains(target)) return false;

@@ -10,8 +10,9 @@ import { SubmittedImages } from "./submitted-images";
 import { usePageSurfaceBoundary, SurfaceRegion } from "./plugin-surfaces";
 import { findSurfaceBoundary } from "./plugin-surface-targets";
 import { scheduleOpeningSubmission } from "./plugin-submission-opening";
-import { activeProblemOccurrenceOf, buildAnswer, toClientQuestion, type PluginSubmission, type PluginSubmissionTarget, type QuestionData } from "@/src/core";
+import { activeProblemOccurrenceOf, buildAnswer, toClientQuestion, recallAnswerAnchorId, type PluginSubmission, type PluginSubmissionTarget, type QuestionData } from "@/src/core";
 import { validatePluginBuiltinSubmissionAnswer } from "@/src/core";
+import type { AnswerRequest } from "@/src/core";
 import { visibleQueuedSteers } from "@/components/session-core";
 import { SetupDialog } from "@/components/setup-dialog";
 import { Hint } from "@/components/ui/hint";
@@ -730,8 +731,10 @@ export function Chat({
 	const prepareBuiltin: PrepareBuiltinSubmission = ({ question, capture, isCurrent }: BuiltinSubmissionCapture) => {
 		const target = builtinTarget(question), original = pending;
 		if (!target || !original || busyRef.current || compacting) return;
+		let recallEvidence: Pick<AnswerRequest, "recallTiming" | "recallHelp"> = {};
 		void runSubmission(target, () => {
 			const raw = capture();
+			recallEvidence = { recallTiming: raw.recallTiming, recallHelp: raw.recallHelp };
 			saveQuestionDraft(original.key, { readingThinking: readingThinkingRef.current });
 			return { type: "answer", answer: {
 				...(raw.dontKnow !== undefined ? { dontKnow: raw.dontKnow } : {}), ...(raw.values !== undefined ? { values: raw.values } : {}),
@@ -744,7 +747,7 @@ export function Chat({
 		}, async (prepared, attempt) => {
 			if (prepared.type !== "answer") return false;
 			const raw = validatePluginBuiltinSubmissionAnswer(question, prepared.answer);
-			const answer = buildAnswer(question, { ...raw, ...(prepared.thinking.text ? { thinking: prepared.thinking.text } : {}), ...(requiresReveal && prepared.readingThinking.text ? { readingThinking: prepared.readingThinking.text } : {}) }, original.tool);
+			const answer = buildAnswer(question, { ...raw, ...recallEvidence, ...(prepared.thinking.text ? { thinking: prepared.thinking.text } : {}), ...(requiresReveal && prepared.readingThinking.text ? { readingThinking: prepared.readingThinking.text } : {}) }, original.tool);
 			const images = submissionImages(prepared, target.channels);
 			// Save newer native edits without changing the prepared payload.
 			capture(); saveQuestionDraft(original.key, { readingThinking: readingThinkingRef.current });
@@ -2079,8 +2082,7 @@ export function Chat({
 															const isExplainPart = part.type === "tool-explain" || part.type === "tool-recall";
 															const callId = part.toolCallId;
 															return (
-																<AnsweredCard
-																	key={pi}
+																<div key={pi} id={isExplainPart && part.sourceMessageId && callId ? recallAnswerAnchorId(part.sourceMessageId, callId) : undefined}><AnsweredCard
 																	stateKey={`${part.sourceMessageId}:${part.sourceContentIndex}`}
 																	mistakeId={`${chatId}:${part.toolCallId}`}
 																	answer={part.output as QuestionAnswerData}
@@ -2104,7 +2106,8 @@ export function Chat({
 																			}
 																			: undefined
 																	}
-																/>
+																	/>
+																</div>
 															);
 														}
 														return null;
@@ -3077,6 +3080,7 @@ export function DockOverlay({
 								</div>
 							) : pending ? (
 								<QuestionDock
+									chatId={chatId}
 									viewReader={nativeViewReader}
 									toolName={pending.tool as "quiz" | "probe" | "ask_user_question" | "explain" | "recall"}
 									toolCallId={pending.toolCallId}

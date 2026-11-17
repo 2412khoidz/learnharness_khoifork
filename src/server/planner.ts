@@ -1,13 +1,27 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { prepareSubmissionImages } from "./submission-images.ts";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { ModelRole } from "../../config.ts";
-import { PATHS } from "../../config.ts";
+import { LEDGER_FILES, PATHS } from "../../config.ts";
+import { extractionStatuses } from "../agent/subagents/extraction.ts";
+import { readSettings, writeSettings } from "../store/settings.ts";
+import { SETTINGS_SECTIONS, type SettingsSectionName } from "./settings-body.ts";
+import { getGraph } from "../core/graph.ts";
+import { sanitizeUserSettings, type AgentSettings, type AppearanceSettings, type ModelsSettings, type UserSettings } from "../core/settings.ts";
+import type { ChatSettings } from "../core/contracts/chat.ts";
+import { isBuiltinThemeId } from "../core/themes.ts";
+import { validateChatSettings, validateModelsSettings, clampChatLevel, clampModelsLevels } from "./model-catalog.ts";
+import { themeStore } from "../store/themes.ts";
+import { promptOverrides } from "../store/prompt-overrides.ts";
+import { allSegmentPaths } from "../agent/prompt-segments.ts";
+import { refreshWorkerRequestAdmission } from "../agent/worker-request-admission.ts";
 import {
 	addDaysToDate,
+	archivePlannerPlan,
 	applyHabitCheckIn,
 	applyJournalEvaluationToConfig,
 	applyLlmPlanOutput,
@@ -24,6 +38,7 @@ import {
 	formatPlainMathPreview,
 	INTENSITY_STUDY_BOUNDS,
 	isValidDateString,
+	journalClockPoints,
 	localDateString,
 	normalizeSubjectKey,
 	parseClockMin,
@@ -34,11 +49,14 @@ import {
 	redactSensitiveJournalText,
 	resolveActiveBlockStatus,
 	sanitizePlannerConfig,
+	studyBlocksForAudit,
 	WEEKDAYS,
 	type ActiveBlockStatus,
 	type CoachChatAppliedChange,
 	type CoachChatMessage,
 	type CoachUndoSnapshot,
+	type CoachSessionMetadata,
+	type CoachGraphChange,
 	type CognitiveLoad,
 	type DailyStudyPlan,
 	type DayOverride,
@@ -70,14 +88,17 @@ import {
 	type LearningCapacityReport,
 	type PracticeOutcomeSample,
 	type QuizConfidenceSample,
+	type SubjectRecallEvidence,
 } from "../core/learning-capacity.ts";
 import type { ChatRecord } from "../core/contracts/chat.ts";
 import type { PlanTree } from "../core/contracts/plan.ts";
 import { parseFilePaths } from "../core/file-paths.ts";
 import { computeGraphFsrsSummary, emptyGraphFsrsSummary, type GraphFsrsSummary } from "../core/fsrs-graph.ts";
-import type { MistakeRecord } from "../core/mistakes.ts";
+import { collectRecallCandidates, type MistakeDraft, type MistakeRecord, type RecallScanResult, type RecallScanState } from "../core/mistakes.ts";
+import type { RecallObservation, RecallVerdict } from "../core/recall-insights.ts";
+import { readRecallOverrides, recallFingerprint } from "./recall-overrides.ts";
 import { birthSessionPartition } from "../core/session-clusters.ts";
-import { resolveRoleSpec } from "../core/settings-resolution.ts";
+import { resolveRoleSpec, resolveSettings } from "../core/settings-resolution.ts";
 import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
 import { emit } from "../core/events.ts";
 import { runSubagent } from "../agent/subagents/pi-run.ts";
@@ -502,7 +523,7 @@ function buildPlannerLearningProfile(opts: {
 	const allTeachMins: number[] = [];
 
 	const knownBucketSubjects = [...buckets.values()].map((b) => b.subject);
-	for (const s of sessions.slice(0, 40)) {
+	for (const s of sessions) {
 		const chat = readChatSafe(s.id, chatsDir);
 		if (!chat) continue;
 		const stats = computeActiveSessionStudyMinutes(chat);
@@ -754,7 +775,8 @@ export function buildPlannerPersonalSignals(
 		})
 		: readExamPrepStatus({ now });
 
-	const sessions = resolveChatsFallback(opts?.chatsDir);
+	const allSessions = resolveChatsFallback(opts?.chatsDir, Number.MAX_SAFE_INTEGER);
+	const sessions = allSessions.slice(0, 14);
 
 	// Per-cluster detailed graph + FSRS metrics (compact metadata only)
 	const subjectSignals: PlannerSubjectSignal[] = [];
@@ -907,7 +929,7 @@ export function buildPlannerPersonalSignals(
 		subjectSignals,
 		flashcards: loadedFlashcards,
 		propIdToSubject,
-		sessions: opts?.plannerFile && !opts.chatsDir ? [] : sessions,
+		sessions: opts?.plannerFile && !opts.chatsDir ? [] : allSessions,
 		chatsDir: opts?.chatsDir,
 	});
 
@@ -1090,6 +1112,7 @@ export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: str
 	// Use saved LLM/local plan for `date` if already generated, else compute fast 0-token local plan
 	let plan = synced.changed ? undefined : config.plans[date];
 	if (!plan) {
+		config = archivePlannerPlan(config, date, now);
 		plan = computeLocalPlannerPlan(config, signals, now);
 		config = savePlannerConfig(
 			{
@@ -1238,6 +1261,7 @@ export function patchPlannerConfig(
 		synced.changed;
 
 	if (scheduleInputsChanged || !resolvedNext.plans[date]) {
+		resolvedNext.planHistory = archivePlannerPlan(resolvedNext, date, now).planHistory;
 		const freshLocal = computeLocalPlannerPlan(resolvedNext, signals, now);
 		resolvedNext.plans = { ...resolvedNext.plans, [date]: freshLocal };
 	}
@@ -1263,7 +1287,7 @@ export function checkInPlannerHabit(
 	const current = readPlannerConfig(filePath);
 	const updated = applyHabitCheckIn(current, patch, now);
 	const saved = savePlannerConfig(updated, filePath);
-	return readPlannerSnapshot({ ...opts, date: patch.date ?? localDateString(now), now });
+	return readPlannerSnapshot({ ...opts, date: isValidDateString(patch.snapshotDate) ? patch.snapshotDate : patch.date ?? localDateString(now), now });
 }
 
 // ─── Shared Single-Submit Runner (supports optional vision images + extra tools) ───
@@ -1346,8 +1370,11 @@ function buildReplanContext(config: PlannerConfig, plan: DailyStudyPlan, date: s
 		sleepQuality: log?.sleepQuality ?? null,
 		journalText: log?.journalText ?? null,
 		actualEntries: log?.actualEntries ?? [],
+		habitCounts: log?.habitCounts ?? [],
 		loggedStudyMinBySubject: log?.loggedStudyMinBySubject ?? {},
 		completedBlockIds: log?.completedBlockIds ?? [],
+		earlierPlanStudyBlocks: studyBlocksForAudit(config, date, plan).filter((block) => !plan.blocks.some((current) => current.id === block.id && current.startMin === block.startMin && current.endMin === block.endMin)).map((block) => ({ id: block.id, startTime: block.startTime, endTime: block.endTime, title: block.title, subject: block.subject, completed: log?.completedBlockIds.includes(block.id) ?? false })),
+		previousPlanVersions: config.planHistory?.[date]?.length ?? 0,
 		mealsOk: log?.mealsOk ?? null,
 		hobbyDone: log?.hobbyDone ?? null,
 		note: log?.note ?? null,
@@ -1421,7 +1448,7 @@ export async function generatePlannerSchedule(opts: {
 	if (effectiveMode === "local") {
 		config = savePlannerConfig(
 			{
-				...config,
+				...archivePlannerPlan(config, date, now),
 				engineMode: opts.mode ? "local" : config.engineMode,
 				plans: { ...config.plans, [date]: baseline },
 				updatedAt: new Date(now).toISOString(),
@@ -1523,7 +1550,7 @@ STRICT RULES:
 	aiPlan.coachSummary = `${advice}${advice ? "\n\n" : ""}${actualScheduleText(aiPlan.blocks)}`.slice(0, 800);
 	config = savePlannerConfig(
 		{
-			...config,
+			...archivePlannerPlan(config, date, now),
 			engineMode: "llm",
 			plans: { ...config.plans, [date]: aiPlan },
 			updatedAt: new Date(now).toISOString(),
@@ -2246,9 +2273,7 @@ export async function evaluateDailyJournalServer(
 	});
 
 	const discreet = opts.discreet !== false;
-	const localEntries = discreet
-		? localEval.parsedEntries.map((e) => e.source === "manual" ? e : ({ ...e, title: redactSensitiveJournalText(e.title) || e.title }))
-		: localEval.parsedEntries;
+	const localEntries = localEval.parsedEntries;
 
 	if ((opts.mode ?? "local") === "local") {
 		const updated = applyJournalEvaluationToConfig(current, date, {
@@ -2280,7 +2305,7 @@ export async function evaluateDailyJournalServer(
 	const journalBodyForAi = journalBodyRaw;
 	const entriesForAi = opts.manualEntries ?? log?.actualEntries ?? [];
 
-	const plannedStudyBlocks = plan.blocks.filter((b) => b.type === "study");
+	const plannedStudyBlocks = studyBlocksForAudit(current, date, plan);
 	const isToday = date === localDateString(now);
 	const nowObj = new Date(now);
 	const nowClockMin = nowObj.getHours() * 60 + nowObj.getMinutes();
@@ -2289,22 +2314,25 @@ export async function evaluateDailyJournalServer(
 		return m !== null ? Math.max(mx, m) : mx;
 	}, 0);
 	const cutoffMin = Math.max(isToday ? nowClockMin : 24 * 60, lastLoggedEndMin);
-	const remainingPlannedBlocks = isToday ? plannedStudyBlocks.filter((b) => b.startMin >= cutoffMin) : [];
-	const remainingPlannedMin = remainingPlannedBlocks.reduce((a, b) => a + b.durationMin, 0);
+	const remainingPlannedBlocks = isToday ? plannedStudyBlocks.filter((b) => b.endMin > cutoffMin) : [];
+	const remainingPlannedMin = remainingPlannedBlocks.reduce((a, b) => a + Math.max(0, b.endMin - Math.max(b.startMin, cutoffMin)), 0);
 	const plannedSoFarMin = isToday
-		? plannedStudyBlocks.filter((b) => b.startMin < cutoffMin).reduce((a, b) => a + b.durationMin, 0)
+		? plannedStudyBlocks.filter((b) => b.endMin <= cutoffMin).reduce((a, b) => a + b.durationMin, 0)
 		: localEval.report.plannedStudyMin;
-	const isPartialMiddayLog = isToday && cutoffMin < 20 * 60 && remainingPlannedMin >= 30;
+	const isPartialMiddayLog = isToday && remainingPlannedMin > 0;
 
 	const prompt = JSON.stringify({
 		date,
 		isPartialMiddayLog,
+		scorable: localEval.report.scorable !== false,
 		currentClockTime: formatClockMin(cutoffMin),
-		plannedStudyHoursTotal: plan.plannedStudyHours,
+		actualClockTime: formatClockMin(nowClockMin),
+		plannedStudyHoursTotal: localEval.report.plannedStudyMin / 60,
 		plannedSoFarMin,
 		remainingPlannedStudyBlocks: remainingPlannedBlocks.map((b) => `${b.startTime}-${b.endTime} ${b.title}`),
 		plannedQuotas: plan.quotas.map((q) => ({ subject: q.subject, targetMin: q.targetMin })),
 		plannedBlocks: plan.blocks.map((b) => `${b.startTime}-${b.endTime} [${b.type}] ${b.title}`),
+		earlierPlanStudyBlocks: plannedStudyBlocks.filter((block) => !plan.blocks.some((current) => current.id === block.id && current.startMin === block.startMin && current.endMin === block.endMin)).map((block) => `${block.startTime}-${block.endTime} [study] ${block.title}`),
 		checkedBlocksCount: log?.completedBlockIds.length ?? 0,
 		manualEntries: entriesForAi,
 		journalText: journalBodyForAi.slice(0, 3500),
@@ -2332,7 +2360,7 @@ export async function evaluateDailyJournalServer(
 		role: resolved.role,
 		engine: resolved.engine,
 		systemPrompt:
-			"You are a candid, supportive Student Study Auditor. Parse the student's freeform journal against today's planned schedule, score honest adherencePct (0-100), extract structured activity entries with realistic minutes, note strengths & distractions/friction, and give concise practical advice. IMPORTANT: Keep output strictly discreet — never repeat explicit personal terms, keep any private break/reset neutral like '[Personal reset]'. If `isPartialMiddayLog` is true, score adherencePct relative to `plannedSoFarMin` (or neutral mid-day progress if no study block was due before `currentClockTime`) and NEVER treat `remainingPlannedStudyBlocks` later today as skipped failures; focus `nextDayAdvice` on finishing the remaining blocks today. Call submit_journal_evaluation once.",
+			"You are a candid, supportive Student Study Auditor. Parse free-form Vietnamese or English journal text into timeline entries and give concise practical advice. Clock abbreviations such as 8r mean 08:30. Use only explicitly stated time points: do not invent start or end times or fill gaps. When the journal says until now on the current day, actualClockTime may be the endpoint. Preserve meaningful activity descriptions and do not collapse a whole activity into a generic private label. If scorable is false, say there is not enough data to rate adherence and do not invent a percentage in your explanation. If isPartialMiddayLog is true, score only elapsed planned study and never treat upcoming blocks as skipped; focus advice on the remaining blocks. Call submit_journal_evaluation once.",
 		promptText: prompt,
 		toolName: "submit_journal_evaluation",
 		toolDescription: "Submit 24h Plan vs Actual compliance evaluation and extracted timeline.",
@@ -2344,13 +2372,27 @@ export async function evaluateDailyJournalServer(
 
 	const maskOut = (s: string) => (discreet ? redactSensitiveJournalText(s) : s);
 
-	const aiEntries: JournalActivityEntry[] = (aiOut.entries.length > 0 ? aiOut.entries : localEval.parsedEntries).map((e, i) => ({
+	// Accept natural-language ranges only when both clock points are explicitly present.
+	const groundedRanges = new Set(localEval.parsedEntries.map((entry) => `${entry.startTime}-${entry.endTime}`));
+	const groundedClocks = journalClockPoints(journalBodyRaw);
+	if (isToday && /\b(?:toi gio|den gio|toi bay gio|den bay gio|until now|up to now)\b/.test(normalizeSubjectKey(journalBodyRaw))) groundedClocks.add(formatClockMin(nowClockMin));
+	const seenRanges = new Set<string>();
+	const groundedAi = aiOut.entries.flatMap((entry) => {
+		const start = parseClockMin(entry.startTime), end = parseClockMin(entry.endTime);
+		if (start === null || end === null || start === end) return [];
+		if (isToday && (start > nowClockMin || end > nowClockMin || end < start)) return [];
+		const startTime = formatClockMin(start), endTime = formatClockMin(end), key = `${startTime}-${endTime}`;
+		if ((!groundedRanges.has(key) && !(groundedClocks.has(startTime) && groundedClocks.has(endTime))) || seenRanges.has(key)) return [];
+		seenRanges.add(key);
+		return [{ ...entry, startTime, endTime, minutes: Math.min(720, (end - start + 1440) % 1440) }];
+	});
+	const aiEntries: JournalActivityEntry[] = (groundedAi.length ? groundedAi : localEval.parsedEntries).map((e, i) => ({
 		id: `jai_${date}_${i}`,
-		startTime: typeof e.startTime === "string" && e.startTime.trim() ? e.startTime.trim().slice(0, 8) : "08:00",
-		endTime: typeof e.endTime === "string" && e.endTime.trim() ? e.endTime.trim().slice(0, 8) : "09:00",
+		startTime: e.startTime,
+		endTime: e.endTime,
 		category: e.category,
 		...(typeof e.subject === "string" && e.subject.trim() ? { subject: e.subject.trim().slice(0, 80) } : {}),
-		title: maskOut(String(e.title || "Logged activity").trim()).slice(0, 140),
+		title: String(e.title || "Logged activity").trim().slice(0, 140),
 		minutes: Math.max(5, Math.min(720, Math.round(Number(e.minutes) || 30))),
 		source: "ai_extracted",
 	}));
@@ -2360,30 +2402,31 @@ export async function evaluateDailyJournalServer(
 	const combinedEntries = [
 		...manualEntries,
 		...aiEntries.filter((entry) => !manualEntries.some((manual) =>
-			manual.startTime === entry.startTime && manual.endTime === entry.endTime && manual.category === entry.category)),
+			manual.startTime === entry.startTime && manual.endTime === entry.endTime)),
+		...localEntries.filter((entry) => entry.source !== "manual" && !aiEntries.some((item) => item.startTime === entry.startTime && item.endTime === entry.endTime) && !manualEntries.some((item) => item.startTime === entry.startTime && item.endTime === entry.endTime)),
 	];
 
-	const plannedStudyMin = Math.max(30, localEval.report.plannedStudyMin);
-	const actualStudyMin = Math.max(0, Math.min(960, Math.round(Number(aiOut.actualStudyMin) || 0)));
-	const prevRealism = current.realismFactor ?? 1.0;
-	const observedRealism = isPartialMiddayLog ? prevRealism : Math.max(0.4, Math.min(1.35, actualStudyMin / plannedStudyMin));
-	const suggestedRealismFactor = isPartialMiddayLog
-		? prevRealism
-		: Math.max(0.65, Math.min(1.25, Math.round((prevRealism * 0.75 + observedRealism * 0.25) * 100) / 100));
+	const groundedEval = evaluatePlanVsActualLocal({ date, plan, log, config: current, journalText: "", manualEntries: combinedEntries.map((entry) => ({ ...entry, source: "manual" as const })), knownSubjects, now });
+	const actualStudyMin = groundedEval.report.actualStudyMin;
+	const scorable = groundedEval.report.scorable !== false;
+	const mismatchedStudyMinutes = Math.round(Number(aiOut.actualStudyMin) || 0) !== actualStudyMin || (scorable && Math.round(Number(aiOut.adherencePct) || 0) !== groundedEval.report.adherencePct);
+	const observedRealism = groundedEval.report.realismRatio;
+	const suggestedRealismFactor = groundedEval.suggestedRealismFactor;
 
 	const report: PlanComplianceReport = {
 		date,
 		evaluatedAt: new Date(now).toISOString(),
 		evaluatedBy: "llm",
 		modelLabel: resolved.modelLabel,
-		adherencePct: Math.max(0, Math.min(100, Math.round(Number(aiOut.adherencePct) || 0))),
-		plannedStudyMin: localEval.report.plannedStudyMin,
+		adherencePct: groundedEval.report.adherencePct,
+		scorable,
+		plannedStudyMin: groundedEval.report.plannedStudyMin,
 		actualStudyMin,
 		realismRatio: Math.round(observedRealism * 100) / 100,
-		summary: maskOut(aiOut.summary.trim()).slice(0, 600),
-		strengths: aiOut.strengths.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
-		frictionPoints: aiOut.frictionPoints.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
-		nextDayAdvice: maskOut(aiOut.nextDayAdvice.trim()).slice(0, 260),
+		summary: !scorable ? "Not enough data to score this plan yet." : mismatchedStudyMinutes ? `Recorded ${(actualStudyMin / 60).toFixed(1)}h of study against ${(localEval.report.plannedStudyMin / 60).toFixed(1)}h planned. Review the recorded entries for details.` : maskOut(aiOut.summary.trim()).slice(0, 600),
+		strengths: mismatchedStudyMinutes ? [] : aiOut.strengths.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean),
+		frictionPoints: scorable && !mismatchedStudyMinutes ? aiOut.frictionPoints.slice(0, 6).map((s) => maskOut(String(s).trim()).slice(0, 180)).filter(Boolean) : [],
+		nextDayAdvice: scorable && !mismatchedStudyMinutes ? maskOut(aiOut.nextDayAdvice.trim()).slice(0, 260) : groundedEval.report.nextDayAdvice,
 	};
 
 	const updated = applyJournalEvaluationToConfig(current, date, {
@@ -2566,15 +2609,27 @@ function collectQuizAndPracticeSamples(opts: {
 	quizSamples: QuizConfidenceSample[];
 	practiceSamples: PracticeOutcomeSample[];
 	recallExplainCount: number;
+	recallBySubject: Record<string, SubjectRecallEvidence>;
+	subjectBySessionId: Map<string, string>;
+	recallAnswerIds: Set<string>;
+	recallFlags: Array<{ id: string; chatId: string; verdict: RecallScanResult["verdict"] }>;
+	recallObservations: Map<string, { observation: RecallObservation; draft?: MistakeDraft }>;
 } {
 	const quizSamples: QuizConfidenceSample[] = [];
 	const practiceSamples: PracticeOutcomeSample[] = [];
 	let recallExplainCount = 0;
+	const recallBySubject: Record<string, SubjectRecallEvidence> = {};
+	const subjectBySessionId = new Map<string, string>();
+	const recallAnswerIds = new Set<string>();
+	const recallFlags: Array<{ id: string; chatId: string; verdict: RecallScanResult["verdict"] }> = [];
+	const recallObservations = new Map<string, { observation: RecallObservation; draft?: MistakeDraft }>();
+	const evidenceFor = (subject: string) => recallBySubject[normalizeSubjectKey(subject)] ??= { responses: 0, assessed: 0, correct: 0, partial: 0, wrong: 0, dontKnow: 0, uncertain: 0 };
 
 	const pushQuizDetail = (detail: Record<string, unknown>, origin: string, subject: string | undefined, sessionTitle: string) => {
 		if (detail.dismissed || detail.byVoice) return;
 		if (origin === "explain" || origin === "recall" || origin === "coding_question") {
 			recallExplainCount++;
+			if (subject && (origin === "explain" || origin === "recall")) evidenceFor(subject).responses++;
 		}
 		const dontKnow = Boolean(detail.dontKnow);
 		const isGraded = detail.correct === true || detail.correct === false || dontKnow;
@@ -2598,7 +2653,10 @@ function collectQuizAndPracticeSamples(opts: {
 		if (!chat) continue;
 		const sessionTitle = chat.title || s.title;
 		const subject = matchKnownSubject(sessionTitle, opts.knownSubjects, extractFirstUserMessageText(chat));
+		if (subject) subjectBySessionId.set(s.id, subject);
 		const msgs = Array.isArray(chat.messages) ? chat.messages : [];
+		const drafts = new Map(collectRecallCandidates(s.id, chat.messages).map((candidate) => [candidate.draft.id, candidate.draft]));
+		const questionTimes = new Map<string, { time: number | null; sourceMessageId?: string }>();
 		let lastProblemTs: number | null = null;
 		let firstAttemptTs: number | null = null;
 		const concludedCallIds = new Set<string>();
@@ -2612,6 +2670,7 @@ function collectQuizAndPracticeSamples(opts: {
 			for (const blk of content as Array<Record<string, unknown>>) {
 				if (blk.type !== "toolCall") continue;
 				const callName = typeof blk.name === "string" ? blk.name : "";
+				if ((callName === "recall" || callName === "explain") && typeof blk.id === "string") questionTimes.set(blk.id, { time: ts, ...(typeof m.id === "string" ? { sourceMessageId: m.id } : {}) });
 				if (callName === "problem" && ts !== null) {
 					lastProblemTs = ts;
 					firstAttemptTs = null;
@@ -2639,6 +2698,21 @@ function collectQuizAndPracticeSamples(opts: {
 			const toolName = typeof m.toolName === "string" ? m.toolName : "";
 			if (m.isError) continue;
 			const details = m.details as Record<string, unknown> | undefined;
+			if ((toolName === "recall" || toolName === "explain") && typeof m.toolCallId === "string" && details && !details.dismissed && !details.byVoice) {
+				const id = `${s.id}:${m.toolCallId}`;
+				recallAnswerIds.add(id);
+				if (subject) {
+					const draft = drafts.get(id), start = questionTimes.get(m.toolCallId);
+					const elapsedMs = start?.time != null && ts !== null && ts >= start.time ? ts - start.time : undefined;
+					const timing = details.recallTiming as { timerMs?: unknown; interrupted?: unknown } | undefined;
+					const timerMs = timing && timing.interrupted !== true && typeof timing.timerMs === "number" && Number.isFinite(timing.timerMs) && timing.timerMs >= 0 ? timing.timerMs : undefined;
+					const help = details.recallHelp === "independent" || details.recallHelp === "assisted" ? details.recallHelp : "unknown";
+					recallObservations.set(id, { observation: { id, chatId: s.id, toolCallId: m.toolCallId, ...(start?.sourceMessageId ? { sourceMessageId: start.sourceMessageId } : {}), subject, answeredAt: draft?.answeredAt ?? (typeof details.answeredAt === "string" ? details.answeredAt : ts !== null ? new Date(ts).toISOString() : ""), ...(elapsedMs !== undefined ? { elapsedMs } : {}), ...(timerMs !== undefined ? { timerMs } : {}), help }, ...(draft ? { draft } : {}) });
+				}
+			}
+			if (toolName === "flag_mistake" && details && typeof details.targetToolCallId === "string" && typeof details.verdict === "string" && ["correct", "partial", "wrong", "dont_know", "uncertain"].includes(details.verdict)) {
+				recallFlags.push({ id: `${s.id}:${details.targetToolCallId}`, chatId: s.id, verdict: details.verdict as RecallScanResult["verdict"] });
+			}
 
 			if (QUIZ_RESULT_TOOLS.has(toolName) || toolName === "coding_question") {
 				if (!details || typeof details !== "object") continue;
@@ -2671,7 +2745,7 @@ function collectQuizAndPracticeSamples(opts: {
 		}
 	}
 
-	return { quizSamples, practiceSamples, recallExplainCount };
+	return { quizSamples, practiceSamples, recallExplainCount, recallBySubject, subjectBySessionId, recallAnswerIds, recallFlags, recallObservations };
 }
 
 export function readPlannerLearningCapacityServer(
@@ -2718,16 +2792,65 @@ export function readPlannerLearningCapacityServer(
 		// ignore uninitialized graph/flashcards
 	}
 
-	const sessions = opts?.plannerFile && !opts.chatsDir ? [] : resolveChatsFallback(opts?.chatsDir, 40);
+	const sessions = opts?.plannerFile && !opts.chatsDir ? [] : resolveChatsFallback(opts?.chatsDir, Number.MAX_SAFE_INTEGER);
 	const knownSubjects = [
 		...signals.subjectSignals.map((s) => s.label),
 		...config.milestones.map((m) => m.subject),
 	];
-	const { quizSamples, practiceSamples, recallExplainCount } = collectQuizAndPracticeSamples({
+	const { quizSamples, practiceSamples, recallExplainCount, recallBySubject, subjectBySessionId, recallAnswerIds, recallFlags, recallObservations } = collectQuizAndPracticeSamples({
 		sessions,
 		knownSubjects,
 		chatsDir: opts?.chatsDir,
 	});
+	// Scan assessments stay separate from FSRS/quiz scores and are attributed
+	// through the original session ID, never guessed from the answer text.
+	const evidenceDir = path.dirname(opts?.plannerFile ?? defaultPlannerPath());
+	const assessments = new Map<string, { chatId: string; verdict: RecallScanResult["verdict"]; draft?: MistakeDraft; topic?: string; errorType?: string }>();
+	try {
+		const scan = JSON.parse(fs.readFileSync(path.join(evidenceDir, "recall-scan.json"), "utf8")) as Partial<RecallScanState>;
+		for (const result of Array.isArray(scan.results) ? scan.results : []) {
+			if (result.id && result.draft?.chatId) assessments.set(result.id, { chatId: result.draft.chatId, verdict: result.verdict, draft: result.draft, topic: result.topic, errorType: result.errorType });
+		}
+	} catch { /* optional scan */ }
+	try {
+		const live = JSON.parse(fs.readFileSync(path.join(evidenceDir, "recall-live-grades.json"), "utf8")) as Array<{ result?: RecallScanResult }>;
+		for (const entry of Array.isArray(live) ? live : []) {
+			const result = entry.result;
+			if (result?.id && result.draft?.chatId) assessments.set(result.id, { chatId: result.draft.chatId, verdict: result.verdict, draft: result.draft, topic: result.topic, errorType: result.errorType });
+		}
+	} catch { /* optional live assessments */ }
+	for (const flag of recallFlags) assessments.set(flag.id, { ...assessments.get(flag.id), chatId: flag.chatId, verdict: flag.verdict });
+	for (const [id, { chatId, verdict, draft, topic, errorType }] of assessments) {
+			const subject = subjectBySessionId.get(chatId);
+			if (!subject || !recallAnswerIds.has(id) || !["correct", "partial", "wrong", "dont_know", "uncertain"].includes(verdict)) continue;
+			const row = recallObservations.get(id);
+			if (draft && row && (!row.draft || recallFingerprint(draft) !== recallFingerprint(row.draft))) { row.observation.staleAssessment = true; continue; }
+			if (row) Object.assign(row.observation, { verdict, source: "ai", ...(topic ? { topic } : {}), ...(errorType ? { errorType } : {}) });
+			const key = normalizeSubjectKey(subject);
+			const evidence = recallBySubject[key] ??= { responses: 0, assessed: 0, correct: 0, partial: 0, wrong: 0, dontKnow: 0, uncertain: 0 };
+			evidence.assessed++;
+			if (verdict === "dont_know") evidence.dontKnow++;
+			else evidence[verdict]++;
+	}
+	for (const override of readRecallOverrides(evidenceDir)) {
+		const row = recallObservations.get(override.id);
+		if (!row) continue;
+		if (!row.draft || recallFingerprint(row.draft) !== override.fingerprint) { row.observation.staleAssessment = true; continue; }
+		if (override.verdict) {
+			const evidence = recallBySubject[normalizeSubjectKey(row.observation.subject)];
+			const previous = row.observation.verdict;
+			if (evidence) {
+				if (previous) { const key = previous === "dont_know" ? "dontKnow" : previous; evidence[key] = Math.max(0, evidence[key] - 1); }
+				else evidence.assessed++;
+				const key = override.verdict === "dont_know" ? "dontKnow" : override.verdict; evidence[key]++;
+			}
+			row.observation.verdict = override.verdict as RecallVerdict; row.observation.source = "user"; row.observation.staleAssessment = false;
+		}
+		if (override.help) row.observation.help = override.help;
+		if (override.timerMs !== undefined) row.observation.timerMs = override.timerMs;
+	}
+	const recallObservationsBySubject: Record<string, RecallObservation[]> = {};
+	for (const { observation } of recallObservations.values()) (recallObservationsBySubject[normalizeSubjectKey(observation.subject)] ??= []).push(observation);
 	const mistakes: MistakeRecord[] = opts?.mistakesFile
 		? readMistakes(opts.mistakesFile)
 		: isolatedTestMode
@@ -2745,6 +2868,9 @@ export function readPlannerLearningCapacityServer(
 		quizSamples,
 		practiceSamples,
 		recallExplainCount,
+		recallBySubject,
+		recallObservationsBySubject,
+		pastChatSessionCount: sessions.length,
 		mistakes,
 		now,
 	});
@@ -2817,7 +2943,7 @@ export async function diagnoseLearningCapacityWithAiServer(
 		engine: resolved.engine,
 		systemPrompt: `You are a Cognitive Science & Learning Analytics Coach inside ChronoHarness.
 Interpret the student's quantitative Learning Capacity telemetry (FSRS-6 Stability/Difficulty/Retention, Brier Metacognitive Calibration & Confidence Bias, Problem-Solving Velocity, Graph Foundation Risk, Error Taxonomy, Circadian Adherence) and call submit_capacity_diagnosis ONCE.
-Be strictly honest about sample counts: never invent data. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
+Be strictly honest about sample counts: never invent data. recallEvidence and recallInsights summarize the same answers, not independent samples. recallInsights combines provisional AI assessments and learner corrections; distinguish their sources, and separate partial and uncertain answers. It is not an FSRS review or a validated capacity score. Suggest specific practice topics from recurring recall patterns when available. Elapsed question-to-answer time includes breaks and is not solving speed. A readinessBaseline or paceBaseline is a default, not a measurement of the student's ability. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
 		promptText: JSON.stringify({
 			learningCapacityReport: report,
 			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 5) ?? [],
@@ -2856,6 +2982,10 @@ const coachTurnSchema = Type.Object({
 	reply: Type.String({ description: "Warm, concrete coaching reply citing actual user metrics, files, sleep or graph state." }),
 	shouldApplyChanges: Type.Boolean({ description: "True if applying edits to today's schedule/routine, today check-in log, or persistent lifestyle/habits." }),
 	changesSummary: Type.Optional(Type.String({ description: "Concise summary of applied updates." })),
+	sessionOperations: Type.Optional(Type.Array(Type.Object({ id: Type.String(), title: Type.Optional(Type.String()), notes: Type.Optional(Type.String()), pinned: Type.Optional(Type.Boolean()), archived: Type.Optional(Type.Boolean()) }))),
+	graphNodeOperations: Type.Optional(Type.Array(Type.Object({ id: Type.String(), name: Type.Optional(Type.String()), statement: Type.Optional(Type.String()) }))),
+	settingsOperations: Type.Optional(Type.Array(Type.Object({ section: Type.Union([Type.Literal("general"), Type.Literal("chat"), Type.Literal("agent"), Type.Literal("appearance"), Type.Literal("graph"), Type.Literal("compaction"), Type.Literal("models"), Type.Literal("dictation"), Type.Literal("claudeCode")]), patchJson: Type.String({ description: "JSON object containing only the settings to change." }) }))),
+	habitCountOperations: Type.Optional(Type.Array(Type.Object({ action: Type.Union([Type.Literal("add"), Type.Literal("update"), Type.Literal("delete")]), date: Type.String(), id: Type.Optional(Type.String()), name: Type.Optional(Type.String()), count: Type.Optional(Type.Number()) }))),
 	regenerateTodaySchedule: Type.Optional(Type.Boolean({ description: "Recompute today's blocks smoothly with updated settings/focus/hours." })),
 	examTimetableOperations: Type.Optional(Type.Array(Type.Object({
 		action: Type.Union([Type.Literal("add"), Type.Literal("update"), Type.Literal("delete")]),
@@ -2996,6 +3126,10 @@ interface CoachTurnOut {
 	reply: string;
 	shouldApplyChanges: boolean;
 	changesSummary?: string;
+	sessionOperations?: Array<{ id: string; title?: string; notes?: string; pinned?: boolean; archived?: boolean }>;
+	graphNodeOperations?: Array<{ id: string; name?: string; statement?: string }>;
+	settingsOperations?: Array<{ section: SettingsSectionName; patchJson: string }>;
+	habitCountOperations?: Array<{ action: "add" | "update" | "delete"; date: string; id?: string; name?: string; count?: number }>;
 	regenerateTodaySchedule?: boolean;
 	examTimetableOperations?: Array<Partial<ExamTimetableEntry> & { action: "add" | "update" | "delete" }>;
 	weeklyEventOperations?: Array<{ action: "add" | "update" | "delete"; id?: string; dayOfWeek?: FixedWeeklyEvent["dayOfWeek"]; startTime?: string; endTime?: string; title?: string; category?: FixedWeeklyEvent["category"] }>;
@@ -3082,6 +3216,141 @@ function coachExamState(config: ExamPrepConfig): ExamPrepConfig {
 	return { ...sanitizeExamPrepConfig(config), updatedAt: "" };
 }
 
+export interface PlannerCoachProposalPreview {
+	id: string;
+	summary: string;
+	advice?: string;
+	changes: Record<string, { before: unknown; after: unknown }>;
+}
+
+interface PendingPlannerCoachProposal {
+	preview: PlannerCoachProposalPreview;
+	createdAt: number;
+	referenceAt: number;
+	date: string;
+	plannerFile: string;
+	examPrepFile?: string;
+	before: PlannerConfig;
+	after: PlannerConfig;
+	beforeExam?: ExamPrepConfig;
+	afterExam?: ExamPrepConfig;
+	sessionChanges?: NonNullable<CoachUndoSnapshot["sessionChanges"]>;
+	graphChanges?: CoachGraphChange[];
+	beforeSettings?: UserSettings;
+	afterSettings?: UserSettings;
+	settingsRequests?: Array<{ section: SettingsSectionName; patch: Record<string, unknown> }>;
+	userMessage: CoachChatMessage;
+	assistantMessage: CoachChatMessage;
+}
+
+function sessionMetadata(id: string): CoachSessionMetadata | null {
+	const chat = stores.chatStore.getChat(id);
+	return chat ? { title: chat.title, notes: chat.notes ?? "", pinned: Boolean(chat.pinned), archived: Boolean(chat.archived) } : null;
+}
+
+function writeSessionMetadata(id: string, value: CoachSessionMetadata): void {
+	if (!stores.chatStore.updateChatMeta) throw new Error("Session editing is unavailable.");
+	const current = sessionMetadata(id);
+	if (!current) throw new Error("Session no longer exists.");
+	try {
+		if (current.title !== value.title) stores.chatStore.renameChat(id, value.title);
+		if (current.notes !== value.notes || current.pinned !== value.pinned || current.archived !== value.archived) stores.chatStore.updateChatMeta(id, { notes: value.notes, pinned: value.pinned, archived: value.archived });
+	} catch (error) {
+		try { stores.chatStore.renameChat(id, current.title); stores.chatStore.updateChatMeta(id, { notes: current.notes, pinned: current.pinned, archived: current.archived }); } catch { /* surface the original failure */ }
+		throw error;
+	}
+}
+
+function graphRowsHash(rows: ReturnType<typeof stores.graphStore.readNodes>): string {
+	return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
+}
+
+/** Refuse to rewrite a partially unreadable ledger, preserving every original line. */
+function readableGraphNodes() {
+	const raw = fs.existsSync(LEDGER_FILES.nodes) ? fs.readFileSync(LEDGER_FILES.nodes, "utf8") : "";
+	const lines = raw.split(/\r?\n/).filter((line) => line.trim());
+	const nodes = stores.graphStore.readNodes();
+	if (lines.length !== nodes.length) throw new Error("Graph ledger contains unreadable records; it cannot be edited safely.");
+	return nodes;
+}
+
+function writeGraphChanges(changes: readonly CoachGraphChange[], direction: "apply" | "undo"): void {
+	if (!changes.length) return;
+	if (extractionStatuses().length) throw new Error("Graph extraction is running. Try again when it finishes.");
+	const nodes = readableGraphNodes();
+	for (const change of changes) {
+		const rows = nodes.filter((node) => node.id === change.id);
+		if (!rows.length || graphRowsHash(rows) !== (direction === "apply" ? change.beforeHash : change.afterHash)) throw new Error("A graph concept changed since this proposal.");
+		const index = nodes.findIndex((node) => node.id === change.id);
+		nodes[index] = { ...nodes[index]!, ...(direction === "apply" ? change.after : change.before) };
+		if (graphRowsHash(nodes.filter((node) => node.id === change.id)) !== (direction === "apply" ? change.afterHash : change.beforeHash)) throw new Error("Graph proposal no longer matches the saved concept.");
+	}
+	stores.graphStore.rewriteLedgers({ nodes });
+}
+
+function mergeSettingsPatch(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+	const result = { ...base };
+	for (const [key, value] of Object.entries(patch)) {
+		if (["__proto__", "prototype", "constructor"].includes(key)) throw new Error("Invalid settings field.");
+		const prior = result[key];
+		result[key] = value && typeof value === "object" && !Array.isArray(value)
+			? mergeSettingsPatch(prior && typeof prior === "object" && !Array.isArray(prior) ? prior as Record<string, unknown> : {}, value as Record<string, unknown>) : value;
+	}
+	return result;
+}
+
+function containsSettingsPatch(patch: Record<string, unknown>, value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const output = value as Record<string, unknown>;
+	return Object.entries(patch).every(([key, part]) => Object.hasOwn(output, key) && (!(part && typeof part === "object" && !Array.isArray(part)) || containsSettingsPatch(part as Record<string, unknown>, output[key])));
+}
+
+/** The same shape and catalog gates used by the Settings screen, without writing. */
+function prepareCoachSettings(section: SettingsSectionName, patch: Record<string, unknown>, record: UserSettings): UserSettings {
+	const previous = record[section] ?? {};
+	const parsed = SETTINGS_SECTIONS[section](mergeSettingsPatch(previous as Record<string, unknown>, patch));
+	if (!parsed.ok || !containsSettingsPatch(patch, parsed.settings)) throw new Error("Unsupported or invalid setting.");
+	let value: unknown = parsed.settings;
+	if (section === "chat") {
+		const verdict = validateChatSettings(value as ChatSettings); if (!verdict.ok) throw new Error(verdict.error);
+		value = clampChatLevel(value as ChatSettings, resolveSettings(record).models.strong);
+	} else if (section === "models") {
+		const verdict = validateModelsSettings(value as ModelsSettings, record.models); if (!verdict.ok) throw new Error(verdict.error);
+		value = clampModelsLevels(value as ModelsSettings);
+	} else if (section === "appearance") {
+		const appearance = value as AppearanceSettings;
+		if (appearance.theme !== undefined && !isBuiltinThemeId(appearance.theme) && themeStore.readTheme(appearance.theme) === null) {
+			if (appearance.theme !== record.appearance?.theme) throw new Error("Unknown theme.");
+			value = { ...appearance, theme: "default" };
+		}
+	} else if (section === "agent") {
+		const agent = value as AgentSettings, segments = new Set(allSegmentPaths());
+		if (Object.entries(agent.prompts ?? {}).some(([key, enabled]) => enabled && (!segments.has(key) || promptOverrides.readOverride(key) === null))) throw new Error("A selected prompt override is unavailable.");
+	}
+	const result = sanitizeUserSettings({ ...record, [section]: value });
+	if (!result || !containsSettingsPatch(patch, result[section])) throw new Error("Unsupported or invalid setting.");
+	return result;
+}
+
+const coachProposals = (): Map<string, PendingPlannerCoachProposal> => {
+	const state = globalThis as typeof globalThis & { __lhCoachProposals?: Map<string, PendingPlannerCoachProposal> };
+	return state.__lhCoachProposals ??= new Map();
+};
+
+function proposalChanges(before: PlannerConfig, after: PlannerConfig): PlannerCoachProposalPreview["changes"] {
+	const changes: PlannerCoachProposalPreview["changes"] = {};
+	for (const key of new Set([...Object.keys(before), ...Object.keys(after)]) as Set<keyof PlannerConfig>) {
+		if (key === "coachChat" || key === "lastCoachUndo" || key === "updatedAt") continue;
+		if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue;
+		if (key === "logs" || key === "plans" || key === "planHistory" || key === "dayOverrides") {
+			const oldMap = (before[key] ?? {}) as Record<string, unknown>, newMap = (after[key] ?? {}) as Record<string, unknown>;
+			const dates = [...new Set([...Object.keys(oldMap), ...Object.keys(newMap)])].filter((date) => JSON.stringify(oldMap[date]) !== JSON.stringify(newMap[date]));
+			changes[key] = { before: Object.fromEntries(dates.map((date) => [date, oldMap[date] ?? null])), after: Object.fromEntries(dates.map((date) => [date, newMap[date] ?? null])) };
+		} else changes[key] = { before: before[key] ?? null, after: after[key] ?? null };
+	}
+	return changes;
+}
+
 /** Dated entries are selected from a small index; never silently claim the model saw all logs. */
 function coachJournalContext(config: PlannerConfig, message: string, date: string) {
 	const dates = Object.keys(config.logs).sort().reverse();
@@ -3157,12 +3426,14 @@ export async function chatWithPlannerCoachServer(
 		chatsDir?: string;
 		date?: string;
 		engineOverride?: PiEngine;
+		requireConfirmation?: boolean;
 		signal?: AbortSignal;
 	},
 ): Promise<{
 	snapshot: PlannerSnapshotResponse;
 	assistantMessage: CoachChatMessage;
 	appliedChange?: CoachChatAppliedChange;
+	proposal?: PlannerCoachProposalPreview;
 }> {
 	const userText = opts.message.trim().slice(0, 2000);
 	if (!userText && !(opts.attachments?.length)) throw new Error("Message cannot be empty.");
@@ -3206,6 +3477,36 @@ export async function chatWithPlannerCoachServer(
 	}));
 
 	const digest = buildCompactPlannerDigest(current, signals, todayPlan);
+	const recentSessionContext = signals.recentSessions.map((session) => {
+		const chat = opts.plannerFile && !opts.chatsDir ? null : readChatSafe(session.id, opts.chatsDir);
+		const excerpts = (chat?.messages ?? []).filter((message) => message.role === "user" || message.role === "assistant").slice(-2).map((message) => {
+			const content = message.content;
+			const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter((part) => part.type === "text").map((part) => part.text).join(" ") : "";
+			return { role: message.role, text: text.slice(0, 400) };
+		}).filter((item) => item.text);
+		return { id: session.id, title: session.title, kind: session.kind, updatedAt: session.updatedAt, ...(chat?.notes ? { notesExcerpt: chat.notes.slice(0, 800) } : {}), ...(chat?.tree?.nodes ? { topics: chat.tree.nodes.slice(0, 20).map((node) => node.title) } : {}), excerpts };
+	});
+	const graphContext = (() => {
+		if (opts.plannerFile && !opts.chatsDir) return { available: false, concepts: [], chains: [], totalConcepts: 0, totalChains: 0 };
+		try {
+			const graph = getGraph(stores.graphStore);
+			return { available: true, concepts: graph.nodes.slice(0, 500).map((node) => ({ id: node.id, name: node.name, statementExcerpt: node.statement.slice(0, 1200), statementTruncated: node.statement.length > 1200, aliases: node.aliases.slice(0, 8), provenanceCount: node.provenance.length })), chains: graph.chains.slice(0, 500).map((chain) => ({ id: chain.id, premises: chain.premises, conclusion: chain.conclusion })), totalConcepts: graph.nodes.length, totalChains: graph.chains.length };
+		} catch { return { available: false, concepts: [], chains: [], totalConcepts: 0, totalChains: 0 }; }
+	})();
+	const preferences = opts.plannerFile && !opts.chatsDir ? null : readSettings();
+	const recallContext = (() => {
+		try {
+			const file = path.join(path.dirname(filePath), "recall-scan.json");
+			if (!fs.existsSync(file)) return null;
+			const scan = JSON.parse(fs.readFileSync(file, "utf8")) as RecallScanState;
+			if (scan.version !== 1 || !Array.isArray(scan.results)) return null;
+			const counts: Record<string, number> = Object.create(null) as Record<string, number>;
+			for (const result of scan.results) if (["correct", "partial", "wrong", "dont_know", "uncertain"].includes(result.verdict)) counts[result.verdict] = (counts[result.verdict] ?? 0) + 1;
+			const terms = normalizeSubjectKey(userText).split(" ").filter((term) => term.length >= 5);
+			const examples = scan.results.filter((result) => terms.some((term) => normalizeSubjectKey(`${result.sessionTitle} ${result.topic} ${result.draft?.question ?? ""}`).includes(term))).slice(0, 8).map((result) => ({ session: result.sessionTitle, verdict: result.verdict, topic: result.topic, question: result.draft?.question?.slice(0, 400), missing: result.missing?.slice(0, 250), correction: result.correction?.slice(0, 250) }));
+			return { status: scan.status, total: scan.total, assessed: scan.results.length, counts, examples, interpretation: "AI assessments may be unreviewed and are not confirmed mistakes. Examples are selected by matching the user's message and may be incomplete." };
+		} catch { return null; }
+	})();
 	const coachContext = {
 		focusArea: opts.focusArea ?? "general",
 		todayDate: date,
@@ -3236,6 +3537,7 @@ export async function chatWithPlannerCoachServer(
 		todayOverride: existingOverride ?? null,
 		todayLog: existingLog ?? null,
 		lifestyle: current.lifestyle,
+		editableAppSettings: preferences ? Object.fromEntries(Object.keys(SETTINGS_SECTIONS).map((section) => [section, preferences[section as keyof UserSettings] ?? {}])) : null,
 		learningCapacity: {
 			compositeScore: capacity.compositeScore,
 			tierLabel: capacity.tierLabel,
@@ -3254,9 +3556,11 @@ export async function chatWithPlannerCoachServer(
 			subjectBreakdown: capacity.subjectBreakdown.slice(0, 8),
 		},
 		knowledgeAndSessionsDigest: {
+			graph: graphContext,
+			recallAssessments: recallContext,
 			milestones: digest.milestones,
 			knowledgeSignals: digest.knowledgeSignals,
-			recentSessions: signals.recentSessions.slice(0, 8).map((s) => ({ title: s.title, kind: s.kind })),
+			recentSessions: recentSessionContext,
 			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 4) ?? [],
 		},
 		recentSleepLogs: Object.values(current.logs)
@@ -3271,18 +3575,22 @@ export async function chatWithPlannerCoachServer(
 				foodComa: l.foodComaHitToday,
 				urgesSurfed: l.urgesSurfed,
 				urgeTriggerWindows: l.urgeTriggerWindows,
-				adherencePct: l.compliance?.adherencePct,
+				adherencePct: l.compliance && l.compliance.scorable !== false && l.compliance.plannedStudyMin > 0 ? l.compliance.adherencePct : undefined,
 			})),
 		recentCoachConversation: history,
 	};
 
 	const systemPrompt = `You are a deeply informed, supportive personal Study, Sleep & Behavioral Habit Coach inside ChronoHarness.
-You have the student's real Schedule, Lifestyle, FSRS-6/Knowledge Graph signals, Past Chat Sessions, Mistake rules, and Scientific Learning Capacity telemetry.
+You receive the student's planner, lifestyle, learning-capacity metrics, up to 500 graph concepts and chains, selected knowledge signals, selected mistake rules, and recent session metadata plus limited excerpts and lesson topics. Excerpts are not full transcripts; never claim to have read details not included in the context. Journal history lists available dates but only includes selected records.
 Respond naturally, calmly, non-judgmentally, and collaboratively in the student's language (Vietnamese if they write Vietnamese), and call \`submit_coach_response\` ONCE.
 
 OPERATING RULES:
 0a. Exam timetable is a separate list; use examTimetableOperations for exam dates, times, locations and details. Leave unknown values empty; never invent dates or durations. Do not create Exam Prep profiles, milestones, or study quotas from exam entries.
 0b. Planner permissions and scope: weeklyTimetable and milestones contain stable IDs. You may add or update them with weeklyEventOperations or milestoneOperations. For a recurring class correction, update the matching existing IDs and preserve all other events. journalHistory.availableDates is only an index; only includedDates contain full records. journalOperations can edit an included or explicitly specified dated journal/audit. For deletion specify deleteTarget (journal, audit, or an entry with entryId). Ask if the target is ambiguous. Delete only when the student explicitly asks to delete the specific item. Do not change or invent completed work. For linked exam milestones the server syncs Exam Prep. The server reports exactly which changes were applied; never claim unapplied edits.
+0c. For an explicitly reported habit frequency use habitCountOperations with the correct date and exact count. Never infer a count or duration from a broad private time window. Update an existing count by its ID; delete only at the student's explicit request. Proposals are reviewed by the student before application.
+0d. For a specifically identified learning session, sessionOperations may propose changing its title, lesson notes, pin, or archive status. Use an exact session ID from the context. Do not claim access to full transcripts, and do not delete or rewrite session messages. The student reviews these changes before they are applied.
+0e. graphNodeOperations can propose a name or statement correction for an existing concept using its exact graph ID. Preserve the concept's identity. You cannot add, delete or merge graph nodes through these operations; say so if asked. These proposals are reviewed before application.
+0f. settingsOperations can propose changes to the settings sections shown in editableAppSettings using a JSON object patch. Never fabricate settings, model choices or credentials; provider credentials and unsupported settings cannot be changed by this operation. All proposals require the student's review.
 0. Current-day scheduling: replanContext.currentLocalTime is the computer's real local clock. When regenerating today, use only time remaining until bedtime, after fixed commitments, meals and rest. Consider saved journal, today's energy (1–5, always say /5, never /10), sleep, completed work, and learning capacity. Never schedule elapsed time as upcoming or make up times for untimed journal lines. Reduce or omit study if time or energy is insufficient. If the student's stated time differs, state the computer time. Do not claim a schedule change unless submitting it.
 1. Direct Action When Requested: If the student describes their state today ("mệt", "dậy 4h sáng", "food coma", "buồn ngủ sau ăn tối", "lên cơn sau ngủ trưa", "bỏ bớt môn X hôm nay", "chỉnh giờ ăn", "đặt giờ ngủ 22:30", "thêm gym", "giảm game") OR asks you to tailor their routine/schedule/sleep/habits, set \`shouldApplyChanges: true\` and emit exact patches in \`todayOverridePatch\`, \`todayLogPatch\`, and/or \`lifestylePatch\`.
    - For today's wake/sleep/meals/focus/blocks: put them in \`todayOverridePatch\` and set \`regenerateTodaySchedule: true\`. Only emit \`todayOverridePatch.blocks\` when they specifically want exact block placements; otherwise omit \`blocks\` so the constraint optimizer lays out a non-overlapping schedule around TKB & meals.
@@ -3322,6 +3630,12 @@ OPERATING RULES:
 	let pendingExam: ExamPrepConfig | undefined;
 	let previousExam: ExamPrepConfig | undefined;
 	let expandedScheduleChange = false;
+	const sessionChanges: NonNullable<CoachUndoSnapshot["sessionChanges"]> = [];
+	const graphChanges: CoachGraphChange[] = [];
+	let beforeSettings: UserSettings | undefined;
+	let afterSettings: UserSettings | undefined;
+	const changedSettingsSections = new Set<string>();
+	const settingsRequests: Array<{ section: SettingsSectionName; patch: Record<string, unknown> }> = [];
 	const rejectedOperations: string[] = [];
 
 	if (payload.shouldApplyChanges) {
@@ -3339,6 +3653,42 @@ OPERATING RULES:
 		};
 
 		const allowDelete = hasExplicitDeleteRequest(userText) && !/(không|đừng|chớ)\s+(x[oó]a|gỡ|loại bỏ)|\b(do not|don't|never)\s+(delete|remove|erase)\b/i.test(userText);
+		for (const op of payload.sessionOperations ?? []) {
+			if (!opts.requireConfirmation || !op.id || sessionChanges.some((item) => item.id === op.id)) { rejectedOperations.push("không thể xác định phiên học hoặc chưa có bước xác nhận"); continue; }
+			const before = sessionMetadata(op.id);
+			if (!before || (op.title !== undefined && (!op.title.trim() || op.title.length > 300)) || (op.notes !== undefined && (op.notes.length > 40000 || (!op.notes && before.notes && !allowDelete)))) { rejectedOperations.push("phiên học hoặc nội dung chỉnh sửa không hợp lệ"); continue; }
+			const after: CoachSessionMetadata = { title: op.title?.trim() ?? before.title, notes: op.notes ?? before.notes, pinned: typeof op.pinned === "boolean" ? op.pinned : before.pinned, archived: typeof op.archived === "boolean" ? op.archived : before.archived };
+			if (JSON.stringify(before) === JSON.stringify(after)) continue;
+			sessionChanges.push({ id: op.id, before, after });
+			patchLabels.push(`Session · ${before.title}`);
+		}
+		for (const op of payload.graphNodeOperations ?? []) {
+			if (!opts.requireConfirmation || !op.id || graphChanges.some((item) => item.id === op.id)) { rejectedOperations.push("không thể xác định khái niệm hoặc chưa có bước xác nhận"); continue; }
+			let rows: ReturnType<typeof stores.graphStore.readNodes>;
+			try { rows = readableGraphNodes().filter((node) => node.id === op.id); } catch { rejectedOperations.push("dữ liệu đồ thị chưa thể chỉnh sửa an toàn"); continue; }
+			const first = rows[0];
+			if (!first || (op.name !== undefined && (!op.name.trim() || op.name.length > 300)) || (op.statement !== undefined && (!op.statement.trim() || op.statement.length > 10000))) { rejectedOperations.push("khái niệm hoặc nội dung chỉnh sửa không hợp lệ"); continue; }
+			const before = { name: first.name, statement: first.statement }, after = { name: op.name?.trim() ?? first.name, statement: op.statement?.trim() ?? first.statement };
+			if (JSON.stringify(before) === JSON.stringify(after)) continue;
+			graphChanges.push({ id: op.id, before, after, beforeHash: graphRowsHash(rows), afterHash: graphRowsHash([{ ...first, ...after }, ...rows.slice(1)]) });
+			patchLabels.push(`Graph concept · ${first.name}`);
+		}
+		for (const op of payload.settingsOperations ?? []) {
+			if (!opts.requireConfirmation || !Object.hasOwn(SETTINGS_SECTIONS, op.section) || changedSettingsSections.has(op.section)) { rejectedOperations.push("cài đặt hoặc bước xác nhận không hợp lệ"); continue; }
+			let patch: unknown;
+			try { patch = JSON.parse(op.patchJson); } catch { rejectedOperations.push("nội dung cài đặt không hợp lệ"); continue; }
+			if (!patch || typeof patch !== "object" || Array.isArray(patch)) { rejectedOperations.push("nội dung cài đặt không hợp lệ"); continue; }
+			beforeSettings ??= readSettings() ?? { version: 1 };
+			afterSettings ??= structuredClone(beforeSettings);
+			const section = op.section;
+			let next: UserSettings;
+			try { next = prepareCoachSettings(section, patch as Record<string, unknown>, afterSettings); } catch { rejectedOperations.push("cài đặt không được hỗ trợ hoặc giá trị không hợp lệ"); continue; }
+			if (JSON.stringify(afterSettings[section] ?? {}) === JSON.stringify(next[section] ?? {})) continue;
+			afterSettings = next;
+			changedSettingsSections.add(section);
+			settingsRequests.push({ section, patch: patch as Record<string, unknown> });
+			patchLabels.push(`Settings · ${section}`);
+		}
 		for (const [index, op] of (payload.examTimetableOperations ?? []).entries()) {
 			const existing = nextConfig.examTimetable.find((entry) => entry.id === op.id);
 			if (op.action === "delete") {
@@ -3431,6 +3781,22 @@ OPERATING RULES:
 			};
 			nextConfig = { ...nextConfig, logs: { ...nextConfig.logs, [op.date]: newLog } };
 			patchLabels.push(`${op.action === "delete" ? "Xóa" : "Sửa"} nhật ký ${op.date}`);
+		}
+
+		for (const [index, op] of (payload.habitCountOperations ?? []).entries()) {
+			if (!isValidDateString(op.date)) { rejectedOperations.push("ngày ghi thói quen không hợp lệ"); continue; }
+			const counts = nextConfig.logs[op.date]?.habitCounts ?? [];
+			const existing = op.id ? counts.find((item) => item.id === op.id) : undefined;
+			if (op.action === "delete") {
+				if (!existing || !allowDelete || !isExplicitDeleteTarget(userText, existing.name, counts.filter((item) => item.id !== existing.id).map((item) => item.name))) { rejectedOperations.push("chưa chỉ rõ mục cần xóa"); continue; }
+				nextConfig = applyHabitCheckIn(nextConfig, { date: op.date, habitCounts: counts.filter((item) => item.id !== existing.id) }, now);
+			} else {
+				const name = (op.name ?? existing?.name ?? "").trim();
+				if ((op.action === "update" && !existing) || !name || typeof op.count !== "number" || !Number.isInteger(op.count) || op.count < 0 || op.count > 1000 || (op.action === "add" && counts.some((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase()))) { rejectedOperations.push("số lần hoặc mục thói quen không rõ ràng"); continue; }
+				const item = { id: existing?.id ?? `count_coach_${now.toString(36)}_${index}`, name, count: op.count };
+				nextConfig = applyHabitCheckIn(nextConfig, { date: op.date, habitCounts: existing ? counts.map((value) => value.id === existing.id ? item : value) : [...counts, item] }, now);
+			}
+			patchLabels.push(`Habit count · ${op.date}`);
 		}
 
 		// 1. Today Log Check-In Patch
@@ -3557,8 +3923,9 @@ OPERATING RULES:
 		// day's tailored plan. Models sometimes set this flag along with an exam
 		// operation; only honor it here when the user also requested replanning.
 		const examOnly = Boolean(payload.examTimetableOperations?.length) && !payload.todayOverridePatch && !payload.lifestylePatch && !payload.weeklyEventOperations?.length && !payload.milestoneOperations?.length;
+		const sessionOnly = (sessionChanges.length > 0 || graphChanges.length > 0 || changedSettingsSections.size > 0) && !payload.todayOverridePatch && !payload.todayLogPatch && !payload.lifestylePatch && !payload.weeklyEventOperations?.length && !payload.milestoneOperations?.length && !payload.examTimetableOperations?.length && !payload.journalOperations?.length && !payload.habitCountOperations?.length;
 		const explicitlyRequestedReplan = /\b(?:replan|reschedule|regenerate)\b|(?:xếp|lập|tính|sắp)\s+(?:lại\s+)?lịch|(?:điều chỉnh|sửa)\s+(?:lại\s+)?lịch\s+(?:học|hôm nay)/i.test(userText);
-		const regenerateToday = Boolean(payload.regenerateTodaySchedule && (!examOnly || explicitlyRequestedReplan));
+		const regenerateToday = Boolean(payload.regenerateTodaySchedule && (!(examOnly || sessionOnly) || explicitlyRequestedReplan));
 		if (patchLabels.length > 0 || regenerateToday || payload.todayOverridePatch?.blocks !== undefined) {
 			// A new automatic schedule must not silently reuse a previous tailored timeline.
 			if (regenerateToday && !payload.todayOverridePatch && nextConfig.dayOverrides?.[date]?.customBlocks) {
@@ -3622,6 +3989,7 @@ OPERATING RULES:
 				const acceptedTailoredCount = accepted.filter((b) => b.id.startsWith(`coach_${date}_`)).length;
 				if (acceptedTailoredCount) patchLabels.push(`${acceptedTailoredCount} tailored blocks`);
 			}
+			if (isReplan) nextConfig = archivePlannerPlan(nextConfig, date, now);
 			const rebuiltPlan = isReplan
 				? computeLocalPlannerPlan(nextConfig, freshSignals, now, { fromNow: true })
 				: structuredClone(nextConfig.plans[date] ?? computeLocalPlannerPlan(nextConfig, freshSignals, now));
@@ -3656,6 +4024,9 @@ OPERATING RULES:
 			}
 			undoSnapshot.beforePlanner = coachUndoPlannerState(current);
 			undoSnapshot.afterPlanner = coachUndoPlannerState(nextConfig);
+			if (sessionChanges.length) undoSnapshot.sessionChanges = sessionChanges;
+			if (graphChanges.length) undoSnapshot.graphChanges = graphChanges;
+			if (changedSettingsSections.size && beforeSettings && afterSettings) { undoSnapshot.beforeSettings = beforeSettings; undoSnapshot.afterSettings = afterSettings; }
 			if (previousExam && pendingExam && JSON.stringify(coachExamState(previousExam)) !== JSON.stringify(coachExamState(pendingExam))) {
 				undoSnapshot.beforeExam = coachExamState(previousExam);
 				undoSnapshot.afterExam = coachExamState(pendingExam);
@@ -3689,6 +4060,25 @@ OPERATING RULES:
 		modelLabel: resolved.modelLabel,
 		...(appliedChange ? { appliedChange } : {}),
 	};
+	if (opts.requireConfirmation && payload.shouldApplyChanges && appliedChange) {
+		const id = randomUUID();
+		// Keep useful advice during review, but do not show claims that changes
+		// have already been applied or times that are absent from the proposal.
+		const changes = proposalChanges(current, nextConfig);
+		const advice = (changes.plans ? groundedScheduleAdvice(payload.reply, nextConfig.plans[date]?.blocks ?? []) : payload.reply)
+			.split(/(?<=[.!?])\s+|\n+/)
+			.filter((sentence) => !/(?:đã\s+(?:được\s+)?(?:sửa|chỉnh|x[oó]a|lưu|cập nhật|áp dụng|thêm)|\bi(?:'ve| have)\s+(?:updated|saved|deleted|changed|applied|added)\b)/i.test(sentence))
+			.join(" ").trim().slice(0, 3800);
+		const preview: PlannerCoachProposalPreview = { id, summary: appliedChange.summary, ...(advice ? { advice } : {}), changes };
+		if (sessionChanges.length) preview.changes.sessions = { before: sessionChanges.map(({ id: sessionId, before }) => ({ id: sessionId, ...before })), after: sessionChanges.map(({ id: sessionId, after }) => ({ id: sessionId, ...after })) };
+		if (graphChanges.length) preview.changes.graph = { before: graphChanges.map(({ id: nodeId, before }) => ({ id: nodeId, ...before })), after: graphChanges.map(({ id: nodeId, after }) => ({ id: nodeId, ...after })) };
+		if (changedSettingsSections.size && beforeSettings && afterSettings) preview.changes.settings = { before: Object.fromEntries([...changedSettingsSections].map((section) => [section, beforeSettings![section as keyof UserSettings] ?? null])), after: Object.fromEntries([...changedSettingsSections].map((section) => [section, afterSettings![section as keyof UserSettings] ?? null])) };
+		if (previousExam && pendingExam && JSON.stringify(coachExamState(previousExam)) !== JSON.stringify(coachExamState(pendingExam))) preview.changes.examPrep = { before: coachExamState(previousExam), after: coachExamState(pendingExam) };
+		const proposals = coachProposals();
+		for (const [key, item] of proposals) if (Date.now() - item.createdAt > 15 * 60_000) proposals.delete(key);
+		proposals.set(id, { preview, createdAt: Date.now(), referenceAt: now, date, plannerFile: filePath, examPrepFile: opts.examPrepFile, before: coachUndoPlannerState(current), after: nextConfig, beforeExam: previousExam, afterExam: pendingExam, sessionChanges, graphChanges, beforeSettings: changedSettingsSections.size ? beforeSettings : undefined, afterSettings: changedSettingsSections.size ? afterSettings : undefined, settingsRequests, userMessage: userMsg, assistantMessage: assistantMsg });
+		return { snapshot: { config: current, plan: todayPlan, activeStatus: resolveActiveBlockStatus(todayPlan, current.logs[date], now), signals, aiAvailability: getPlannerAiAvailability() }, assistantMessage: { ...assistantMsg, text: "Mình đã chuẩn bị đề xuất; chưa áp dụng thay đổi nào. Hãy xem chi tiết trước khi xác nhận.", appliedChange: undefined }, proposal: preview };
+	}
 
 	// A read-only Coach reply can take long enough for the learner to update
 	// check-ins, plans, or even the conversation in the meantime. Append the
@@ -3715,6 +4105,62 @@ OPERATING RULES:
 	};
 }
 
+/** Apply only the exact in-memory proposal that the user reviewed. */
+export function confirmPlannerCoachProposal(id: string): { snapshot: PlannerSnapshotResponse; assistantMessage: CoachChatMessage; appliedChange?: CoachChatAppliedChange } {
+	const proposals = coachProposals();
+	const proposal = proposals.get(id);
+	if (!proposal || Date.now() - proposal.createdAt > 15 * 60_000) { proposals.delete(id); throw new Error("Proposal expired; ask Coach to prepare it again."); }
+	const current = readPlannerConfig(proposal.plannerFile);
+	if (JSON.stringify(coachUndoPlannerState(current)) !== JSON.stringify(proposal.before)) throw new Error("Planner changed since this proposal. Ask Coach to prepare it again.");
+	if (proposal.beforeExam && JSON.stringify(coachExamState(readExamPrepConfig(proposal.examPrepFile))) !== JSON.stringify(coachExamState(proposal.beforeExam))) throw new Error("Exam profiles changed since this proposal. Ask Coach to prepare it again.");
+	if (proposal.sessionChanges?.some((item) => JSON.stringify(sessionMetadata(item.id)) !== JSON.stringify(item.before))) throw new Error("A session changed since this proposal. Ask Coach to prepare it again.");
+	if (proposal.beforeSettings && JSON.stringify(readSettings() ?? { version: 1 }) !== JSON.stringify(proposal.beforeSettings)) throw new Error("Settings changed since this proposal. Ask Coach to prepare it again.");
+	if (proposal.beforeSettings && proposal.afterSettings) {
+		let verified = proposal.beforeSettings;
+		for (const request of proposal.settingsRequests ?? []) verified = prepareCoachSettings(request.section, request.patch, verified);
+		if (JSON.stringify(verified) !== JSON.stringify(proposal.afterSettings)) throw new Error("Available settings changed. Ask Coach to prepare the proposal again.");
+	}
+	// Do not apply a reviewed schedule after its new blocks have begun.
+	if (proposal.preview.changes.plans && proposal.date === localDateString(Date.now())) {
+		const clock = new Date(); const minute = clock.getHours() * 60 + clock.getMinutes();
+		const reference = new Date(proposal.referenceAt); const referenceMinute = reference.getHours() * 60 + reference.getMinutes();
+		const previousBlocks = proposal.before.plans[proposal.date]?.blocks ?? [];
+		const blocks = proposal.after.plans[proposal.date]?.blocks ?? [];
+		if (previousBlocks.some((block) => block.type === "study" && block.endMin > referenceMinute && block.endMin <= minute) || blocks.some((block) => block.type === "study" && block.startMin >= referenceMinute && block.startMin < minute)) throw new Error("The schedule changed with time while awaiting confirmation. Ask Coach to update the proposal.");
+	}
+	let saved: PlannerConfig;
+	const after = structuredClone(proposal.after);
+	const writtenSessions: NonNullable<CoachUndoSnapshot["sessionChanges"]> = [];
+	let graphWritten = false;
+	let settingsWritten = false;
+	try {
+		if (proposal.graphChanges?.length) { writeGraphChanges(proposal.graphChanges, "apply"); graphWritten = true; }
+		for (const change of proposal.sessionChanges ?? []) { writeSessionMetadata(change.id, change.after); writtenSessions.push(change); }
+		if (proposal.afterSettings) {
+			settingsWritten = true;
+			const written = writeSettings(proposal.afterSettings);
+			refreshWorkerRequestAdmission();
+			if (JSON.stringify(written) !== JSON.stringify(proposal.afterSettings)) throw new Error("Stored settings did not match the reviewed proposal.");
+			if (after.lastCoachUndo?.afterSettings) after.lastCoachUndo.afterSettings = written;
+		}
+		if (proposal.beforeExam && proposal.afterExam && JSON.stringify(coachExamState(proposal.beforeExam)) !== JSON.stringify(coachExamState(proposal.afterExam))) {
+			const written = writeExamPrepConfig({ ...proposal.afterExam, selectExamId: proposal.afterExam.activeExamId }, proposal.examPrepFile);
+			if (after.lastCoachUndo?.afterExam) after.lastCoachUndo.afterExam = coachExamState(written);
+		}
+		saved = savePlannerConfig({ ...after, coachChat: [...(current.coachChat ?? []), proposal.userMessage, proposal.assistantMessage], updatedAt: new Date().toISOString() }, proposal.plannerFile);
+	} catch (error) {
+		if (settingsWritten && proposal.beforeSettings) { try { writeSettings(proposal.beforeSettings); refreshWorkerRequestAdmission(); } catch { /* preserve the original failure */ } }
+		for (const change of writtenSessions.reverse()) { try { writeSessionMetadata(change.id, change.before); } catch { /* preserve the original failure */ } }
+		if (graphWritten && proposal.graphChanges) { try { writeGraphChanges(proposal.graphChanges, "undo"); } catch { /* preserve the original failure */ } }
+		if (proposal.beforeExam) writeExamPrepConfig({ ...proposal.beforeExam, selectExamId: proposal.beforeExam.activeExamId }, proposal.examPrepFile);
+		throw error;
+	}
+	proposals.delete(id);
+	return { snapshot: readPlannerSnapshot({ plannerFile: proposal.plannerFile, examPrepFile: proposal.examPrepFile, date: proposal.date }), assistantMessage: saved.coachChat?.at(-1) ?? proposal.assistantMessage, ...(proposal.assistantMessage.appliedChange ? { appliedChange: proposal.assistantMessage.appliedChange } : {}) };
+}
+
+export function discardPlannerCoachProposal(id: string): void { coachProposals().delete(id); }
+
 export function undoPlannerCoachChangeServer(
 	opts?: PlannerReadOptions & { messageId?: string; chatsDir?: string; date?: string },
 ): { snapshot: PlannerSnapshotResponse; undone: boolean; reason?: string } {
@@ -3727,15 +4173,32 @@ export function undoPlannerCoachChangeServer(
 	}
 	if (undo.beforePlanner && undo.afterPlanner) {
 		const currentExam = undo.afterExam ? readExamPrepConfig(opts?.examPrepFile) : undefined;
+		const currentSettings = undo.afterSettings ? readSettings() ?? { version: 1 } : undefined;
+		let graphMatches = true;
+		if (undo.graphChanges?.length) {
+			try { const nodes = readableGraphNodes(); graphMatches = extractionStatuses().length === 0 && undo.graphChanges.every((change) => graphRowsHash(nodes.filter((node) => node.id === change.id)) === change.afterHash); }
+			catch { graphMatches = false; }
+		}
 		if (JSON.stringify(coachUndoPlannerState(current)) !== JSON.stringify(undo.afterPlanner) ||
-			(currentExam && JSON.stringify(coachExamState(currentExam)) !== JSON.stringify(undo.afterExam))) {
+			(currentExam && JSON.stringify(coachExamState(currentExam)) !== JSON.stringify(undo.afterExam)) ||
+			undo.sessionChanges?.some((change) => JSON.stringify(sessionMetadata(change.id)) !== JSON.stringify(change.after)) || !graphMatches ||
+			(currentSettings && JSON.stringify(currentSettings) !== JSON.stringify(undo.afterSettings))) {
 			return { snapshot: readPlannerSnapshot({ ...opts, now }), undone: false, reason: "Dữ liệu đã được thay đổi sau lượt Coach; không thể hoàn tác an toàn." };
 		}
 		const nextChat = (current.coachChat ?? []).map((m) => m.id === undo.messageId && m.appliedChange ? { ...m, appliedChange: { ...m.appliedChange, reverted: true } } : m);
+		const revertedSessions: NonNullable<CoachUndoSnapshot["sessionChanges"]> = [];
+		let graphReverted = false;
+		let settingsReverted = false;
 		try {
+			if (undo.graphChanges?.length) { writeGraphChanges(undo.graphChanges, "undo"); graphReverted = true; }
+			for (const change of undo.sessionChanges ?? []) { writeSessionMetadata(change.id, change.before); revertedSessions.push(change); }
+			if (undo.beforeSettings) { settingsReverted = true; writeSettings(undo.beforeSettings); refreshWorkerRequestAdmission(); }
 			if (undo.beforeExam) writeExamPrepConfig({ ...undo.beforeExam, selectExamId: undo.beforeExam.activeExamId }, opts?.examPrepFile);
 			savePlannerConfig({ ...undo.beforePlanner, coachChat: nextChat, lastCoachUndo: undefined, updatedAt: new Date(now).toISOString() }, filePath);
 		} catch (error) {
+			if (settingsReverted && currentSettings) { try { writeSettings(currentSettings); refreshWorkerRequestAdmission(); } catch { /* preserve the original failure */ } }
+			for (const change of revertedSessions.reverse()) { try { writeSessionMetadata(change.id, change.after); } catch { /* preserve the original failure */ } }
+			if (graphReverted && undo.graphChanges) { try { writeGraphChanges(undo.graphChanges, "apply"); } catch { /* preserve the original failure */ } }
 			if (currentExam) writeExamPrepConfig({ ...currentExam, selectExamId: currentExam.activeExamId }, opts?.examPrepFile);
 			throw error;
 		}

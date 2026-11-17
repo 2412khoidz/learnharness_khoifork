@@ -10,8 +10,11 @@ import {
 	daysBetweenDates,
 	formatClockMin,
 	formatPlainMathPreview,
+	journalBedtimeForNight,
+	journalWakeForDate,
 	normalizeSubjectKey,
 	parseClockMin,
+	parseJournalTextLocal,
 	redactSensitiveJournalText,
 	resolveSubjectMaxDailyCap,
 	WEEKDAY_LABELS,
@@ -43,7 +46,7 @@ import {
 import { TopBar } from "@/components/top-bar";
 import { HostMarkdown } from "@/components/host-markdown";
 import { BrailleSpinner } from "@/components/braille-spinner";
-import { PlannerCoachChat } from "@/components/planner-coach-chat";
+import { PlannerCoachChat, type CoachProposalPreview } from "@/components/planner-coach-chat";
 import { PlannerExamTimetable } from "@/components/planner-exam-timetable";
 import { PlannerCapacityModal } from "@/components/planner-capacity-modal";
 import { useServerEvent } from "@/components/server-events";
@@ -144,6 +147,7 @@ function formatMinCompact(min: number): string {
 export function PlannerPage() {
 	const [snap, setSnap] = useState<PlannerSnapshot | null>(null);
 	const [tab, setTab] = useState<PlannerTab>("today");
+	const [journalDate, setJournalDate] = useState<string | undefined>();
 	const [busy, setBusy] = useState(false);
 	const [aiNote, setAiNote] = useState("");
 	const [coachRole, setCoachRole] = useState("");
@@ -151,11 +155,15 @@ export function PlannerPage() {
 	const [coachFocusArea, setCoachFocusArea] = useState<"schedule" | "lifestyle" | "general">("schedule");
 	const [coachDraft, setCoachDraft] = useState("");
 	const [coachSending, setCoachSending] = useState(false);
+	const [coachProposal, setCoachProposal] = useState<CoachProposalPreview | null>(null);
 	const [capacityOpen, setCapacityOpen] = useState(false);
 	const [resetSecondsLeft, setResetSecondsLeft] = useState(0);
 	const resetTimerActive = resetSecondsLeft > 0;
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 	const [examAdjustmentNotice, setExamAdjustmentNotice] = useState<string | null>(null);
+	useEffect(() => {
+		if (new URLSearchParams(window.location?.search ?? "").get("coach") === "1") setCoachOpen(true);
+	}, []);
 
 	useEffect(() => {
 		if (!resetTimerActive) return;
@@ -269,6 +277,7 @@ export function PlannerPage() {
 
 	const sendToCoach = useCallback(
 		async (message: string, area?: "schedule" | "lifestyle" | "general", files: File[] = []): Promise<boolean> => {
+			if (coachProposal) { setErrorMsg("Review or discard the current proposal before sending another message."); return false; }
 			const targetArea = area ?? coachFocusArea;
 			setCoachOpen(true);
 			setCoachFocusArea(targetArea);
@@ -288,9 +297,10 @@ export function PlannerPage() {
 				const res = await fetch("/api/planner/coach", files.length
 					? { method: "POST", body: form }
 					: { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-				const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string };
+				const body = (await res.json()) as { snapshot?: PlannerSnapshot; proposal?: CoachProposalPreview; error?: string };
 				if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
 				if (body.snapshot) setSnap(body.snapshot);
+				if (body.proposal) setCoachProposal(body.proposal);
 				return true;
 			} catch (e) {
 				setErrorMsg(e instanceof Error ? e.message : "Coach Chat failed.");
@@ -299,8 +309,22 @@ export function PlannerPage() {
 				setCoachSending(false);
 			}
 		},
-		[coachFocusArea, coachRole, snap?.plan.date],
+		[coachFocusArea, coachRole, snap?.plan.date, coachProposal],
 	);
+
+	const decideCoachProposal = useCallback(async (apply: boolean) => {
+		if (!coachProposal) return;
+		setCoachSending(true); setErrorMsg(null);
+		try {
+			const res = await fetch("/api/planner/coach", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: apply ? "confirm" : "discard", proposalId: coachProposal.id }) });
+			const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string };
+			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+			if (body.snapshot) setSnap(body.snapshot);
+			if (apply) window.dispatchEvent(new Event("lh:graph-revision"));
+			setCoachProposal(null);
+		} catch (error) { setErrorMsg(error instanceof Error ? error.message : "Could not process proposal."); }
+		finally { setCoachSending(false); }
+	}, [coachProposal]);
 
 	const undoCoachChange = useCallback(
 		async (messageId: string) => {
@@ -315,7 +339,8 @@ export function PlannerPage() {
 				const body = (await res.json()) as { snapshot?: PlannerSnapshot; error?: string; undone?: boolean; reason?: string };
 				if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
 				if (body.snapshot) setSnap(body.snapshot);
-				if (body.undone === false) setErrorMsg(body.reason || "Không thể hoàn tác thay đổi này.");
+				if (body.undone) window.dispatchEvent(new Event("lh:graph-revision"));
+				if (body.undone === false) setErrorMsg(body.reason || "Could not undo this change.");
 			} catch (e) {
 				setErrorMsg(e instanceof Error ? e.message : "Could not undo coach changes.");
 			} finally {
@@ -328,6 +353,10 @@ export function PlannerPage() {
 	const clearCoachChat = useCallback(async () => {
 		setCoachSending(true);
 		try {
+			if (coachProposal) {
+				await fetch("/api/planner/coach", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "discard", proposalId: coachProposal.id }) });
+				setCoachProposal(null);
+			}
 			const res = await fetch("/api/planner/coach", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
@@ -338,7 +367,7 @@ export function PlannerPage() {
 		} finally {
 			setCoachSending(false);
 		}
-	}, [snap?.plan.date]);
+	}, [snap?.plan.date, coachProposal]);
 
 	const openCoachForArea = useCallback((area: "schedule" | "lifestyle" | "general", prefill?: string) => {
 		setCoachFocusArea(area);
@@ -426,10 +455,10 @@ export function PlannerPage() {
 							type="button"
 							data-testid="planner-capacity-btn"
 							onClick={() => setCapacityOpen(true)}
-							title="Cognitive & Learning Capacity Diagnostics (Lực học cá nhân — 0 tokens)"
+							title="Learning Capacity Diagnostics (0 tokens)"
 							className="inline-flex items-center gap-1 rounded-md border bg-muted/40 px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
 						>
-							<BrainIcon className="size-3.5 text-primary" /> Lực học
+							<BrainIcon className="size-3.5 text-primary" /> Learning Capacity
 						</button>
 
 						<button
@@ -684,6 +713,13 @@ export function PlannerPage() {
 									{snap.plan.coachSummary ? (
 										<div className="mt-1.5 text-xs leading-relaxed text-foreground">
 											<PlannerMathText text={snap.plan.coachSummary} />
+											<details className="mt-2 rounded border p-2"><summary className="cursor-pointer text-primary">View full summary</summary><div className="mt-2 whitespace-pre-wrap"><HostMarkdown text={snap.plan.coachSummary} /></div></details>
+											{[...(snap.config.coachChat ?? [])].reverse().find((message) => message.role === "assistant" && message.text) && (
+												<details className="mt-2 rounded border p-2">
+											<summary className="cursor-pointer text-primary">View latest Coach reply</summary>
+											<div className="mt-2 whitespace-pre-wrap"><HostMarkdown text={[...(snap.config.coachChat ?? [])].reverse().find((message) => message.role === "assistant" && message.text)?.text ?? ""} /></div>
+										</details>
+											)}
 										</div>
 									) : (
 										<div className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
@@ -710,11 +746,11 @@ export function PlannerPage() {
 														? "border-success/40 bg-success/10 text-success"
 														: "border-border bg-muted/40",
 												)}
-												title="Click to inspect full scientific Lực học diagnostics (6 axes)"
+												title="Inspect learning capacity"
 											>
 												{snap.signals.learningProfile.sufficientData
-													? `Lực học calibrated · Solve ${snap.signals.learningProfile.overallSolveRatePct ?? "—"}% · FSRS ${snap.signals.learningProfile.overallRetentionPct ?? "—"}% → Inspect`
-													: `Lực học (${snap.signals.learningProfile.totalFsrsReviews}/8 FSRS) → Inspect`}
+													? `Learning capacity · Solve ${snap.signals.learningProfile.overallSolveRatePct ?? "—"}% · FSRS ${snap.signals.learningProfile.overallRetentionPct ?? "—"}% → Inspect`
+													: `Learning capacity (${snap.signals.learningProfile.totalFsrsReviews}/8 FSRS) → Inspect`}
 											</button>
 											{todayLog?.compliance && (
 												<button
@@ -722,7 +758,7 @@ export function PlannerPage() {
 													onClick={() => setTab("journal")}
 													className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-primary hover:underline"
 												>
-													Today audit: {todayLog.compliance.adherencePct}%
+																	Today audit: {todayLog.compliance.scorable === false || todayLog.compliance.plannedStudyMin === 0 ? "Not enough data" : `${todayLog.compliance.adherencePct}%`}
 												</button>
 											)}
 										</div>
@@ -733,7 +769,7 @@ export function PlannerPage() {
 												type="text"
 												value={aiNote}
 												onChange={(e) => setAiNote(e.target.value)}
-												placeholder="Optional AI note (e.g. dậy sớm 4h mệt, ưu tiên đề 1 BTVN)..."
+												placeholder="Optional note for AI (e.g. tired today, prioritize assignment)..."
 												className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 text-xs"
 											/>
 											{snap.aiAvailability.availableRoles && snap.aiAvailability.availableRoles.length > 0 && (
@@ -819,6 +855,8 @@ export function PlannerPage() {
 								<LifestyleTab
 									snap={snap}
 									busy={busy}
+									onCheckIn={async (payload) => { await checkIn({ ...payload, snapshotDate: snap.plan.date }); }}
+									onOpenJournal={(date) => { setJournalDate(date); setTab("journal"); }}
 									onSaveLifestyle={(lifestyle) => patchPlanner({ lifestyle })}
 									onOpenCoach={(prefill) => openCoachForArea("lifestyle", prefill)}
 									onError={setErrorMsg}
@@ -827,6 +865,7 @@ export function PlannerPage() {
 							{tab === "journal" && (
 								<JournalAuditTab
 									snap={snap}
+									initialDate={journalDate}
 									busy={busy}
 									onCheckIn={checkIn}
 									onSnapshotUpdate={setSnap}
@@ -840,6 +879,8 @@ export function PlannerPage() {
 
 				{coachOpen && snap && (
 					<PlannerCoachChat
+							proposal={coachProposal}
+							onProposalDecision={decideCoachProposal}
 						messages={snap.config.coachChat ?? []}
 						lastUndoMessageId={snap.config.lastCoachUndo?.messageId}
 						focusArea={coachFocusArea}
@@ -1407,7 +1448,7 @@ function TodayQuotasTab({
 								<span className="inline-flex items-center gap-1">
 									<SparklesIcon className="size-3 text-primary" /> Adjust with AI Coach (Conversational)
 								</span>
-								<span className="text-[10px] text-muted-foreground">Reads Graph · Sessions · Lực học · Sleep Logs</span>
+								<span className="text-[10px] text-muted-foreground">Reads Graph · Sessions · Learning Capacity · Sleep Logs</span>
 							</div>
 							<form
 								className="flex flex-wrap gap-1.5"
@@ -2655,7 +2696,7 @@ function MilestonesTab({
 										className="text-primary hover:underline disabled:opacity-40"
 										title="Calculate from FSRS stability, Practice speed & Graph gaps (0 tokens)"
 									>
-										{estimatingWorkload ? "..." : "Calibrate (Lực học · 0t)"}
+										{estimatingWorkload ? "..." : "Calibrate (0 tokens)"}
 									</button>
 									{snap.aiAvailability.coach.available && (
 										<button
@@ -3139,18 +3180,40 @@ export function WeeklyTkbTab({
 function LifestyleTab({
 	snap,
 	busy,
+	onCheckIn,
+	onOpenJournal,
 	onSaveLifestyle,
 	onOpenCoach,
 	onError,
 }: {
 	snap: PlannerSnapshot;
 	busy: boolean;
+	onCheckIn: (payload: Record<string, unknown>) => Promise<void>;
+	onOpenJournal: (date: string) => void;
 	onSaveLifestyle: (lifestyle: LifestyleConfig) => Promise<void>;
 	onOpenCoach: (prefill?: string) => void;
 	onError: (msg: string | null) => void;
 }) {
 	const [draft, setDraft] = useState<LifestyleConfig>(snap.config.lifestyle);
 	const [newHobby, setNewHobby] = useState("");
+	const [historyDate, setHistoryDate] = useState(snap.plan.date);
+	const [showPrivate, setShowPrivate] = useState(false);
+	const [historyNote, setHistoryNote] = useState(snap.config.logs[snap.plan.date]?.note ?? "");
+	const [historyBedtime, setHistoryBedtime] = useState(snap.config.logs[snap.plan.date]?.actualBedtime ?? "");
+	const [historyWake, setHistoryWake] = useState(snap.config.logs[snap.plan.date]?.actualWakeTime ?? "");
+	const [activityTitle, setActivityTitle] = useState("");
+	const [activityStart, setActivityStart] = useState("");
+	const [activityEnd, setActivityEnd] = useState("");
+	const [activityCategory, setActivityCategory] = useState<JournalActivityCategory>("hobby");
+	const [countName, setCountName] = useState("");
+	const [countValue, setCountValue] = useState("1");
+	useEffect(() => {
+		const log = snap.config.logs[historyDate];
+		setHistoryNote(log?.note ?? "");
+		setHistoryBedtime(journalBedtimeForNight(snap.config.logs, historyDate)?.time ?? "");
+		setHistoryWake(journalWakeForDate(snap.config.logs, historyDate)?.time ?? "");
+		setShowPrivate(false);
+	}, [historyDate, snap.config.logs]);
 	const [suggesting, setSuggesting] = useState(false);
 	const [suggestionInfo, setSuggestionInfo] = useState<{ rationale: string; tips: string[]; modelLabel: string } | null>(null);
 
@@ -3162,6 +3225,26 @@ function LifestyleTab({
 		() => Object.values(snap.config.logs).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 7),
 		[snap.config.logs],
 	);
+	const historyLog = snap.config.logs[historyDate];
+	const historyEntries = useMemo(() => {
+		const timedLines = (historyLog?.journalText ?? "").split(/\r?\n/).filter((line) => /\d{1,2}\s*(?::|h)\s*\d{0,2}\s*(?:-|–|—|to|den|đến)\s*\d{1,2}\s*(?::|h)/i.test(line));
+		const saved = historyLog?.actualEntries ?? [];
+		const draft = parseJournalTextLocal(timedLines.join("\n"), historyDate).filter((entry) => !saved.some((item) => item.startTime === entry.startTime && item.endTime === entry.endTime));
+		return [...saved, ...draft];
+	}, [historyLog, historyDate]);
+	const addHistoryActivity = async () => {
+		const start = parseClockMin(activityStart), end = parseClockMin(activityEnd);
+		if (!activityTitle.trim() || start === null || end === null || start === end) { onError("Enter an activity and valid start and end times."); return; }
+		const minutes = (end - start + 1440) % 1440;
+		await onCheckIn({ date: historyDate, note: historyNote, ...(historyBedtime ? { actualBedtime: historyBedtime } : {}), ...(historyWake ? { actualWakeTime: historyWake } : {}), actualEntries: [...(historyLog?.actualEntries ?? []), { id: `habit_${crypto.randomUUID()}`, startTime: activityStart, endTime: activityEnd, category: activityCategory, title: activityTitle.trim(), minutes, source: "manual" }] });
+		setActivityTitle(""); setActivityStart(""); setActivityEnd("");
+	};
+	const addHabitCount = async () => {
+		const count = Number(countValue);
+		if (!countName.trim() || !Number.isInteger(count) || count < 0 || count > 1000) { onError("Enter a name and a count between 0 and 1000."); return; }
+		await onCheckIn({ date: historyDate, note: historyNote, habitCounts: [...(historyLog?.habitCounts ?? []), { id: `count_${crypto.randomUUID()}`, name: countName.trim(), count }] });
+		setCountName(""); setCountValue("1");
+	};
 
 	const addHobby = () => {
 		const trimmed = newHobby.trim();
@@ -3469,6 +3552,7 @@ function LifestyleTab({
 
 				<div className="border-t pt-3">
 					<h3 className="text-sm font-medium">Hobbies, Entertainment & Discipline</h3>
+					<p className="mt-1 text-muted-foreground">Set a daily budget and preferred time for each hobby you want scheduled. Once any hobby has a budget, only hobbies with budgets are scheduled individually. Available time and plan intensity can limit allocations; study focus settings remain shared.</p>
 					<div className="mt-2 flex flex-wrap gap-1.5">
 						{draft.hobbies.map((h) => (
 							<span key={h} className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2.5 py-0.5">
@@ -3483,6 +3567,11 @@ function LifestyleTab({
 							</span>
 						))}
 					</div>
+					<div className="mt-2 space-y-2">{draft.hobbies.map((name) => {
+						const preference = draft.hobbyPreferences?.[name];
+						const update = (value: { dailyMin: number; preferredWindow: "auto" | "morning" | "afternoon" | "evening" }) => setDraft({ ...draft, hobbyPreferences: { ...draft.hobbyPreferences, [name]: value } });
+						return <div key={name} className="flex flex-wrap items-center gap-2 rounded border p-2"><span className="min-w-32 flex-1">{name}</span><label>Budget (min/day) <input aria-label={`${name} budget`} type="number" min="0" max="240" value={preference?.dailyMin ?? ""} placeholder="Shared" onChange={(event) => { if (!event.target.value) { const next = { ...draft.hobbyPreferences }; delete next[name]; setDraft({ ...draft, hobbyPreferences: next }); } else update({ dailyMin: Math.max(0, Math.min(240, Number(event.target.value) || 0)), preferredWindow: preference?.preferredWindow ?? "auto" }); }} className="w-20 rounded border bg-background p-1" /></label><label>Preferred time <select aria-label={`${name} preferred time`} value={preference?.preferredWindow ?? "auto"} onChange={(event) => update({ dailyMin: preference?.dailyMin ?? draft.dailyHobbyMin, preferredWindow: event.target.value as "auto" | "morning" | "afternoon" | "evening" })} className="rounded border bg-background p-1"><option value="auto">Auto</option><option value="morning">Morning</option><option value="afternoon">Afternoon</option><option value="evening">Evening</option></select></label></div>;
+					})}</div>
 					<div className="mt-2 flex gap-2">
 						<input
 							type="text"
@@ -3736,7 +3825,7 @@ function LifestyleTab({
 											type="button"
 											onClick={() =>
 												onOpenCoach(
-													"Tôi hay bị food coma buồn ngủ 8–9h tối sau ăn và đôi lúc có cơn libido bứt rứt / craving muốn xả ngay sau khi ngủ trưa dậy hoặc sáng sớm — hãy điều chỉnh lịch ăn/ngủ/học, thêm transition anchor và chiến lược vượt qua giúp tôi",
+													"Hãy giúp tôi điều chỉnh lịch ăn, ngủ và học theo mức năng lượng và thói quen gần đây.",
 												)
 											}
 											className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/20"
@@ -3844,6 +3933,17 @@ function LifestyleTab({
 						</p>
 					</div>
 				)}
+				<div className="mb-4 rounded-lg border p-3">
+					<div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">Daily Habit History</h3><input aria-label="Habit history date" type="date" value={historyDate} onChange={(event) => setHistoryDate(event.target.value)} className="rounded border bg-background px-2 py-1" /></div>
+					<p className="mt-1 text-muted-foreground">Choose any date to edit it. Bedtime is for the night starting on that date: after-midnight times belong to the following morning. Wake time is for the morning of the selected date.</p>
+					<p className="mt-1 text-muted-foreground">Unambiguous times from the journal are shown as suggestions; saving confirms them in the check-in.</p>
+					<div className="mt-3 grid grid-cols-2 gap-2"><label>Bedtime · night of {historyDate}<input aria-label="Actual bedtime" type="time" value={historyBedtime} onChange={(event) => setHistoryBedtime(event.target.value)} className="mt-1 w-full rounded border bg-background px-2 py-1" /></label><label>Wake time · morning of {historyDate}<input aria-label="Actual wake time" type="time" value={historyWake} onChange={(event) => setHistoryWake(event.target.value)} className="mt-1 w-full rounded border bg-background px-2 py-1" /></label></div>
+					<div className="mt-2 flex flex-wrap gap-2">{historyLog?.actualBedtime && <button type="button" disabled={busy} onClick={() => void onCheckIn({ date: historyDate, actualBedtime: null })} className="rounded border px-2 py-1">Clear saved bedtime</button>}{historyLog?.actualWakeTime && <button type="button" disabled={busy} onClick={() => void onCheckIn({ date: historyDate, actualWakeTime: null })} className="rounded border px-2 py-1">Clear saved wake time</button>}</div>
+					<div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => setShowPrivate((value) => !value)} className="rounded border px-2 py-1">{showPrivate ? "Hide private details" : "Show private details"}</button><button type="button" onClick={() => onOpenJournal(historyDate)} className="rounded border px-2 py-1">Open Journal &amp; Audit</button></div>
+					{showPrivate && <div className="mt-3 space-y-2"><label className="block">Daily note<textarea aria-label="Daily note" maxLength={4000} value={historyNote} onChange={(event) => setHistoryNote(event.target.value)} rows={4} className="mt-1 w-full rounded border bg-background p-2" /></label><div>{historyEntries.length === 0 ? <span className="text-muted-foreground">No timed journal activities for this day.</span> : historyEntries.map((entry) => <div key={entry.id} className="border-t py-1">{entry.startTime}–{entry.endTime} · {entry.category} · {entry.title}</div>)}</div><div className="grid grid-cols-2 gap-2"><input aria-label="Activity name" placeholder="Activity" value={activityTitle} onChange={(event) => setActivityTitle(event.target.value)} className="rounded border bg-background px-2 py-1" /><select aria-label="Activity category" value={activityCategory} onChange={(event) => setActivityCategory(event.target.value as JournalActivityCategory)} className="rounded border bg-background px-2 py-1">{(["hobby", "meal", "sleep", "rest", "other", "study", "class", "distraction"] as const).map((category) => <option key={category} value={category}>{category}</option>)}</select><input aria-label="Activity start" type="time" value={activityStart} onChange={(event) => setActivityStart(event.target.value)} className="rounded border bg-background px-2 py-1" /><input aria-label="Activity end" type="time" value={activityEnd} onChange={(event) => setActivityEnd(event.target.value)} className="rounded border bg-background px-2 py-1" /></div><button type="button" onClick={() => void addHistoryActivity()} className="rounded border px-2 py-1">Add activity</button></div>}
+					{showPrivate && <div className="mt-3 space-y-2 border-t pt-2"><p className="font-medium">Counts without a time</p><p className="text-muted-foreground">Only explicit counts are stored; no duration or time is inferred from the journal.</p>{(historyLog?.habitCounts ?? []).map((item) => <div key={item.id} className="flex items-center justify-between gap-2"><span>{item.name}: {item.count}</span><button type="button" aria-label={`Remove ${item.name}`} onClick={() => void onCheckIn({ date: historyDate, note: historyNote, habitCounts: (historyLog?.habitCounts ?? []).filter((other) => other.id !== item.id) })} className="rounded border px-2 py-1">Remove</button></div>)}<div className="flex gap-2"><input aria-label="Count name" placeholder="Activity" maxLength={120} value={countName} onChange={(event) => setCountName(event.target.value)} className="min-w-0 flex-1 rounded border bg-background px-2 py-1" /><input aria-label="Count" type="number" min="0" max="1000" step="1" value={countValue} onChange={(event) => setCountValue(event.target.value)} className="w-20 rounded border bg-background px-2 py-1" /><button type="button" onClick={() => void addHabitCount()} className="rounded border px-2 py-1">Add count</button></div></div>}
+					<button type="button" disabled={busy} onClick={() => void onCheckIn({ date: historyDate, ...(historyBedtime ? { actualBedtime: historyBedtime } : {}), ...(historyWake ? { actualWakeTime: historyWake } : {}), ...(showPrivate ? { note: historyNote } : {}) })} className="mt-3 rounded bg-primary px-3 py-1.5 text-primary-foreground disabled:opacity-40">Save daily check-in</button>
+				</div>
 				<h3 className="text-sm font-medium">Recent 7-Day Habit History</h3>
 				{recentLogs.length === 0 ? (
 					<p className="mt-2 text-muted-foreground">Complete a study block or log sleep/habits to start building your streak.</p>
@@ -3856,12 +3956,13 @@ function LifestyleTab({
 									<div>
 										<div className="font-medium">{l.date}</div>
 										<div className="text-[11px] text-muted-foreground">
-											{l.actualBedtime ? `Slept ${l.actualBedtime}` : "Bedtime not logged"}
+											{journalBedtimeForNight(snap.config.logs, l.date) ? `Bedtime ${journalBedtimeForNight(snap.config.logs, l.date)!.time}${journalBedtimeForNight(snap.config.logs, l.date)!.source === "journal" ? " · from journal" : ""}` : "Bedtime not logged"}
 											{l.energyScore ? ` · Energy ${l.energyScore}/5` : ""}
 										</div>
+									{showPrivate && (l.habitCounts ?? []).map((item) => <div key={item.id} className="text-[11px] text-muted-foreground">{item.name}: {item.count}</div>)}
 									</div>
 									<div className="text-right">
-										<div className="font-medium tabular-nums">{formatMinCompact(studyMin)}</div>
+										<div className="font-medium tabular-nums">{formatMinCompact(studyMin)} study</div>
 										<div className="text-[11px] text-muted-foreground">
 											{l.hobbyDone ? "Hobby ✓" : "—"} · {l.mealsOk ? "Meals ✓" : "—"}
 										</div>
@@ -3878,18 +3979,20 @@ function LifestyleTab({
 
 export function JournalAuditTab({
 	snap,
+	initialDate,
 	busy,
 	onCheckIn,
 	onSnapshotUpdate,
 	onError,
 }: {
 	snap: PlannerSnapshot;
+	initialDate?: string;
 	busy: boolean;
 	onCheckIn: (payload: Record<string, unknown>) => Promise<void>;
 	onSnapshotUpdate: (next: PlannerSnapshot) => void;
 	onError: (msg: string | null) => void;
 }) {
-	const [selectedDate, setSelectedDate] = useState(snap.plan.date);
+	const [selectedDate, setSelectedDate] = useState(initialDate ?? snap.plan.date);
 	const [historySearch, setHistorySearch] = useState("");
 	const activeLog = snap.config.logs[selectedDate];
 
@@ -4015,6 +4118,7 @@ export function JournalAuditTab({
 	};
 
 	const compliance = activeLog?.compliance;
+	const auditHasScore = Boolean(compliance && compliance.scorable !== false && compliance.plannedStudyMin > 0);
 	const displayEntries = [
 		...(activeLog?.actualEntries ?? []).filter((entry) => entry.source !== "manual"),
 		...manualEntries,
@@ -4054,7 +4158,7 @@ export function JournalAuditTab({
 					{historyDates.map((d) => {
 						const l = snap.config.logs[d];
 						const mins = Object.values(l?.loggedStudyMinBySubject ?? {}).reduce((a, b) => a + b, 0);
-						const adh = l?.compliance?.adherencePct;
+						const adh = l?.compliance && l.compliance.scorable !== false && l.compliance.plannedStudyMin > 0 ? l.compliance.adherencePct : undefined;
 						return (
 							<button
 								key={d}
@@ -4176,7 +4280,7 @@ export function JournalAuditTab({
 							disabled={hideEditorText}
 							onClick={() => setJournalText((prev) => redactSensitiveJournalText(prev))}
 							className="rounded border bg-background px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
-							title="Replace sensitive words in the editor with [Personal reset]"
+							title="Replace sensitive words in the editor with [private]"
 						>
 							Mask text now
 						</button>
@@ -4207,6 +4311,7 @@ export function JournalAuditTab({
 					placeholder={"Write freely what actually happened across 24h (timestamps or notes), e.g.:\n08:30-11:00 Giải 3 bài dãy số Giải tích Olympic\n12:00-13:00 Ăn trưa + nghỉ\n14:00-15:00 Mệt / personal reset\n20:00-21:45 Ôn FSRS Đại số + sửa mistake rule"}
 					className="w-full rounded-lg border bg-background p-2.5 text-xs leading-relaxed"
 				/>
+				<p className="text-[11px] text-muted-foreground">AI Auditor can extract explicit times from natural text, including 8r for 08:30. It sends the journal to the selected model. Check the timeline after scoring; missing times are left unknown. Your journal text remains unchanged.</p>
 
 				{/* Quick structured log row */}
 				<div className="rounded-lg border bg-muted/20 p-2.5">
@@ -4283,22 +4388,23 @@ export function JournalAuditTab({
 					</button>
 				</div>
 
+				{(snap.config.planHistory?.[selectedDate]?.length ?? 0) > 0 && <details className="rounded-xl border bg-muted/25 p-3"><summary className="cursor-pointer font-medium">Earlier plan versions ({snap.config.planHistory?.[selectedDate]?.length})</summary><p className="mt-2 text-muted-foreground">Only study blocks that finished while a version was active contribute to its audit. Versions are saved from now on; older missing plans cannot be reconstructed.</p><div className="mt-2 space-y-2">{snap.config.planHistory?.[selectedDate]?.map((version, index) => <div key={`${version.replacedAt}-${index}`} className="rounded border bg-card p-2"><div>Replaced {new Date(version.replacedAt).toLocaleString()}</div>{version.plan.blocks.filter((block) => block.type === "study").map((block) => <div key={block.id} className="mt-1 text-muted-foreground">{block.startTime}–{block.endTime} · {discreetMode ? "Title hidden in Discreet Mode" : block.title}</div>)}</div>)}</div></details>}
 				{compliance && (
 					<div className="rounded-xl border bg-muted/25 p-3">
 						<div className="flex flex-wrap items-center justify-between gap-2">
 							<div className="flex items-center gap-2">
 								<span className="text-sm font-semibold text-foreground">
-									Plan vs Actual Adherence: <span className="text-primary">{compliance.adherencePct}%</span>
+									Plan vs Actual Adherence: <span className="text-primary">{compliance.scorable === false || compliance.plannedStudyMin === 0 ? "Not enough data" : `${compliance.adherencePct}%`}</span>
 								</span>
 								<span className="rounded border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground">
 									{compliance.evaluatedBy === "llm" ? compliance.modelLabel ?? "AI Auditor" : "Local · 0 tokens"}
 								</span>
 							</div>
 							<span className="tabular-nums text-[11px] text-muted-foreground">
-								Actual {(compliance.actualStudyMin / 60).toFixed(1)}h / Planned {(compliance.plannedStudyMin / 60).toFixed(1)}h · Realism ×{compliance.realismRatio}
+								Actual {(compliance.actualStudyMin / 60).toFixed(1)}h / Planned {(compliance.plannedStudyMin / 60).toFixed(1)}h{auditHasScore ? ` · Realism ×${compliance.realismRatio}` : ""}
 							</span>
 						</div>
-						<p className="mt-1.5 text-foreground">{compliance.summary}</p>
+						<p className="mt-1.5 text-foreground">{auditHasScore ? compliance.summary : "There is not enough scheduled study to evaluate this plan."}</p>
 						<div className="mt-2 grid gap-2 sm:grid-cols-2">
 							{compliance.strengths.length > 0 && (
 								<div className="rounded-lg border bg-card p-2">
@@ -4310,7 +4416,7 @@ export function JournalAuditTab({
 									</ul>
 								</div>
 							)}
-							{compliance.frictionPoints.length > 0 && (
+							{auditHasScore && compliance.frictionPoints.length > 0 && (
 								<div className="rounded-lg border bg-card p-2">
 									<div className="mb-1 text-[11px] font-medium text-warning">Friction & Distractions</div>
 									<ul className="space-y-0.5 text-[11px] text-muted-foreground">
@@ -4321,11 +4427,12 @@ export function JournalAuditTab({
 								</div>
 							)}
 						</div>
-						{compliance.nextDayAdvice && (
+						{auditHasScore && compliance.nextDayAdvice && (
 							<div className="mt-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
 								<strong>Next-day calibration:</strong> {compliance.nextDayAdvice}
 							</div>
 						)}
+						{!auditHasScore && <details className="mt-2 rounded border p-2"><summary className="cursor-pointer">View original audit text</summary><p className="mt-1 text-muted-foreground">This older text may contain an unreliable score. It is kept as originally saved.</p><p className="mt-1 whitespace-pre-wrap">{compliance.summary}</p>{compliance.nextDayAdvice && <p className="mt-1 whitespace-pre-wrap">{compliance.nextDayAdvice}</p>}</details>}
 					</div>
 				)}
 
@@ -4340,13 +4447,13 @@ export function JournalAuditTab({
 									<summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
 										<span className="shrink-0 font-medium tabular-nums text-muted-foreground">{ent.startTime}–{ent.endTime}</span>
 										<span className="shrink-0 rounded border px-1 text-[9px] uppercase">{ent.category}</span>
-										<span className="min-w-0 flex-1 truncate">{ent.subject ? `[${ent.subject}] ` : ""}{ent.title}</span>
+										<span className="min-w-0 flex-1 truncate">{ent.subject ? `[${ent.subject}] ` : ""}{discreetMode ? redactSensitiveJournalText(ent.title) : ent.title}</span>
 										<span className="shrink-0 tabular-nums text-muted-foreground">{ent.minutes}m</span>
 										<span aria-hidden="true" className="shrink-0 text-muted-foreground transition-transform group-open:rotate-180">▾</span>
 									</summary>
 									<div className="space-y-1 border-t px-2.5 py-2 leading-relaxed">
 										{ent.subject && <p className="break-words text-muted-foreground">{ent.subject}</p>}
-										<p className="whitespace-pre-wrap break-words text-foreground">{ent.title}</p>
+										<p className="whitespace-pre-wrap break-words text-foreground">{discreetMode ? redactSensitiveJournalText(ent.title) : ent.title}</p>
 									</div>
 								</details>
 							))}

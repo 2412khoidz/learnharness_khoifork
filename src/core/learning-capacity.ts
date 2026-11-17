@@ -14,8 +14,12 @@
 
 import type { ExamPrepMistakeHints } from "./exam-prep.ts";
 import type { GraphFsrsSummary } from "./fsrs-graph.ts";
+import { summarizeRecallObservations, type RecallObservation, type RecallSubjectInsights } from "./recall-insights.ts";
 import type { MistakeRecord } from "./mistakes.ts";
 import {
+	addDaysToDate,
+	journalBedtimeForNight,
+	journalWakeForDate,
 	normalizeSubjectKey,
 	type PlannerConfig,
 	type PlannerPersonalSignals,
@@ -66,6 +70,9 @@ export interface LearningCapacityDimension {
 export interface SubjectLearningCapacityDetail {
 	subject: string;
 	readinessPct: number;
+	readinessBaseline: boolean;
+	reviewedConcepts: number;
+	graphConcepts: number;
 	retentionPct: number | null;
 	avgStabilityDays: number | null;
 	avgDifficulty: number | null;
@@ -74,7 +81,21 @@ export interface SubjectLearningCapacityDetail {
 	quizBiasPct: number | null;
 	brierScore: number | null;
 	paceFactor: number;
+	paceBaseline: boolean;
 	sampleCount: number;
+	recallEvidence: SubjectRecallEvidence;
+	recallInsights: RecallSubjectInsights;
+}
+
+/** Stored AI scan results are tentative assessments, not FSRS reviews or grades. */
+export interface SubjectRecallEvidence {
+	responses: number;
+	assessed: number;
+	correct: number;
+	partial: number;
+	wrong: number;
+	dontKnow: number;
+	uncertain: number;
 }
 
 export interface LearningCapacityReport {
@@ -131,6 +152,9 @@ export interface LearningCapacityTelemetryInput {
 	quizSamples?: readonly QuizConfidenceSample[];
 	practiceSamples?: readonly PracticeOutcomeSample[];
 	recallExplainCount?: number;
+	recallBySubject?: Readonly<Record<string, SubjectRecallEvidence>>;
+	recallObservationsBySubject?: Readonly<Record<string, readonly RecallObservation[]>>;
+	pastChatSessionCount?: number;
 	mistakes?: readonly MistakeRecord[];
 	now?: number;
 }
@@ -246,7 +270,9 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 	const w20 = input.fsrsWeights && input.fsrsWeights.length >= 21 ? roundTo(input.fsrsWeights[20]!, 3) : undefined;
 	const w3 = input.fsrsWeights && input.fsrsWeights.length >= 4 ? roundTo(input.fsrsWeights[3]!, 2) : undefined;
 
-	const memorySampleCount = fsrsReviewCount + nodeValues.length;
+	// Reviews and reviewed concepts overlap; adding them double-counts the
+	// same evidence. Fall back to concepts only if review records are absent.
+	const memorySampleCount = fsrsReviewCount || nodeValues.length;
 	let memoryScore: number | null = null;
 	if (memorySampleCount > 0) {
 		const stabScore = avgStabilityDays !== null ? clamp(Math.log1p(avgStabilityDays) / Math.log1p(35), 0, 1) * 42 : 20;
@@ -506,13 +532,13 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 
 	// ── 6. Chronobiological Alignment & SRL Endurance ──────────────────────────
 	const allLogs = Object.values(config.logs);
-	const complianceLogs = allLogs.filter((l) => Boolean(l.compliance));
+	const complianceLogs = allLogs.filter((l) => l.compliance && l.compliance.scorable !== false && l.compliance.plannedStudyMin > 0);
 	const avgAdherencePct =
 		complianceLogs.length > 0
 			? Math.round(complianceLogs.reduce((a, l) => a + (l.compliance?.adherencePct ?? 0), 0) / complianceLogs.length)
 			: null;
 	const sleepDurs = allLogs
-		.map((l) => sleepDurationHours(l.actualBedtime, l.actualWakeTime))
+		.map((l) => sleepDurationHours(journalBedtimeForNight(config.logs, addDaysToDate(l.date, -1))?.time, journalWakeForDate(config.logs, l.date)?.time))
 		.filter((h): h is number => h !== null);
 	const avgSleepHours = sleepDurs.length > 0 ? roundTo(sleepDurs.reduce((a, b) => a + b, 0) / sleepDurs.length, 1) : null;
 	const earlyWakeCount = allLogs.filter((l) => l.wokeEarlyUnintended).length;
@@ -656,6 +682,8 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 	const buildSubjectDetail = (
 		subjectName: string,
 		readinessPct: number,
+		readinessBaseline: boolean,
+		graphConcepts: number,
 		metrics?: LearningCapacityTelemetryInput["signals"]["learningProfile"] extends infer P
 			? P extends { bySubject: Record<string, infer M> }
 				? M
@@ -689,9 +717,13 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			paceFactor = roundTo(clamp(1.0 + quizAdj, 0.78, 1.45), 2);
 		}
 		const sampleCount = (metrics?.fsrsReviews ?? 0) + totalProbForSubj + qMeta.n;
+		const recallEvidence = input.recallBySubject?.[nk] ?? { responses: 0, assessed: 0, correct: 0, partial: 0, wrong: 0, dontKnow: 0, uncertain: 0 };
 		return {
 			subject: subjectName,
 			readinessPct,
+			readinessBaseline,
+			reviewedConcepts: metrics?.fsrsTrackedNodes ?? 0,
+			graphConcepts,
 			retentionPct: metrics?.retentionRatePct ?? null,
 			avgStabilityDays: metrics?.avgStabilityDays ?? null,
 			avgDifficulty: metrics?.avgDifficulty ?? null,
@@ -700,13 +732,17 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			quizBiasPct: qMeta.bias,
 			brierScore: qMeta.brier,
 			paceFactor,
+			paceBaseline: (metrics?.fsrsReviews ?? 0) < 4 && totalProbForSubj < 2 && qMeta.n < 4,
 			sampleCount,
+			recallEvidence,
+			recallInsights: summarizeRecallObservations(input.recallObservationsBySubject?.[nk] ?? [], now),
 		};
 	};
 
 	for (const sig of signals.subjectSignals) {
 		seenSubjKeys.add(normalizeSubjectKey(sig.label));
-		subjectBreakdown.push(buildSubjectDetail(sig.label, sig.readinessPct, lp?.bySubject[sig.label]));
+		const metrics = lp?.bySubject[sig.label];
+		subjectBreakdown.push(buildSubjectDetail(sig.label, sig.readinessPct, (metrics?.fsrsTrackedNodes ?? 0) === 0, sig.nodeCount, metrics));
 	}
 
 	if (lp) {
@@ -714,8 +750,8 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			const nk = normalizeSubjectKey(metrics.subject);
 			if (seenSubjKeys.has(nk)) continue;
 			seenSubjKeys.add(nk);
-			const detail = buildSubjectDetail(metrics.subject, 35, metrics);
-			if (detail.sampleCount === 0 && metrics.loggedPlannerMinutes === 0) continue;
+			const detail = buildSubjectDetail(metrics.subject, 35, true, 0, metrics);
+			if (detail.sampleCount === 0 && metrics.loggedPlannerMinutes === 0 && detail.recallEvidence.responses === 0 && detail.recallEvidence.assessed === 0) continue;
 			subjectBreakdown.push(detail);
 		}
 	}
@@ -769,7 +805,7 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			practiceProblems: totalProbSamples,
 			...(input.recallExplainCount !== undefined ? { recallExplainCount: input.recallExplainCount } : {}),
 			mistakeRecords: analyzedErrCount,
-			pastChatSessions: signals.recentSessions.length,
+			pastChatSessions: input.pastChatSessionCount ?? signals.recentSessions.length,
 			loggedPlannerDays: allLogs.length,
 		},
 		metacognition: {
