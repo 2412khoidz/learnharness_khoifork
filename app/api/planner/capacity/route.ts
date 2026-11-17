@@ -11,7 +11,9 @@ const ALLOWED_ROLES = new Set<string>(["researcher", "prober", "analyst", "sideQ
 export async function GET(request: Request) {
 	const { searchParams } = new URL(request.url);
 	const date = searchParams.get("date") ?? undefined;
-	return Response.json(readPlannerLearningCapacityServer({ date }), {
+	const { recallSources: _recallSources, ...capacity } = readPlannerLearningCapacityServer({ date });
+	void _recallSources;
+	return Response.json(capacity, {
 		headers: { "Cache-Control": "no-store" },
 	});
 }

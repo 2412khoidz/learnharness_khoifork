@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { LearningCapacityReport } from "@/src/core";
 import { recallAnswerHref } from "@/src/core";
 import { BrailleSpinner } from "@/components/braille-spinner";
+import { RecallAnalysis } from "@/components/recall-analysis";
 import { cn } from "@/lib/utils";
 import {
 	ActivityIcon,
@@ -34,7 +35,6 @@ interface CapacityResponse {
 
 function RecallInsightsDetail({ insights, range }: { insights: LearningCapacityReport["subjectBreakdown"][number]["recallInsights"]; range: "last30" | "allTime" }) {
 	const data = insights[range];
-	const patterns = range === "last30" ? insights.patterns : insights.allTimePatterns;
 	return <div className="mt-2 min-w-56 space-y-1 text-muted-foreground">
 		<p>{data.days} days · {Math.max(0, data.responses - data.assessed)} not assessed{data.needsReview ? ` (${data.needsReview} changed answers need review)` : ""}</p>
 		{data.staleExamples.length > 0 && <p>Changed answers: {data.staleExamples.map((item, index) => <a key={`${item.chatId}:${item.toolCallId ?? index}`} className="underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>open answer {index + 1} </a>)}</p>}
@@ -44,7 +44,6 @@ function RecallInsightsDetail({ insights, range }: { insights: LearningCapacityR
 		{data.medianTimerMin !== null && <p>Recorded timer: median {data.medianTimerMin} min ({data.timerCount} answers; may include other activities).</p>}
 		{data.medianElapsedMin !== null && <p>Elapsed question-to-answer: median {data.medianElapsedMin} min ({data.elapsedCount} answers; {data.elapsedOver3h} over 3h). This includes breaks and is not solving time.</p>}
 		{range === "last30" && <p>{insights.trend ? `Compared with the previous 30 days: correct ${insights.trend.correctRateDelta >= 0 ? "+" : ""}${insights.trend.correctRateDelta} pp, partial ${insights.trend.partialRateDelta >= 0 ? "+" : ""}${insights.trend.partialRateDelta} pp. Question difficulty may differ.` : "Not enough assessed answers across both periods to compare trends."}</p>}
-		{patterns.length > 0 && <div>Recurring topics (AI labels): {patterns.map((pattern) => <div key={`${pattern.topic}:${pattern.errorType}`}>{pattern.topic} · {pattern.errorType} · {pattern.count} {pattern.examples.map((item, index) => <a key={`${item.chatId}:${item.toolCallId ?? index}`} className="underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>answer {index + 1} </a>)}</div>)}</div>}
 	</div>;
 }
 
@@ -302,6 +301,7 @@ export function PlannerCapacityModal({
 									{r.dataCoverage.mistakeRecords} Mistakes analyzed · {r.dataCoverage.pastChatSessions} Past sessions
 								</span>
 							</div>
+							<RecallAnalysis report={r} onRefresh={fetchReport} />
 
 							{/* 6 Scientific Criteria Cards */}
 							<div>

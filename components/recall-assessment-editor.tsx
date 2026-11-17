@@ -7,7 +7,7 @@ type Entry = { verdict?: RecallVerdict; help?: RecallHelp; timerMs?: number; upd
 type Loaded = { fingerprint: string; entry: Entry | null; fsrsReview: { rating: number; nodeId: string } | null };
 
 /** A local correction affects recall evidence only; it never changes an FSRS review. */
-export function RecallAssessmentEditor({ id, verdict }: { id: string; verdict: RecallVerdict }) {
+export function RecallAssessmentEditor({ id, verdict, onSaved }: { id: string; verdict: RecallVerdict; onSaved?: () => void }) {
 	const [loaded, setLoaded] = useState<Loaded | null>(null);
 	const [selected, setSelected] = useState<RecallVerdict>(verdict);
 	const [help, setHelp] = useState<RecallHelp>("unknown");
@@ -34,6 +34,7 @@ export function RecallAssessmentEditor({ id, verdict }: { id: string; verdict: R
 			const body = await response.json() as { entry?: Entry; error?: string };
 			if (!response.ok || !body.entry) throw new Error(body.error || "Could not save correction.");
 			setLoaded({ ...loaded, entry: body.entry }); setStatus("Saved for Learning Capacity. Existing FSRS reviews are unchanged.");
+			onSaved?.();
 		} catch (error) { setStatus(error instanceof Error ? error.message : "Could not save correction."); }
 		finally { setBusy(false); }
 	};

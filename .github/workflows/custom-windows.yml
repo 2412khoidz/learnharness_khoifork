@@ -54,8 +54,12 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest `
-            -Uri "https://github.com/amosblomqvist/learnharness/pull/223.patch" `
+            -Uri "https://github.com/amosblomqvist/learnharness/commit/6c92c4c006bafcd628dbfed1f16f69ef6501b5db.patch" `
             -OutFile "copilot-student.patch"
+
+          if ((Get-FileHash copilot-student.patch -Algorithm SHA256).Hash.ToLower() -ne "d0e2367e1ef772473cbb87b97b088c1c8b13cb9e3fdee390afb8c36672d2903f") {
+            throw "Copilot patch checksum mismatch"
+          }
 
           git apply --check --exclude="tests/subscription-stream.test.ts" copilot-student.patch
           if ($LASTEXITCODE -ne 0) {
@@ -69,6 +73,21 @@ jobs:
 
           Remove-Item copilot-student.patch
           git diff --stat
+
+      - name: Test optional Copilot Auto patch
+        if: ${{ inputs.copilot_student }}
+        env:
+          NODE_ENV: test
+          LH_TEST_COPILOT_AUTO: "1"
+        run: |
+          node --import=tsx --test --test-name-pattern="Auto" tests/subscription-auth.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --import=tsx --test tests/subscription-stream.test.ts
+
+      - name: Test recall and Google stream changes
+        env:
+          NODE_ENV: test
+        run: node --import=tsx --test tests/google-stream-tail.test.ts tests/recall-fsrs.test.ts tests/recall-fsrs-ui.test.tsx tests/recall-insights.test.ts tests/recall-groups.test.ts tests/recall-analysis-ui.test.tsx
 
       - name: Check TypeScript
         run: npm run typecheck
@@ -86,6 +105,14 @@ jobs:
 
       - name: Package application server
         run: node scripts/build-server.mjs
+
+      - name: Verify Google stream fix in packaged server
+        shell: pwsh
+        run: |
+          $sdk = ".next/standalone/node_modules/@google/genai/dist/node/index.mjs"
+          if (!(Test-Path -LiteralPath $sdk) -or !(Select-String -Quiet -LiteralPath $sdk -SimpleMatch "LearnHarness: only accept an undelimited")) {
+            throw "Packaged Google SDK is missing the verified stream fix"
+          }
 
       - name: Test Electron server
         run: node scripts/smoke-server.mjs --electron

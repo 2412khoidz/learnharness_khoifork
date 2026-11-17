@@ -15,6 +15,7 @@
 import type { ExamPrepMistakeHints } from "./exam-prep.ts";
 import type { GraphFsrsSummary } from "./fsrs-graph.ts";
 import { summarizeRecallObservations, type RecallObservation, type RecallSubjectInsights } from "./recall-insights.ts";
+import type { RecallGroupView } from "./recall-groups.ts";
 import type { MistakeRecord } from "./mistakes.ts";
 import {
 	addDaysToDate,
@@ -85,6 +86,7 @@ export interface SubjectLearningCapacityDetail {
 	sampleCount: number;
 	recallEvidence: SubjectRecallEvidence;
 	recallInsights: RecallSubjectInsights;
+	approvedRecallGroups?: { last30: RecallGroupView[]; allTime: RecallGroupView[] };
 }
 
 /** Stored AI scan results are tentative assessments, not FSRS reviews or grades. */
@@ -107,6 +109,10 @@ export interface LearningCapacityReport {
 	recommendedRealismFactor: number; // 0.65..1.25 (daily capacity ratio)
 	recommendedDailyHours: number | null;
 	dataCoverage: {
+		recallAnswers?: number;
+		recallAssigned?: number;
+		recallUnassigned?: number;
+		recallUnassignedExamples?: Array<{ chatId: string; sourceMessageId?: string; toolCallId?: string }>;
 		fsrsReviews: number;
 		trackedPropositions: number;
 		hasCustomFsrsWeights: boolean;

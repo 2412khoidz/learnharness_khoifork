@@ -13,14 +13,15 @@ after(() => { const resolved = fs.realpathSync(dir); if (!resolved.startsWith(fs
 it("requires explicit concepts and ratings, replays original times, rejects duplicates and can undo", async () => {
 	const { stores } = await import("../src/server/stores.ts");
 	const { collectRecallCandidates } = await import("../src/core/mistakes.ts");
-	const { confirmRecallFsrs, recallFsrsReviewData, undoRecallFsrsBatch, suggestRecallMappings, recallMappingEngineOverride } = await import("../src/server/recall-fsrs.ts");
+	const { confirmRecallFsrs, recallFsrsReviewData, undoRecallFsrsBatch, suggestRecallMappings, suggestRecallMappingsSafely, recallMappingEngineOverride } = await import("../src/server/recall-fsrs.ts");
 	const { readRecallFsrsEvents } = await import("../src/server/recall-fsrs-store.ts");
 	const { readFlashcardsSnapshot } = await import("../src/server/graph-fsrs.ts");
 	const { projectRecallFsrs } = await import("../src/core/recall-fsrs.ts");
 	const { computeGraphFsrsSummary } = await import("../src/core/fsrs-graph.ts");
 	const { graphView } = await import("../src/server/graph.ts");
-	const { readPlannerLearningCapacityServer } = await import("../src/server/planner.ts");
+	const { readPlannerLearningCapacityServer, capacitySubjectsForAi, matchRecallSubject } = await import("../src/server/planner.ts");
 	const { recallOverrideInfo, saveRecallOverride } = await import("../src/server/recall-overrides.ts");
+	const { recallGroupPreview, suggestRecallGroups, approveRecallGroups, recallGroupEngineOverride } = await import("../src/server/recall-groups.ts");
 	const route = await import("../app/api/mistakes/recall-fsrs/route.ts");
 	const chat = stores.chatStore.createChat("Algebra");
 	const day1 = Date.parse("2026-01-01T09:00:00Z"), day2 = Date.parse("2026-01-05T09:00:00Z"), now = Date.parse("2026-01-08T09:00:00Z");
@@ -42,6 +43,18 @@ it("requires explicit concepts and ratings, replays original times, rejects dupl
 	assert.equal(suggestions.items[0]?.nodeId, "node_rank");
 	assert.equal(recallFsrsReviewData().results.find((item) => item.id === drafts[0]!.id)?.aiSuggestion?.reason, "Bài hỏi về hạng ma trận.");
 	assert.equal(fs.existsSync(path.join(dir, "recall-fsrs.json")), false, "AI mapping must not create a review");
+	const partialModel = createFauxCore({ tokenSize: { min: 64, max: 64 } });
+	partialModel.setResponses([
+		fauxAssistantMessage("", { stopReason: "error", errorMessage: "Incomplete JSON segment at the end" }),
+		fauxAssistantMessage("", { stopReason: "error", errorMessage: "Incomplete JSON segment at the end" }),
+		fauxAssistantMessage([fauxToolCall("submit_recall_concept_suggestions", { items: [{ answerId: drafts[0]!.id, nodeId: "node_rank", reason: "A supported match." }] } as ToolCall["arguments"], { id: "split-success" })], { stopReason: "toolUse" }),
+		fauxAssistantMessage("", { stopReason: "error", errorMessage: "Incomplete JSON segment at the end" }),
+	]);
+	recallMappingEngineOverride.current = { model: partialModel.getModel(), streamFn: partialModel.streamSimple };
+	const split = await suggestRecallMappingsSafely(drafts.map((draft) => draft.id));
+	assert.equal(split.items.length, 1); assert.equal(split.failures.length, 1);
+	assert.equal(recallFsrsReviewData().results.find((item) => item.id === drafts[0]!.id)?.aiSuggestion?.reason, "A supported match.", "successful split is retained even when another fails");
+	assert.equal(fs.existsSync(path.join(dir, "recall-fsrs.json")), false);
 	recallMappingEngineOverride.current = undefined;
 	const correction = recallOverrideInfo(drafts[0]!.id);
 	const savedCorrection = saveRecallOverride({ id: drafts[0]!.id, fingerprint: correction.fingerprint, expectedUpdatedAt: null, verdict: "correct", help: "independent", timerMs: 60000 });
@@ -51,9 +64,29 @@ it("requires explicit concepts and ratings, replays original times, rejects dupl
 	assert.equal(evidenceReport?.recallInsights.allTime.correct, 1); assert.equal(evidenceReport?.recallInsights.allTime.partial, 1);
 	assert.equal(evidenceReport?.recallInsights.allTime.confirmed, 1); assert.equal(evidenceReport?.recallInsights.allTime.timerCount, 1);
 	assert.equal(fs.existsSync(path.join(dir, "recall-fsrs.json")), false, "correcting recall evidence never writes FSRS");
+	const groupPreview = recallGroupPreview("Algebra");
+	assert.equal(groupPreview.items.length, 2); assert.equal(groupPreview.items.find((item) => item.id === drafts[0]!.id)?.verdict, "correct", "learner correction takes precedence");
+	const grouping = createFauxCore({ tokenSize: { min: 64, max: 64 } });
+	grouping.setResponses([fauxAssistantMessage([fauxToolCall("submit_recall_topic_groups", { groups: [{ name: "Matrix rank", reason: "Cùng xét hạng ma trận.", answerIds: drafts.map((draft) => draft.id) }] } as ToolCall["arguments"], { id: "grouping" })], { stopReason: "toolUse" })]);
+	recallGroupEngineOverride.current = { model: grouping.getModel(), streamFn: grouping.streamSimple };
+	const proposed = await suggestRecallGroups("Algebra", groupPreview.items.map(({ id, fingerprint }) => ({ id, fingerprint })));
+	assert.equal(proposed.groups.length, 1); assert.equal(recallGroupPreview("Algebra").draft?.length, 1, "AI proposals are stored as a local draft");
+	assert.equal(readPlannerLearningCapacityServer({ now }).report.subjectBreakdown.find((item) => item.subject === "Algebra")?.approvedRecallGroups?.allTime.length, 0);
+	assert.throws(() => approveRecallGroups("Algebra", [{ ...proposed.groups[0]!, members: [proposed.groups[0]!.members[0]!, proposed.groups[0]!.members[0]!] }], groupPreview.approvedRevision), /duplicated/);
+	assert.equal(approveRecallGroups("Algebra", proposed.groups, groupPreview.approvedRevision).saved, 1);
+	assert.throws(() => approveRecallGroups("Algebra", proposed.groups, groupPreview.approvedRevision), /changed elsewhere/);
+	const approvedGroup = readPlannerLearningCapacityServer({ now }).report.subjectBreakdown.find((item) => item.subject === "Algebra")?.approvedRecallGroups?.allTime[0];
+	assert.equal(approvedGroup?.count, 2); assert.equal(approvedGroup?.distribution.correct, 1); assert.equal(approvedGroup?.distribution.partial, 1);
+	assert.equal(fs.existsSync(path.join(dir, "recall-fsrs.json")), false, "grouping never changes FSRS");
+	assert.equal(capacitySubjectsForAi(readPlannerLearningCapacityServer({ now }).report).find((item) => item.subject === "Algebra")?.approvedRecallGroups?.allTime.length, 1, "Coach and planner receive approved current groups");
+	assert.equal(matchRecallSubject("Math Course", ["Math Alpha Course", "Math Beta Course"], ""), undefined, "ambiguous subject stays unassigned");
+	assert.equal(matchRecallSubject("Math Alpha Course", ["Math Alpha Course", "Math Beta Course"], ""), "Math Alpha Course");
+	recallGroupEngineOverride.current = undefined;
 	assert.equal((await route.GET()).status, 200);
 	assert.equal((await route.POST(new Request("http://localhost/api/mistakes/recall-fsrs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: [{ answerId: drafts[0]!.id }] }) }))).status, 400);
-	const selection = (index: number, nodeId: string, rating: number) => ({ answerId: drafts[index]!.id, nodeId, rating, answerRevision: preview.results.find((item) => item.id === drafts[index]!.id)!.revision, nodeRevision: preview.nodes.find((item) => item.id === nodeId)?.revision ?? "missing" });
+	assert.throws(() => confirmRecallFsrs([{ answerId: drafts[0]!.id, nodeId: "node_rank", rating: 3, answerRevision: preview.results[0]!.revision, nodeRevision: preview.nodes.find((item) => item.id === "node_rank")!.revision }], now), /changed/, "a correction invalidates a previously displayed assessment");
+	const currentPreview = recallFsrsReviewData();
+	const selection = (index: number, nodeId: string, rating: number) => ({ answerId: drafts[index]!.id, nodeId, rating, answerRevision: currentPreview.results.find((item) => item.id === drafts[index]!.id)!.revision, nodeRevision: currentPreview.nodes.find((item) => item.id === nodeId)?.revision ?? "missing" });
 	assert.equal(fs.existsSync(path.join(dir, "recall-fsrs.json")), false, "preview must not mutate data");
 	assert.throws(() => confirmRecallFsrs([selection(0, "missing", 3)], now));
 	assert.throws(() => confirmRecallFsrs([{ ...selection(0, "node_rank", 3), nodeRevision: "stale" }], now), /changed/);
@@ -94,4 +127,6 @@ it("requires explicit concepts and ratings, replays original times, rejects dupl
 	assert.equal(recallFsrsReviewData().results.some((result) => result.id === drafts[0]!.id), false, "stale AI assessments are not offered after an answer changes");
 	const changed = readPlannerLearningCapacityServer({ now }).report.subjectBreakdown.find((item) => item.subject === "Algebra")!.recallInsights.allTime;
 	assert.equal(changed.needsReview, 1); assert.equal(changed.assessed, 0, "stale grades must not be counted");
+	assert.equal(readPlannerLearningCapacityServer({ now }).report.subjectBreakdown.find((item) => item.subject === "Algebra")?.approvedRecallGroups?.allTime[0]?.stale, true, "changed or missing source answers invalidate the approved group");
+	assert.equal(capacitySubjectsForAi(readPlannerLearningCapacityServer({ now }).report).find((item) => item.subject === "Algebra")?.approvedRecallGroups?.allTime.length, 0, "stale groups are not sent to Coach or planner");
 });

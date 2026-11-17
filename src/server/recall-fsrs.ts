@@ -13,10 +13,15 @@ import { liveRecallGrades, recallScanStatus } from "./recall-scan.ts";
 import { stores } from "./stores.ts";
 import { readRecallFsrsEvents, recallFsrsLedgerPath } from "./recall-fsrs-store.ts";
 import { analystEngine } from "./mistake-analysis.ts";
+import { readRecallOverrides, recallFingerprint } from "./recall-overrides.ts";
+import { isIncompleteProviderResponse, mappingErrorMessage, retryIncompleteOnce } from "../core/recall-mapping.ts";
+import { listAvailablePlannerRoles, resolvePlannerEngine } from "./planner.ts";
+import type { ModelRole } from "../../config.ts";
 
 const revisionOf = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const nodeRevision = (node: { id: string; name: string; statement: string }) => revisionOf([node.id, node.name, node.statement]);
 const answerRevision = (result: RecallScanResult) => revisionOf([result.id, result.verdict, result.draft, result.strengths, result.missing, result.correction, result.evidence]);
+const assessmentRevision = (result: RecallScanResult, override: ReturnType<typeof readRecallOverrides>[number] | undefined) => override?.verdict && override.fingerprint === recallFingerprint(result.draft) ? revisionOf([answerRevision(result), override.verdict]) : answerRevision(result);
 
 interface MappingSuggestion { answerId: string; answerRevision: string; nodeId: string; nodeRevision: string; reason: string; model: string }
 const suggestionsFile = () => path.join(PATHS.data, "recall-mapping-suggestions.json");
@@ -59,12 +64,17 @@ export function recallFsrsReviewData() {
 	const lastBatchId = events.at(-1)?.batchId;
 	const reviewed = reviewedFlashcardIds();
 	const saved = new Map(readSuggestions().map((entry) => [entry.answerId, entry]));
+	const overrides = new Map(readRecallOverrides().map((entry) => [entry.id, entry]));
 	const byId = new Map(nodes.map((node) => [node.id, node]));
 	const tokenize = (value: string) => new Set(value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").split(/[^a-z0-9]+/).filter((word) => word.length >= 4));
 	return {
 		lastBatch: lastBatchId ? { id: lastBatchId, count: events.filter((event) => event.batchId === lastBatchId).length } : null,
 		nodes: nodes.map((node) => ({ id: node.id, name: node.name, statement: node.statement, reviewedFlashcard: reviewed.has(node.id), revision: nodeRevision(node) })),
 		results: assessments().map((result) => {
+			const override = overrides.get(result.id);
+			const validOverride = override && override.fingerprint === recallFingerprint(result.draft) ? override : undefined;
+			const effectiveVerdict = validOverride?.verdict ?? result.verdict;
+			const suggestionRevision = assessmentRevision(result, validOverride);
 			const questionWords = tokenize(`${result.draft.question} ${result.topic}`);
 			const suggestedNodeIds = nodes.map((node) => {
 				const names = tokenize(node.name); let matches = 0;
@@ -73,8 +83,9 @@ export function recallFsrsReviewData() {
 				return { id: node.id, score: names.size ? matches / names.size + (sameSession && matches ? 0.25 : 0) : 0 };
 			}).filter((item) => item.score >= 0.5).sort((a, b) => b.score - a.score).slice(0, 4).map((item) => item.id);
 			const suggestion = saved.get(result.id), target = suggestion?.nodeId ? byId.get(suggestion.nodeId) : undefined;
-			const validSuggestion = suggestion && suggestion.answerRevision === answerRevision(result) && (!suggestion.nodeId || (target && !reviewed.has(target.id) && nodeRevision(target) === suggestion.nodeRevision)) ? suggestion : null;
-			return { ...result, revision: answerRevision(result), suggestedNodeIds, applied: applied.has(result.id), aiSuggestion: validSuggestion };
+			const validSuggestion = suggestion && suggestion.answerRevision === suggestionRevision && (!suggestion.nodeId || (target && !reviewed.has(target.id) && nodeRevision(target) === suggestion.nodeRevision)) ? suggestion : null;
+			const aiSuggestionIssue = suggestion && !validSuggestion ? (!target && suggestion.nodeId ? "The suggested concept no longer exists. Ask AI for a new suggestion." : target && reviewed.has(target.id) ? "The suggested concept now has a reviewed Flashcard and cannot be imported here." : "The answer, assessment, or concept changed since the suggestion; ask AI again.") : undefined;
+			return { ...result, revision: suggestionRevision, suggestionRevision, effectiveVerdict, assessmentSource: validOverride?.verdict ? "user" as const : "ai" as const, suggestedNodeIds, applied: applied.has(result.id), aiSuggestion: validSuggestion, aiSuggestionIssue };
 		}),
 	};
 }
@@ -82,7 +93,7 @@ export function recallFsrsReviewData() {
 const mappingSchema = Type.Object({ items: Type.Array(Type.Object({ answerId: Type.String(), nodeId: Type.String(), reason: Type.String() })) });
 export const recallMappingEngineOverride: { current?: PiEngine } = {};
 /** Paid only when explicitly invoked. Suggestions never update FSRS. */
-export async function suggestRecallMappings(ids: readonly string[], signal?: AbortSignal, discussion?: { question: string; history: Array<{ role: string; text: string }> }) {
+export async function suggestRecallMappings(ids: readonly string[], signal?: AbortSignal, discussion?: { question: string; history: Array<{ role: string; text: string }> }, preferredRole?: ModelRole) {
 	if (!ids.length || ids.length > 10 || new Set(ids).size !== ids.length || ids.some((id) => typeof id !== "string")) throw new Error("Choose between 1 and 10 different answers.");
 	if (discussion && (ids.length !== 1 || !discussion.question.trim() || discussion.question.length > 2000 || discussion.history.length > 12)) throw new Error("Invalid discussion.");
 	const data = recallFsrsReviewData();
@@ -91,20 +102,23 @@ export async function suggestRecallMappings(ids: readonly string[], signal?: Abo
 	if (results.some((result) => !result || result.applied)) throw new Error("An answer is unavailable or already linked; refresh first.");
 	const nodes = data.nodes.filter((node) => !node.reviewedFlashcard);
 	const allowed = new Map(nodes.map((node) => [node.id, node]));
+	if (preferredRole && !listAvailablePlannerRoles().some((entry) => entry.role === preferredRole)) throw new Error("The selected model is unavailable. Choose another model.");
+	const resolved = preferredRole ? resolvePlannerEngine("coach", preferredRole) : null;
+	if (preferredRole && resolved?.role !== preferredRole) throw new Error("The selected model is unavailable. Choose another model.");
 	let model = "analyst"; let inputTokens = 0; let outputTokens = 0;
 	const response = await runSubmitAgent<{ items: Array<{ answerId: string; nodeId: string; reason: string }> }>({
 		role: "analyst", toolName: "submit_recall_concept_suggestions", toolDescription: "Suggest at most one existing concept per answer with a grounded explanation.",
-		parameters: mappingSchema, fill: (value) => value as { items: Array<{ answerId: string; nodeId: string; reason: string }> }, engine: recallMappingEngineOverride.current ?? analystEngine(), signal,
-		systemPrompt: "Match each recall question to the single most relevant existing concept. Match meaning, not merely words. Read the learner answer and assessment: for a correct answer explain the tested concept; otherwise describe the supported gap or error. If no concept fits or evidence is insufficient, use an empty nodeId and explain why. Never invent a concept ID. Explain in Vietnamese. If asked a follow-up, answer the question in reason and change the recommendation only when justified. These are proposals; the learner must approve FSRS separately.",
-		prompt: JSON.stringify({ concepts: nodes.map((node) => ({ id: node.id, name: node.name, statement: node.statement.slice(0, 250) })), answers: results.map((result) => ({ id: result!.id, subject: result!.sessionTitle, question: result!.draft.question.slice(0, 1800), answer: result!.draft.yourAnswer.slice(0, 2200), correctAnswer: result!.draft.correctAnswer.slice(0, 1500), verdict: result!.verdict, strengths: result!.strengths.slice(0, 700), missing: result!.missing.slice(0, 700), correction: result!.correction.slice(0, 700), priorSuggestion: result!.aiSuggestion })), discussion }),
+		parameters: mappingSchema, fill: (value) => value as { items: Array<{ answerId: string; nodeId: string; reason: string }> }, engine: recallMappingEngineOverride.current ?? resolved?.engine ?? analystEngine(), signal,
+		systemPrompt: "Match each recall question to the single most relevant existing concept. Match meaning, not merely words. Read the learner answer and assessment: for a correct answer explain the tested concept; otherwise describe the supported gap or error. If assessmentSource is user, the learner's corrected verdict supersedes the original AI verdict; old AI feedback may conflict and must not be treated as certain. If no concept fits or evidence is insufficient, use an empty nodeId and explain why. Never invent a concept ID. Explain in Vietnamese. If asked a follow-up, answer the question in reason and change the recommendation only when justified. These are proposals; the learner must approve FSRS separately.",
+		prompt: JSON.stringify({ concepts: nodes.map((node) => ({ id: node.id, name: node.name, statement: node.statement.slice(0, 250) })), answers: results.map((result) => ({ id: result!.id, subject: result!.sessionTitle, question: result!.draft.question.slice(0, 1800), answer: result!.draft.yourAnswer.slice(0, 2200), correctAnswer: result!.draft.correctAnswer.slice(0, 1500), verdict: result!.effectiveVerdict, assessmentSource: result!.assessmentSource, originalAiVerdict: result!.verdict, strengths: result!.strengths.slice(0, 700), missing: result!.missing.slice(0, 700), correction: result!.correction.slice(0, 700), priorSuggestion: result!.aiSuggestion })), discussion }),
 		onStep: (usage, label) => { model = label; inputTokens += usage.input || 0; outputTokens += usage.output || 0; }, neverSubmitted: "The model did not return concept suggestions.",
 		validate: (value) => value.items.length !== ids.length || new Set(value.items.map((item) => item.answerId)).size !== ids.length || value.items.some((item) => !ids.includes(item.answerId) || (item.nodeId && !allowed.has(item.nodeId)) || !item.reason.trim()) ? "Return each supplied answer once, with an existing node ID or an empty ID and an explanation." : null,
 	});
-	const updates: MappingSuggestion[] = response.items.map((item) => ({ answerId: item.answerId, answerRevision: resultMap.get(item.answerId)!.revision, nodeId: item.nodeId, nodeRevision: item.nodeId ? allowed.get(item.nodeId)!.revision : "", reason: item.reason.trim().slice(0, 2000), model }));
+	const updates: MappingSuggestion[] = response.items.map((item) => ({ answerId: item.answerId, answerRevision: resultMap.get(item.answerId)!.suggestionRevision, nodeId: item.nodeId, nodeRevision: item.nodeId ? allowed.get(item.nodeId)!.revision : "", reason: item.reason.trim().slice(0, 2000), model }));
 	const latest = recallFsrsReviewData();
 	for (const update of updates) {
 		const answer = latest.results.find((item) => item.id === update.answerId), node = latest.nodes.find((item) => item.id === update.nodeId);
-		if (!answer || answer.applied || answer.revision !== update.answerRevision || (update.nodeId && (!node || node.reviewedFlashcard || node.revision !== update.nodeRevision))) throw new Error("An answer or concept changed during analysis; refresh before trying again.");
+		if (!answer || answer.applied || answer.suggestionRevision !== update.answerRevision || (update.nodeId && (!node || node.reviewedFlashcard || node.revision !== update.nodeRevision))) throw new Error("An answer, assessment or concept changed during analysis; refresh before trying again.");
 	}
 	const previous = readSuggestions().filter((item) => !ids.includes(item.answerId));
 	fs.mkdirSync(PATHS.data, { recursive: true });
@@ -112,11 +126,30 @@ export async function suggestRecallMappings(ids: readonly string[], signal?: Abo
 	return { items: updates, usage: { input: inputTokens, output: outputTokens }, model };
 }
 
+/** One retry for incomplete provider output; split an unsuccessful batch only once.
+ * Each successful sub-batch is committed independently; no FSRS event is written. */
+export async function suggestRecallMappingsSafely(ids: readonly string[], signal?: AbortSignal, discussion?: { question: string; history: Array<{ role: string; text: string }> }, preferredRole?: ModelRole) {
+	try { return { ...(await retryIncompleteOnce(() => suggestRecallMappings(ids, signal, discussion, preferredRole), signal)), failures: [] as Array<{ ids: readonly string[]; error: string }> }; }
+	catch (error) {
+		if (!isIncompleteProviderResponse(error) || signal?.aborted || ids.length < 2 || discussion) throw new Error(mappingErrorMessage(error, signal));
+		const mid = Math.ceil(ids.length / 2), parts = [ids.slice(0, mid), ids.slice(mid)];
+		const items: MappingSuggestion[] = [], failures: Array<{ ids: readonly string[]; error: string }> = [];
+		let input = 0, output = 0, model = "";
+		for (const part of parts) {
+			if (signal?.aborted) { failures.push({ ids: part, error: mappingErrorMessage(error, signal) }); continue; }
+			try { const result = await suggestRecallMappings(part, signal, undefined, preferredRole); items.push(...result.items); input += result.usage.input; output += result.usage.output; model = result.model; }
+			catch (failure) { failures.push({ ids: part, error: mappingErrorMessage(failure, signal) }); }
+		}
+		return { items, failures, model, usage: { input, output } };
+	}
+}
+
 export function confirmRecallFsrs(items: readonly { answerId: string; nodeId: string; rating: number; answerRevision: string; nodeRevision: string }[], now = Date.now()): number {
 	if (!items.length || items.length > 100) throw new Error("Select between 1 and 100 answers.");
 	const nodes = new Map(graphView().propositions.map((node) => [node.id, node]));
 	const reviewed = reviewedFlashcardIds();
 	const sources = new Map(assessments().map((item) => [item.id, item]));
+	const overrides = new Map(readRecallOverrides().map((entry) => [entry.id, entry]));
 	const events = readRecallFsrsEvents();
 	const seen = new Set(events.filter((event) => !event.revertedAt).map((event) => event.answerId));
 	const additions: RecallFsrsEvent[] = [];
@@ -125,7 +158,7 @@ export function confirmRecallFsrs(items: readonly { answerId: string; nodeId: st
 		const result = sources.get(item.answerId);
 		const node = nodes.get(item.nodeId);
 		const answeredAt = result ? Date.parse(result.draft.answeredAt) : NaN;
-		if (!result || !node || item.answerRevision !== answerRevision(result) || item.nodeRevision !== nodeRevision(node) || reviewed.has(item.nodeId) || seen.has(item.answerId) || ![1, 2, 3, 4].includes(item.rating) || !Number.isFinite(answeredAt) || answeredAt <= 0 || answeredAt > now) throw new Error("An answer, concept, rating or original answer time is invalid, changed, already saved, or has a separate reviewed Flashcard. Refresh and review again.");
+		if (!result || !node || item.answerRevision !== assessmentRevision(result, overrides.get(item.answerId)) || item.nodeRevision !== nodeRevision(node) || reviewed.has(item.nodeId) || seen.has(item.answerId) || ![1, 2, 3, 4].includes(item.rating) || !Number.isFinite(answeredAt) || answeredAt <= 0 || answeredAt > now) throw new Error("An answer, assessment, concept, rating or original answer time is invalid, changed, already saved, or has a separate reviewed Flashcard. Refresh and review again.");
 		seen.add(item.answerId);
 		additions.push({ answerId: item.answerId, nodeId: item.nodeId, rating: item.rating as 1 | 2 | 3 | 4, answeredAt, confirmedAt: now, batchId });
 	}

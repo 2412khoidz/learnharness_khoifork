@@ -12,6 +12,8 @@ export interface RecallObservation {
 	source?: "ai" | "user";
 	topic?: string;
 	errorType?: string;
+	/** Existing AI feedback, shown in the opt-in grouping preview. */
+	feedback?: string;
 	elapsedMs?: number;
 	timerMs?: number;
 	help?: RecallHelp;

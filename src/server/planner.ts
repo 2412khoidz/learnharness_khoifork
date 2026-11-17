@@ -96,6 +96,8 @@ import { parseFilePaths } from "../core/file-paths.ts";
 import { computeGraphFsrsSummary, emptyGraphFsrsSummary, type GraphFsrsSummary } from "../core/fsrs-graph.ts";
 import { collectRecallCandidates, type MistakeDraft, type MistakeRecord, type RecallScanResult, type RecallScanState } from "../core/mistakes.ts";
 import type { RecallObservation, RecallVerdict } from "../core/recall-insights.ts";
+import { projectRecallGroups, type RecallGroupSource } from "../core/recall-groups.ts";
+import { readRecallGroups } from "./recall-groups-store.ts";
 import { readRecallOverrides, recallFingerprint } from "./recall-overrides.ts";
 import { birthSessionPartition } from "../core/session-clusters.ts";
 import { resolveRoleSpec, resolveSettings } from "../core/settings-resolution.ts";
@@ -279,6 +281,18 @@ function extractFirstUserMessageText(chat: ChatRecord): string {
 		break;
 	}
 	return "";
+}
+
+/** Recall must not assign an ambiguous session to whichever subject happens to be first. */
+export function matchRecallSubject(title: string, knownSubjects: readonly string[], contextText: string): string | undefined {
+	const distinct = [...new Map(knownSubjects.filter(Boolean).map((subject) => [normalizeSubjectKey(subject), subject])).values()];
+	const normalizedTitle = normalizeSubjectKey(title);
+	const exact = distinct.filter((subject) => normalizeSubjectKey(subject) === normalizedTitle);
+	if (exact.length === 1) return exact[0];
+	const contained = distinct.filter((subject) => { const normalized = normalizeSubjectKey(subject); return normalized.length >= 4 && normalizedTitle.includes(normalized); });
+	if (contained.length === 1) return contained[0];
+	const possible = distinct.filter((subject) => Boolean(matchKnownSubject(title, [subject], contextText)));
+	return possible.length === 1 ? possible[0] : undefined;
 }
 
 function matchKnownSubject(
@@ -1493,7 +1507,7 @@ export async function generatePlannerSchedule(opts: {
 			recommendedPaceFactor: capacity.recommendedPaceFactor,
 			recommendedRealismFactor: capacity.recommendedRealismFactor,
 			sustainableDailyHours: capacity.recommendedDailyHours,
-			subjectBreakdown: capacity.subjectBreakdown.slice(0, 8),
+			subjectBreakdown: capacitySubjectsForAi(capacity).slice(0, 8),
 		},
 		recentSessions: signals.recentSessions.slice(0, 8),
 	};
@@ -2614,6 +2628,7 @@ function collectQuizAndPracticeSamples(opts: {
 	recallAnswerIds: Set<string>;
 	recallFlags: Array<{ id: string; chatId: string; verdict: RecallScanResult["verdict"] }>;
 	recallObservations: Map<string, { observation: RecallObservation; draft?: MistakeDraft }>;
+	recallUnassignedExamples: Array<{ chatId: string; sourceMessageId?: string; toolCallId?: string }>;
 } {
 	const quizSamples: QuizConfidenceSample[] = [];
 	const practiceSamples: PracticeOutcomeSample[] = [];
@@ -2623,13 +2638,13 @@ function collectQuizAndPracticeSamples(opts: {
 	const recallAnswerIds = new Set<string>();
 	const recallFlags: Array<{ id: string; chatId: string; verdict: RecallScanResult["verdict"] }> = [];
 	const recallObservations = new Map<string, { observation: RecallObservation; draft?: MistakeDraft }>();
+	const unassigned = new Map<string, { chatId: string; sourceMessageId?: string; toolCallId?: string }>();
 	const evidenceFor = (subject: string) => recallBySubject[normalizeSubjectKey(subject)] ??= { responses: 0, assessed: 0, correct: 0, partial: 0, wrong: 0, dontKnow: 0, uncertain: 0 };
 
 	const pushQuizDetail = (detail: Record<string, unknown>, origin: string, subject: string | undefined, sessionTitle: string) => {
 		if (detail.dismissed || detail.byVoice) return;
 		if (origin === "explain" || origin === "recall" || origin === "coding_question") {
 			recallExplainCount++;
-			if (subject && (origin === "explain" || origin === "recall")) evidenceFor(subject).responses++;
 		}
 		const dontKnow = Boolean(detail.dontKnow);
 		const isGraded = detail.correct === true || detail.correct === false || dontKnow;
@@ -2652,8 +2667,10 @@ function collectQuizAndPracticeSamples(opts: {
 		const chat = readChatSafe(s.id, opts.chatsDir);
 		if (!chat) continue;
 		const sessionTitle = chat.title || s.title;
-		const subject = matchKnownSubject(sessionTitle, opts.knownSubjects, extractFirstUserMessageText(chat));
-		if (subject) subjectBySessionId.set(s.id, subject);
+		const contextText = extractFirstUserMessageText(chat);
+		const subject = matchKnownSubject(sessionTitle, opts.knownSubjects, contextText);
+		const recallSubject = matchRecallSubject(sessionTitle, opts.knownSubjects, contextText);
+		if (recallSubject) subjectBySessionId.set(s.id, recallSubject);
 		const msgs = Array.isArray(chat.messages) ? chat.messages : [];
 		const drafts = new Map(collectRecallCandidates(s.id, chat.messages).map((candidate) => [candidate.draft.id, candidate.draft]));
 		const questionTimes = new Map<string, { time: number | null; sourceMessageId?: string }>();
@@ -2701,14 +2718,15 @@ function collectQuizAndPracticeSamples(opts: {
 			if ((toolName === "recall" || toolName === "explain") && typeof m.toolCallId === "string" && details && !details.dismissed && !details.byVoice) {
 				const id = `${s.id}:${m.toolCallId}`;
 				recallAnswerIds.add(id);
-				if (subject) {
+				if (recallSubject) {
 					const draft = drafts.get(id), start = questionTimes.get(m.toolCallId);
 					const elapsedMs = start?.time != null && ts !== null && ts >= start.time ? ts - start.time : undefined;
 					const timing = details.recallTiming as { timerMs?: unknown; interrupted?: unknown } | undefined;
 					const timerMs = timing && timing.interrupted !== true && typeof timing.timerMs === "number" && Number.isFinite(timing.timerMs) && timing.timerMs >= 0 ? timing.timerMs : undefined;
 					const help = details.recallHelp === "independent" || details.recallHelp === "assisted" ? details.recallHelp : "unknown";
-					recallObservations.set(id, { observation: { id, chatId: s.id, toolCallId: m.toolCallId, ...(start?.sourceMessageId ? { sourceMessageId: start.sourceMessageId } : {}), subject, answeredAt: draft?.answeredAt ?? (typeof details.answeredAt === "string" ? details.answeredAt : ts !== null ? new Date(ts).toISOString() : ""), ...(elapsedMs !== undefined ? { elapsedMs } : {}), ...(timerMs !== undefined ? { timerMs } : {}), help }, ...(draft ? { draft } : {}) });
-				}
+					if (!recallObservations.has(id)) evidenceFor(recallSubject).responses++;
+					recallObservations.set(id, { observation: { id, chatId: s.id, toolCallId: m.toolCallId, ...(start?.sourceMessageId ? { sourceMessageId: start.sourceMessageId } : {}), subject: recallSubject, answeredAt: draft?.answeredAt ?? (typeof details.answeredAt === "string" ? details.answeredAt : ts !== null ? new Date(ts).toISOString() : ""), ...(elapsedMs !== undefined ? { elapsedMs } : {}), ...(timerMs !== undefined ? { timerMs } : {}), help }, ...(draft ? { draft } : {}) });
+				} else { const start = questionTimes.get(m.toolCallId); unassigned.set(id, { chatId: s.id, toolCallId: m.toolCallId, ...(start?.sourceMessageId ? { sourceMessageId: start.sourceMessageId } : {}) }); }
 			}
 			if (toolName === "flag_mistake" && details && typeof details.targetToolCallId === "string" && typeof details.verdict === "string" && ["correct", "partial", "wrong", "dont_know", "uncertain"].includes(details.verdict)) {
 				recallFlags.push({ id: `${s.id}:${details.targetToolCallId}`, chatId: s.id, verdict: details.verdict as RecallScanResult["verdict"] });
@@ -2745,7 +2763,7 @@ function collectQuizAndPracticeSamples(opts: {
 		}
 	}
 
-	return { quizSamples, practiceSamples, recallExplainCount, recallBySubject, subjectBySessionId, recallAnswerIds, recallFlags, recallObservations };
+	return { quizSamples, practiceSamples, recallExplainCount, recallBySubject, subjectBySessionId, recallAnswerIds, recallFlags, recallObservations, recallUnassignedExamples: [...unassigned.values()] };
 }
 
 export function readPlannerLearningCapacityServer(
@@ -2755,6 +2773,8 @@ export function readPlannerLearningCapacityServer(
 	signals: PlannerPersonalSignals;
 	config: PlannerConfig;
 	aiAvailability: ReturnType<typeof getPlannerAiAvailability>;
+	/** Internal sources for the opt-in, per-subject grouping preview. */
+	recallSources: RecallGroupSource[];
 } {
 	const now = opts?.now ?? Date.now();
 	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
@@ -2797,7 +2817,7 @@ export function readPlannerLearningCapacityServer(
 		...signals.subjectSignals.map((s) => s.label),
 		...config.milestones.map((m) => m.subject),
 	];
-	const { quizSamples, practiceSamples, recallExplainCount, recallBySubject, subjectBySessionId, recallAnswerIds, recallFlags, recallObservations } = collectQuizAndPracticeSamples({
+	const { quizSamples, practiceSamples, recallExplainCount, recallBySubject, subjectBySessionId, recallAnswerIds, recallFlags, recallObservations, recallUnassignedExamples } = collectQuizAndPracticeSamples({
 		sessions,
 		knownSubjects,
 		chatsDir: opts?.chatsDir,
@@ -2805,27 +2825,27 @@ export function readPlannerLearningCapacityServer(
 	// Scan assessments stay separate from FSRS/quiz scores and are attributed
 	// through the original session ID, never guessed from the answer text.
 	const evidenceDir = path.dirname(opts?.plannerFile ?? defaultPlannerPath());
-	const assessments = new Map<string, { chatId: string; verdict: RecallScanResult["verdict"]; draft?: MistakeDraft; topic?: string; errorType?: string }>();
+	const assessments = new Map<string, { chatId: string; verdict: RecallScanResult["verdict"]; draft?: MistakeDraft; topic?: string; errorType?: string; feedback?: string }>();
 	try {
 		const scan = JSON.parse(fs.readFileSync(path.join(evidenceDir, "recall-scan.json"), "utf8")) as Partial<RecallScanState>;
 		for (const result of Array.isArray(scan.results) ? scan.results : []) {
-			if (result.id && result.draft?.chatId) assessments.set(result.id, { chatId: result.draft.chatId, verdict: result.verdict, draft: result.draft, topic: result.topic, errorType: result.errorType });
+			if (result.id && result.draft?.chatId) assessments.set(result.id, { chatId: result.draft.chatId, verdict: result.verdict, draft: result.draft, topic: result.topic, errorType: result.errorType, feedback: result.missing });
 		}
 	} catch { /* optional scan */ }
 	try {
 		const live = JSON.parse(fs.readFileSync(path.join(evidenceDir, "recall-live-grades.json"), "utf8")) as Array<{ result?: RecallScanResult }>;
 		for (const entry of Array.isArray(live) ? live : []) {
 			const result = entry.result;
-			if (result?.id && result.draft?.chatId) assessments.set(result.id, { chatId: result.draft.chatId, verdict: result.verdict, draft: result.draft, topic: result.topic, errorType: result.errorType });
+			if (result?.id && result.draft?.chatId) assessments.set(result.id, { chatId: result.draft.chatId, verdict: result.verdict, draft: result.draft, topic: result.topic, errorType: result.errorType, feedback: result.missing });
 		}
 	} catch { /* optional live assessments */ }
 	for (const flag of recallFlags) assessments.set(flag.id, { ...assessments.get(flag.id), chatId: flag.chatId, verdict: flag.verdict });
-	for (const [id, { chatId, verdict, draft, topic, errorType }] of assessments) {
+	for (const [id, { chatId, verdict, draft, topic, errorType, feedback }] of assessments) {
 			const subject = subjectBySessionId.get(chatId);
 			if (!subject || !recallAnswerIds.has(id) || !["correct", "partial", "wrong", "dont_know", "uncertain"].includes(verdict)) continue;
 			const row = recallObservations.get(id);
 			if (draft && row && (!row.draft || recallFingerprint(draft) !== recallFingerprint(row.draft))) { row.observation.staleAssessment = true; continue; }
-			if (row) Object.assign(row.observation, { verdict, source: "ai", ...(topic ? { topic } : {}), ...(errorType ? { errorType } : {}) });
+			if (row) Object.assign(row.observation, { verdict, source: "ai", ...(topic ? { topic } : {}), ...(errorType ? { errorType } : {}), ...(feedback ? { feedback: feedback.slice(0, 700) } : {}) });
 			const key = normalizeSubjectKey(subject);
 			const evidence = recallBySubject[key] ??= { responses: 0, assessed: 0, correct: 0, partial: 0, wrong: 0, dontKnow: 0, uncertain: 0 };
 			evidence.assessed++;
@@ -2874,13 +2894,37 @@ export function readPlannerLearningCapacityServer(
 		mistakes,
 		now,
 	});
+	const recallSources: RecallGroupSource[] = [...recallObservations.values()].map(({ observation, draft }) => ({ observation, fingerprint: createHash("sha256").update(JSON.stringify([draft ? recallFingerprint(draft) : null, observation.verdict, observation.source, observation.topic, observation.errorType, observation.feedback, observation.staleAssessment])).digest("hex") }));
+	report.dataCoverage.recallAnswers = recallAnswerIds.size;
+	report.dataCoverage.recallAssigned = recallObservations.size;
+	report.dataCoverage.recallUnassigned = Math.max(0, recallAnswerIds.size - recallObservations.size);
+	report.dataCoverage.recallUnassignedExamples = recallUnassignedExamples;
+	const approved = readRecallGroups(evidenceDir);
+	for (const row of report.subjectBreakdown) {
+		const groups = approved.find((entry) => entry.subject === row.subject)?.groups ?? [];
+		const sources = recallSources.filter((entry) => normalizeSubjectKey(entry.observation.subject) === normalizeSubjectKey(row.subject));
+		row.approvedRecallGroups = { last30: projectRecallGroups(groups, sources, "last30", now), allTime: projectRecallGroups(groups, sources, "allTime", now) };
+	}
 
 	return {
 		report,
 		signals,
 		config,
 		aiAvailability: getPlannerAiAvailability(),
+		recallSources,
 	};
+}
+
+/** AI receives only approved, still-current semantic groups; raw statistics stay descriptive. */
+export function capacitySubjectsForAi(report: LearningCapacityReport): LearningCapacityReport["subjectBreakdown"] {
+	return report.subjectBreakdown.map((row) => ({
+		...row,
+		recallInsights: { ...row.recallInsights, patterns: [], allTimePatterns: [] },
+		approvedRecallGroups: row.approvedRecallGroups ? {
+			last30: row.approvedRecallGroups.last30.filter((group) => !group.stale),
+			allTime: row.approvedRecallGroups.allTime.filter((group) => !group.stale),
+		} : undefined,
+	}));
 }
 
 export function calibratePlannerFromCapacityServer(
@@ -2943,9 +2987,9 @@ export async function diagnoseLearningCapacityWithAiServer(
 		engine: resolved.engine,
 		systemPrompt: `You are a Cognitive Science & Learning Analytics Coach inside ChronoHarness.
 Interpret the student's quantitative Learning Capacity telemetry (FSRS-6 Stability/Difficulty/Retention, Brier Metacognitive Calibration & Confidence Bias, Problem-Solving Velocity, Graph Foundation Risk, Error Taxonomy, Circadian Adherence) and call submit_capacity_diagnosis ONCE.
-Be strictly honest about sample counts: never invent data. recallEvidence and recallInsights summarize the same answers, not independent samples. recallInsights combines provisional AI assessments and learner corrections; distinguish their sources, and separate partial and uncertain answers. It is not an FSRS review or a validated capacity score. Suggest specific practice topics from recurring recall patterns when available. Elapsed question-to-answer time includes breaks and is not solving speed. A readinessBaseline or paceBaseline is a default, not a measurement of the student's ability. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
+Be strictly honest about sample counts: never invent data. recallEvidence and recallInsights summarize the same answers, not independent samples. recallInsights combines provisional AI assessments and learner corrections; distinguish their sources, and separate partial and uncertain answers. It is not an FSRS review or a validated capacity score. Suggest topics from approvedRecallGroups when available; group membership is user-approved but underlying AI assessments remain provisional. Elapsed question-to-answer time includes breaks and is not solving speed. A readinessBaseline or paceBaseline is a default, not a measurement of the student's ability. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
 		promptText: JSON.stringify({
-			learningCapacityReport: report,
+			learningCapacityReport: { ...report, subjectBreakdown: capacitySubjectsForAi(report) },
 			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 5) ?? [],
 			subjectSignals: signals.subjectSignals.slice(0, 8).map((s) => ({
 				label: s.label,
@@ -3553,7 +3597,7 @@ export async function chatWithPlannerCoachServer(
 				metric: `${d.primaryMetric.value} ${d.primaryMetric.unit}`,
 				insight: d.insight,
 			})),
-			subjectBreakdown: capacity.subjectBreakdown.slice(0, 8),
+			subjectBreakdown: capacitySubjectsForAi(capacity).slice(0, 8),
 		},
 		knowledgeAndSessionsDigest: {
 			graph: graphContext,

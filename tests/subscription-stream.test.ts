@@ -14,12 +14,14 @@ import { backgroundCaptureDir, backgroundCaptureStream, createBackgroundCapture 
 const originalSend = Object.getOwnPropertyDescriptor(process, "send"), originalConnected = Object.getOwnPropertyDescriptor(process, "connected");
 const marker = process.env.LH_DESKTOP_SERVER, secret = process.env.LH_DESKTOP_API_SECRET;
 const xaiKey = process.env.XAI_API_KEY, copilotKey = process.env.COPILOT_GITHUB_TOKEN;
+const testCopilotAuto = process.env.LH_TEST_COPILOT_AUTO === "1";
+const autoModel = (): Model<Api> => ({ ...piModels().getModels("github-copilot").find((model) => model.id === "mai-code-1.1-flash")!, id: "auto", name: "Auto" });
 let revision = 1, denied = false, sends = 0;
 const context = normalizeContext({ messages: [{ role: "user", content: "Offline fixture", timestamp: 0 }] });
 function snapshot(background = true): NativeSubscriptionSnapshot {
 	return {
 		statuses: NATIVE_SUBSCRIPTIONS.map((p) => ({ providerId: p.providerId, available: true, connected: true, pending: false, allowBackgroundUse: background, connectionId: `fixture-${p.providerId}`, epoch: 1, authorityRevision: 1, revision })),
-		models: Object.fromEntries(NATIVE_SUBSCRIPTIONS.map((p) => [p.providerId, piModels().getModels(p.providerId)])),
+		models: Object.fromEntries(NATIVE_SUBSCRIPTIONS.map((p) => [p.providerId, [...piModels().getModels(p.providerId), ...(testCopilotAuto && p.providerId === "github-copilot" ? [autoModel()] : [])]])),
 	};
 }
 const emit = (value: unknown) => (process.emit as (event: string, value: unknown) => boolean)("message", value);
@@ -28,10 +30,23 @@ before(async () => {
 	process.env.XAI_API_KEY = "fixture-must-never-be-used"; process.env.COPILOT_GITHUB_TOKEN = "fixture-api-route-only";
 	Object.defineProperty(process, "connected", { configurable: true, value: true });
 	Object.defineProperty(process, "send", { configurable: true, value: (message: any, callback?: () => void) => {
-		sends++; queueMicrotask(() => emit({ channel: "lh:subscriptions", id: message.id, op: message.op, ...(denied && message.op === "lease" ? { ok: false, error: "fixture expired refresh" } : { ok: true, value: message.op === "snapshot" ? snapshot() : { scope: message.scope, auth: { apiKey: "fixture-oauth-only", ...(message.scope.providerId === "github-copilot" ? { baseUrl: "https://api.business.githubcopilot.com", headers: { "x-fixture-auth": "native-retained" } } : {}) } } }) }));
+		sends++; queueMicrotask(() => emit({ channel: "lh:subscriptions", id: message.id, op: message.op, ...(denied && message.op === "lease" ? { ok: false, error: "fixture expired refresh" } : { ok: true, value: message.op === "snapshot" ? snapshot() : { scope: message.scope, auth: { apiKey: "fixture-oauth-only", ...(message.scope.providerId === "github-copilot" ? { baseUrl: "https://api.business.githubcopilot.com", headers: { "x-fixture-auth": "native-retained", ...(testCopilotAuto && message.scope.selectedModelId === "auto" ? { "Copilot-Session-Token": "fixture-session" } : {}) } } : {}) }, ...(testCopilotAuto && message.scope.selectedModelId === "auto" ? { model: "mai-code-1.1-flash" } : {}) } }) }));
 		callback?.(); return true;
 	} });
 	await refreshSubscriptionModels();
+});
+test("Copilot Auto uses the leased model and session header", { skip: !testCopilotAuto }, async () => {
+	const engine = piEngineForSpec({ provider: "github-copilot-subscription", id: "auto" }, false);
+	let requests = 0;
+	const result = await engine.streamFn(engine.model, context, {
+		fetch: async (input, init) => {
+			requests++; const request = new Request(input, init), body = await request.json();
+			assert.equal(body.model, "mai-code-1.1-flash"); assert.equal(request.headers.get("copilot-session-token"), "fixture-session");
+			assert.equal(request.headers.get("authorization"), "Bearer fixture-oauth-only");
+			return new Response('{"error":{"message":"private-fixture-provider-detail"}}', { status: 400, headers: { "content-type": "application/json" } });
+		},
+	}).result();
+	assert.equal(requests, 1); assert.equal(result.provider, "github-copilot-subscription"); assert(!result.errorMessage?.includes("private-fixture-provider-detail"));
 });
 after(() => {
 	if (originalSend) Object.defineProperty(process, "send", originalSend); else delete process.send;

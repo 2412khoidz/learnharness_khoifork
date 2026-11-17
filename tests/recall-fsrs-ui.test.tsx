@@ -39,7 +39,7 @@ it("shows analyst suggestions and discussion without saving FSRS", async () => {
 	const dom = parseHTML("<html><head></head><body><main></main></body></html>");
 	Object.assign(globalThis, { React, window: dom.window, document: dom.document, Element: dom.window.Element, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
 	const previousFetch = globalThis.fetch;
-	const data = { nodes: [{ id: "rank", name: "Rank", statement: "Matrix rank", reviewedFlashcard: false, revision: "r" }], results: [{ id: "chat:a", verdict: "partial", sessionTitle: "Algebra", suggestedNodeIds: [], applied: false, revision: "a", aiSuggestion: null as { answerId: string; nodeId: string; reason: string; model: string } | null, draft: { question: "Explain rank", yourAnswer: "Part", answeredAt: "2026-01-01T09:00:00.000Z" } }], lastBatch: null };
+	const data = { nodes: [{ id: "rank", name: "Định lý hạng", statement: "Matrix rank original description", reviewedFlashcard: false, revision: "r" }], results: [{ id: "chat:a", verdict: "partial", sessionTitle: "Algebra", suggestedNodeIds: [], applied: false, revision: "a", aiSuggestion: null as { answerId: string; nodeId: string; reason: string; model: string } | null, draft: { question: "Explain rank", yourAnswer: "Part", answeredAt: "2026-01-01T09:00:00.000Z" } }], lastBatch: null };
 	let suggestions = 0, fsrsSaves = 0;
 	globalThis.fetch = async (_input, init) => {
 		if (init?.method !== "POST") return new Response(JSON.stringify(data));
@@ -55,5 +55,9 @@ it("shows analyst suggestions and discussion without saving FSRS", async () => {
 		assert.equal(suggestions, 1); assert.equal(fsrsSaves, 0);
 		assert.match(document.body.textContent ?? "", /Vì câu hỏi về hạng/);
 		assert.match(document.body.textContent ?? "", /Review batch \(1\)/);
+		const option = document.querySelector('select[aria-label="Concept"] option[value="rank"]');
+		assert.ok(option, "the actual suggested ID is in the dropdown even without a lexical match");
+		assert.match(option.textContent ?? "", /AI suggestion/);
+		assert.match(document.body.textContent ?? "", /Matrix rank original description/);
 	} finally { await act(async () => root.unmount()); globalThis.fetch = previousFetch; }
 });
