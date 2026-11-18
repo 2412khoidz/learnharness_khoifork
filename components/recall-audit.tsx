@@ -10,7 +10,7 @@ type Result = { id: string; proposal: RecallScanResult; originalVerdict: string 
 type Run = { id: string; createdAt: string; model: string; status: string; total: number; resultCount: number; results: Result[]; usage: { input: number; output: number; calls: number }; error?: string; skipped?: Array<{ id: string; reason: string }>; reviews: Array<{ id: string; at: string; undoneAt?: string; pending?: boolean }> };
 const PAGE = 20;
 
-export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
+export function RecallAudit({ onApplied, visible = true }: { onApplied: () => Promise<void>; visible?: boolean }) {
  const [preview, setPreview] = useState<Preview | null>(null);
  const [previewOpen, setPreviewOpen] = useState(false);
  const [previewPage, setPreviewPage] = useState(0);
@@ -35,7 +35,7 @@ export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
   setRuns(body.runs ?? []); setAvailableRoles(body.roles ?? []);
   setActiveId((id) => id || body.runs?.at(-1)?.id || "");
  }, [activeId, page]);
- useEffect(() => { void refresh().catch((err) => setError(err instanceof Error ? err.message : "Could not load audits.")); }, [refresh]);
+ useEffect(() => { if (visible) void refresh().catch((err) => setError(err instanceof Error ? err.message : "Could not load audits.")); }, [refresh, visible]);
  useEffect(() => {
   if (!activeId) return;
   type Saved = { selected: Record<string, boolean>; remove: Record<string, boolean>; page: number; sequence?: number };
@@ -61,10 +61,10 @@ export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
  };
  const active = runs.find((run) => run.id === activeId);
  useEffect(() => {
-  if (active?.status !== "running") return;
+  if (!visible || active?.status !== "running") return;
   const timer = setInterval(() => { void refresh().catch(() => {}); }, 2500);
   return () => clearInterval(timer);
- }, [active?.status, refresh]);
+ }, [active?.status, refresh, visible]);
  const loadPreview = async () => {
   setBusy(true); setError("");
   try { const res = await fetch("/api/planner/recall-audit?preview=1", { cache: "no-store" }); const body = await res.json() as Preview & { error?: string }; if (!res.ok) throw new Error(body.error || "Could not load preview."); setPreview(body); }
@@ -79,7 +79,7 @@ export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
  const estimateInput = preview ? Math.ceil((preview.inputCharacters ?? 0) / 3 + Math.ceil(preview.count / 8) * 500) : 0;
  const estimateOutput = preview ? preview.count * 200 : 0;
  const hypotheticalCost = previewPricing ? (estimateInput * previewPricing.input + estimateOutput * previewPricing.output) / 1000000 : null;
- const visible = active?.results ?? [];
+ const visibleResults = active?.results ?? [];
  const chosen = Object.entries(selected).filter(([, checked]) => checked).map(([id]) => ({ id, ...(remove[id] ? { removeMistake: true } : {}) }));
  return <section aria-label="Recall assessment audit" className="space-y-3 rounded-xl border p-3">
   <h4 className="font-semibold">Review past assessments with AI</h4>
@@ -103,7 +103,7 @@ export function RecallAudit({ onApplied }: { onApplied: () => Promise<void> }) {
    {active.status !== "running" && (active.skipped?.length ?? 0) > 0 && <button type="button" disabled={busy} onClick={() => void post({ action: "resume", id: active.id, retrySkipped: true, ...(role ? { role } : {}) })} className="rounded border px-2 py-1">Retry skipped answers with selected model</button>}
    {active.reviews.filter((review) => !review.undoneAt).map((review) => <button key={review.id} type="button" disabled={busy || active.status === "running"} onClick={() => void post({ action: "undo", id: active.id, reviewId: review.id })} className="mr-2 rounded border px-2 py-1">{review.pending ? "Recover interrupted review" : "Undo review"} {new Date(review.at).toLocaleString()}</button>)}
    {active.reviews.some((review) => review.pending) && <p role="alert">A review was interrupted while saving. Use Recover interrupted review before applying another.</p>}
-   {visible.map((item) => <details key={item.id} onToggle={(event) => { const open = event.currentTarget.open; setOpenResults((old) => old[item.id] === open ? old : { ...old, [item.id]: open }); }} className="rounded border p-2"><summary className="cursor-pointer">{item.proposal.sessionTitle} · {item.originalVerdict ?? "unassessed"} → {item.proposal.verdict} {item.applied ? "· applied" : "· proposal"}</summary>
+   {visibleResults.map((item) => <details key={item.id} onToggle={(event) => { const open = event.currentTarget.open; setOpenResults((old) => old[item.id] === open ? old : { ...old, [item.id]: open }); }} className="rounded border p-2"><summary className="cursor-pointer">{item.proposal.sessionTitle} · {item.originalVerdict ?? "unassessed"} → {item.proposal.verdict} {item.applied ? "· applied" : "· proposal"}</summary>
     {openResults[item.id] && <><p>Question</p><ToolContentResponse>{item.proposal.draft.question}</ToolContentResponse><p>Your answer</p><ToolContentResponse>{item.proposal.draft.yourAnswer}</ToolContentResponse><p>Reference answer</p><ToolContentResponse>{item.proposal.draft.correctAnswer}</ToolContentResponse>
     <p>Previous assessment: {item.originalVerdict ?? "unassessed"} · {item.originalSource}</p>{item.originalFeedback && <ToolContentResponse>{item.originalFeedback}</ToolContentResponse>}
     {item.originalAssessment && <><p>Previous AI assessment details (shown for comparison, not sent)</p><ToolContentResponse>{item.originalAssessment.strengths}</ToolContentResponse><ToolContentResponse>{item.originalAssessment.missing}</ToolContentResponse><ToolContentResponse>{item.originalAssessment.correction}</ToolContentResponse><ToolContentResponse>{item.originalAssessment.evidence}</ToolContentResponse></>}

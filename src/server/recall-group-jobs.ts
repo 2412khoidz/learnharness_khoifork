@@ -18,6 +18,11 @@ function write(jobs: GroupJob[]) { fs.mkdirSync(PATHS.data, { recursive: true })
 function save(job: GroupJob) { const all = read(); write([...all.filter((entry) => entry.id !== job.id), job]); }
 function active() { const g = globalThis as typeof globalThis & { __lhRecallGroupJobs?: Map<string, AbortController> }; return g.__lhRecallGroupJobs ??= new Map(); }
 export function recallGroupJobs(subject: string) { return read().filter((job) => job.subject === subject).map((job) => ({ ...job, status: job.status === "running" && !active().has(job.id) ? "paused" as const : job.status })); }
+export function recallGroupingActivity() {
+ const running = active();
+ if (!running.size) return [];
+ return read().filter((job) => running.has(job.id)).map((job) => ({ subject: job.subject, done: job.completed.length + job.skipped.length, total: job.items.length }));
+}
 function engineFor(role?: ModelRole) { const resolved = role ? resolvePlannerEngine("coach", role) : null; if (role && resolved?.role !== role) throw new Error("The selected model is unavailable."); return { engine: recallGroupEngineOverride.current ?? resolved?.engine ?? analystEngine(), label: resolved?.modelLabel }; }
 export function startRecallGroupJob(subject: string, expected: Item[], role?: ModelRole) {
  if (recallGroupJobs(subject).some((job) => active().has(job.id))) throw new Error("Grouping is already running for this subject.");

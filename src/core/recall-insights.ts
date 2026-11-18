@@ -8,6 +8,10 @@ export interface RecallObservation {
 	toolCallId?: string;
 	subject: string;
 	answeredAt: string;
+	/** Internal metadata for local, time-aware scoring. */
+	askedAt?: number;
+	confirmedAt?: number;
+	promptKey?: string;
 	verdict?: RecallVerdict;
 	source?: "ai" | "user";
 	topic?: string;

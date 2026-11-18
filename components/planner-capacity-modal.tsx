@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import type { LearningCapacityReport } from "@/src/core";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import type { CapacityAiDiagnosis, CapacityCalibrationPreview, CapacityExperiments, LearningCapacityReport } from "@/src/core";
 import { recallAnswerHref } from "@/src/core";
 import { BrailleSpinner } from "@/components/braille-spinner";
 import { RecallAnalysis } from "@/components/recall-analysis";
+import { RecallAudit } from "@/components/recall-audit";
+import { RecallCapacityEvidence } from "@/components/recall-capacity-evidence";
 import { cn } from "@/lib/utils";
 import {
 	ActivityIcon,
@@ -16,13 +18,28 @@ import {
 	XIcon,
 } from "lucide-react";
 
-interface CapacityAiDiagnosis {
-	summary: string;
-	strengths: string[];
-	bottlenecks: string[];
-	neuroProtocols: string[];
-	suggestedPaceNote: string;
-	modelLabel: string;
+const tabs = ["overview", "recall", "audit", "groups"] as const;
+const CapacityRecallAnalysis = memo(RecallAnalysis);
+const CapacityRecallAudit = memo(RecallAudit);
+type CapacityTab = typeof tabs[number];
+const tabLabels: Record<CapacityTab, string> = { overview: "Overview", recall: "Recall", audit: "Audit", groups: "Topic groups" };
+type Activity = { audit: Array<{ done: number; total: number }>; groups: Array<{ subject: string; done: number; total: number }> };
+type DiagnosisPreview = { revision: string; modelLabel: string; systemPrompt: string; payload: unknown; responseSchema: unknown; estimateUsd: number | null; inputTokens: number; outputTokens: number };
+
+async function capacityAction<T>(body: Record<string, unknown>): Promise<T> {
+	const response = await fetch("/api/planner/capacity", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+	const result = await response.json();
+	if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+	return result as T;
+}
+
+function ExperimentResult({ label, result }: { label: string; result: CapacityExperiments["recall"] }) {
+	if (result.status === "insufficient") return <p>{label}: not enough eligible history ({result.observations} events).</p>;
+	return <div className="space-y-1">
+		<p><strong>{label}</strong> · {result.train} train / {result.test} later tests · {result.status === "improved" ? "better on both measures" : "baseline retained"}</p>
+		<p>Brier {result.measured.brier.toFixed(3)} vs {result.reference.brier.toFixed(3)} · log-loss {result.measured.logLoss.toFixed(3)} vs {result.reference.logLoss.toFixed(3)}.</p>
+		{"next" in result && result.next && <p>Experimental: {Math.round(result.next.full * 100)}% chance of a full answer on the next independent question in the latest {result.next.subject} session.</p>}
+	</div>;
 }
 
 interface CapacityResponse {
@@ -72,6 +89,26 @@ export function PlannerCapacityModal({
 	const [statusMsg, setStatusMsg] = useState<string | null>(null);
 	const [errMsg, setErrMsg] = useState<string | null>(null);
 	const [recallRange, setRecallRange] = useState<"last30" | "allTime">("last30");
+	const [tab, setTab] = useState<CapacityTab>("overview");
+	const [visited, setVisited] = useState<ReadonlySet<CapacityTab>>(() => new Set(["overview"]));
+	const [activity, setActivity] = useState<Activity>({ audit: [], groups: [] });
+	const [evidenceId, setEvidenceId] = useState<string>();
+	const clearEvidenceId = useCallback(() => setEvidenceId(undefined), []);
+	const [calibration, setCalibration] = useState<CapacityCalibrationPreview | null>(null);
+	const [selectedChanges, setSelectedChanges] = useState<string[]>([]);
+	const [realism, setRealism] = useState(false);
+	const [undoId, setUndoId] = useState<string | null>(null);
+	const [diagnosisPreview, setDiagnosisPreview] = useState<DiagnosisPreview | null>(null);
+	const [experiments, setExperiments] = useState<CapacityExperiments | null>(null);
+	const [experimentBusy, setExperimentBusy] = useState(false);
+	const scroller = useRef<HTMLDivElement>(null);
+	const offsets = useRef<Partial<Record<CapacityTab, number>>>({});
+	const showTab = (next: CapacityTab) => {
+		offsets.current[tab] = scroller.current?.scrollTop ?? 0;
+		setVisited((old) => old.has(next) ? old : new Set([...old, next]));
+		setTab(next);
+	};
+	useEffect(() => { if (scroller.current) scroller.current.scrollTop = offsets.current[tab] ?? 0; }, [tab]);
 
 	const fetchReport = useCallback(async () => {
 		setLoading(true);
@@ -92,54 +129,96 @@ export function PlannerCapacityModal({
 		if (open) {
 			setStatusMsg(null);
 			void fetchReport();
+			try {
+				if (sessionStorage.getItem("lh:recall-return-subject")) {
+					const saved = JSON.parse(sessionStorage.getItem("lh:recall-return-state") ?? "null") as { tab?: CapacityTab } | null;
+					const next = saved?.tab === "recall" ? "recall" : "groups";
+					setVisited((old) => new Set([...old, next]));
+					setTab(next);
+				} else setTab("overview");
+			} catch { setTab("overview"); }
 		}
 	}, [open, fetchReport]);
 
-	const runAiDiagnosis = async () => {
+	useEffect(() => {
+		if (!open) return;
+		const controller = new AbortController();
+		const refresh = async () => {
+			try {
+				const response = await fetch("/api/planner/capacity?activity=1", { cache: "no-store", signal: controller.signal });
+				if (response.ok && !controller.signal.aborted) {
+					const next = await response.json() as Activity;
+					if (!controller.signal.aborted) setActivity((old) => JSON.stringify(old) === JSON.stringify(next) ? old : next);
+				}
+			} catch { /* the next poll can recover */ }
+		};
+		void refresh();
+		const timer = setInterval(() => void refresh(), 6000);
+		return () => { controller.abort(); clearInterval(timer); };
+	}, [open]);
+
+	const runAiDiagnosis = async (send: boolean) => {
 		setAiBusy(true);
 		setErrMsg(null);
 		try {
-			const res = await fetch("/api/planner/capacity", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					action: "diagnose_ai",
-					date,
-					...(selectedRole ? { preferredRole: selectedRole } : {}),
-				}),
+			const options = { date, ...(selectedRole ? { preferredRole: selectedRole } : {}) };
+			if (!send) {
+				const preview = await capacityAction<DiagnosisPreview>({ action: "preview_diagnosis", ...options });
+				setDiagnosisPreview(preview);
+				return;
+			}
+			if (!diagnosisPreview) return;
+			const result = await capacityAction<{ report: LearningCapacityReport; diagnosis: CapacityAiDiagnosis }>({
+				action: "diagnose_ai", revision: diagnosisPreview.revision, ...options,
 			});
-			const body = (await res.json()) as { report?: LearningCapacityReport; diagnosis?: CapacityAiDiagnosis; error?: string };
-			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-			if (body.report && data) setData({ ...data, report: body.report });
-			if (body.diagnosis) setDiagnosis(body.diagnosis);
-		} catch (e) {
-			setErrMsg(e instanceof Error ? e.message : "AI diagnosis failed.");
-		} finally {
-			setAiBusy(false);
-		}
+			setData((current) => current ? { ...current, report: result.report } : current);
+			setDiagnosis(result.diagnosis);
+			setDiagnosisPreview(null);
+			showTab("overview");
+		} catch (error) {
+			setDiagnosisPreview(null);
+			setErrMsg(error instanceof Error ? error.message : "AI diagnosis failed.");
+		} finally { setAiBusy(false); }
 	};
 
-	const applyCalibration = async () => {
+	const calibrate = async (action: "preview_calibration" | "apply_calibration" | "undo_calibration") => {
 		setCalibrating(true);
 		setErrMsg(null);
 		try {
-			const res = await fetch("/api/planner/capacity", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ action: "apply_realism", date }),
-			});
-			const body = (await res.json()) as { report?: LearningCapacityReport; error?: string };
-			if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-			if (body.report && data) setData({ ...data, report: body.report });
+			if (action === "preview_calibration") {
+				const preview = await capacityAction<CapacityCalibrationPreview>({ action, date });
+				setCalibration(preview);
+				setSelectedChanges([]);
+				setRealism(false);
+				setUndoId(preview.undoId);
+				return;
+			}
+			if (action === "apply_calibration" && calibration) {
+				const result = await capacityAction<{ undoId: string; applied: number; realismApplied: boolean }>({
+					action, date, revision: calibration.revision, items: selectedChanges, realism,
+				});
+				setUndoId(result.undoId);
+				setStatusMsg(`Applied ${result.applied} study focus change(s)${result.realismApplied ? " and Realism for the next generated plan" : ""}.`);
+			} else if (action === "undo_calibration" && (undoId ?? calibration?.undoId)) {
+				await capacityAction({ action, undoId: undoId ?? calibration?.undoId });
+				setUndoId(null);
+				setStatusMsg("Calibration undone.");
+			} else return;
+			setCalibration(null);
 			await onSnapshotUpdated();
-			setStatusMsg(
-				`Đã đồng bộ Realism ${Math.round((body.report?.recommendedRealismFactor ?? 1) * 100)}% và cập nhật lịch hôm nay.`,
-			);
-		} catch (e) {
-			setErrMsg(e instanceof Error ? e.message : "Calibration update failed.");
-		} finally {
-			setCalibrating(false);
-		}
+			await fetchReport();
+		} catch (error) {
+			setCalibration(null);
+			setErrMsg(error instanceof Error ? error.message : "Calibration failed.");
+		} finally { setCalibrating(false); }
+	};
+
+	const runExperiments = async () => {
+		setExperimentBusy(true);
+		setErrMsg(null);
+		try { setExperiments(await capacityAction<CapacityExperiments>({ action: "run_local_experiments", date })); }
+		catch (error) { setErrMsg(error instanceof Error ? error.message : "Local experiment failed."); }
+		finally { setExperimentBusy(false); }
 	};
 
 	if (!open) return null;
@@ -166,7 +245,7 @@ export function PlannerCapacityModal({
 								Learning Capacity Diagnostics
 							</h2>
 							<p className="text-[11px] text-muted-foreground">
-								Scientific metrics synthesized from FSRS-6 weights, Quiz Brier Calibration, Graph Foundations, Mistakes &amp; Past Sessions
+								Recall evidence, FSRS-6, Practice, Quiz and planner history
 							</p>
 						</div>
 					</div>
@@ -183,6 +262,7 @@ export function PlannerCapacityModal({
 						<button
 							type="button"
 							onClick={onClose}
+							aria-label="Close Learning Capacity"
 							className="rounded-md border p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
 						>
 							<XIcon className="size-3.5" />
@@ -190,8 +270,17 @@ export function PlannerCapacityModal({
 					</div>
 				</div>
 
-				{/* Body */}
-				<div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 text-xs">
+				<nav aria-label="Learning Capacity views" className="flex flex-wrap items-center gap-1 border-b px-5 py-2 text-xs">
+					{tabs.map((item) => <button key={item} type="button" aria-pressed={tab === item}
+						onClick={() => showTab(item)} className="rounded-md px-2.5 py-1.5 aria-pressed:bg-accent aria-pressed:font-semibold">
+						{tabLabels[item]}
+					</button>)}
+					{((activity.audit?.length ?? 0) > 0 || (activity.groups?.length ?? 0) > 0) && <span role="status" className="ml-auto text-muted-foreground">
+						{[...(activity.audit ?? []).map((run) => `Audit ${run.done}/${run.total}`),
+							...(activity.groups ?? []).map((run) => `${run.subject}: groups ${run.done}/${run.total}`)].join(" · ")}
+					</span>}
+				</nav>
+				<div ref={scroller} className="flex-1 space-y-4 overflow-y-auto px-5 py-4 text-xs">
 					{errMsg && (
 						<div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive">
 							{errMsg}
@@ -207,7 +296,7 @@ export function PlannerCapacityModal({
 						<div className="flex items-center gap-2 py-10 text-muted-foreground">
 							<BrailleSpinner /> Reading Knowledge Graph, FSRS-6 reviews, Quiz calibration, Mistakes &amp; Sessions...
 						</div>
-					) : r ? (
+					) : r && tab === "overview" ? (
 						<>
 							{/* Composite Overview Strip */}
 							<div className="grid gap-3 sm:grid-cols-4">
@@ -226,6 +315,7 @@ export function PlannerCapacityModal({
 											{r.tierLabel}
 										</span>
 										<span className="text-[10px] text-muted-foreground">({r.confidenceLevel})</span>
+										{r.recallContribution && <small className="block w-full text-muted-foreground">Six dimensions: {r.legacyCompositeScore ?? "—"} · Recall {r.recallContribution.delta >= 0 ? "+" : ""}{r.recallContribution.delta.toFixed(2)} · {r.recallContribution.eligibleSubjects}/{r.recallContribution.activeSubjects} subjects</small>}
 									</div>
 								</div>
 
@@ -301,7 +391,7 @@ export function PlannerCapacityModal({
 									{r.dataCoverage.mistakeRecords} Mistakes analyzed · {r.dataCoverage.pastChatSessions} Past sessions
 								</span>
 							</div>
-							<RecallAnalysis report={r} onRefresh={fetchReport} />
+
 
 							{/* 6 Scientific Criteria Cards */}
 							<div>
@@ -364,7 +454,12 @@ export function PlannerCapacityModal({
 							{r.subjectBreakdown.length > 0 && (
 								<div>
 									<h3 className="mb-1.5 text-xs font-semibold text-foreground">Per-Subject Calibration Breakdown</h3>
-									<p className="mb-2 text-[11px] text-muted-foreground">FSRS uses confirmed reviews. Recall evidence is independent of FSRS and of the composite score. Practice solve rates and estimated minutes use Practice problems only; a dash means no eligible Practice data.</p>
+									<p className="mb-2 text-[11px] text-muted-foreground">The 30-day Recall estimates weight recent, independent and confirmed answers more heavily. The composite uses up to five points of Recall adjustment. Practice minutes are based on Practice problems.</p>
+									<details className="mb-2 text-[11px] text-muted-foreground">
+										<summary className="cursor-pointer">How Recall affects the score</summary>
+										<p>Confirmed and provisional grades start at weights 1 and 0.5. Independent and unknown help multiply these weights by 1 and 0.5. Assisted answers appear in the observed rates. The weight halves every 14 days and each subject-day contributes at most three units. Each outcome starts with a 0.5 prior.</p>
+										<p>A subject can contribute after five eligible answers across at least two days. The adjustment shrinks by W/(W+8), where W is its evidence weight. Matching source IDs exclude Quiz, Mistakes and Recall-FSRS overlap. Older records without a matching ID may still overlap.</p>
+									</details>
 									<div className="mb-2 flex items-center gap-2 text-[11px]"><span>Recall period:</span><button type="button" aria-pressed={recallRange === "last30"} onClick={() => setRecallRange("last30")} className={cn("rounded border px-2 py-1", recallRange === "last30" && "bg-accent")}>Last 30 days</button><button type="button" aria-pressed={recallRange === "allTime"} onClick={() => setRecallRange("allTime")} className={cn("rounded border px-2 py-1", recallRange === "allTime" && "bg-accent")}>All time</button></div>
 									{r.dataCoverage.trackedPropositions < 5 && r.dataCoverage.graphNodes > 10 && (
 										<p className="mb-2 text-[11px] text-muted-foreground">
@@ -406,7 +501,7 @@ export function PlannerCapacityModal({
 																? `${sub.quizBiasPct > 0 ? "+" : ""}${sub.quizBiasPct}%`
 																: "—"}
 														</td>
-															<td className="px-2 py-1.5 tabular-nums">{sub.recallInsights && sub.recallInsights[recallRange].responses ? <details><summary className="cursor-pointer">{sub.recallInsights[recallRange].responses} answers · {sub.recallInsights[recallRange].assessed} assessed</summary><RecallInsightsDetail insights={sub.recallInsights} range={recallRange} /></details> : "—"}</td>
+															<td className="px-2 py-1.5 tabular-nums">{recallRange === "last30" && sub.recallCapacity && <RecallCapacityEvidence evidence={sub.recallCapacity} />}{sub.recallInsights && sub.recallInsights[recallRange].responses ? <details><summary className="cursor-pointer">{sub.recallInsights[recallRange].responses} answers · {sub.recallInsights[recallRange].assessed} assessed</summary><RecallInsightsDetail insights={sub.recallInsights} range={recallRange} /></details> : "—"}</td>
 																<td className="px-2.5 py-1.5 font-medium tabular-nums text-primary">{sub.paceFactor}×{sub.paceBaseline ? " baseline" : ""}</td>
 													</tr>
 												))}
@@ -416,6 +511,12 @@ export function PlannerCapacityModal({
 								</div>
 							)}
 
+							<details className="rounded-lg border p-3">
+								<summary className="cursor-pointer font-medium">Local prediction experiments</summary>
+								<p className="my-2 text-muted-foreground">Compares trained forecasts against baselines on later answers. Uses local data and zero model tokens.</p>
+								<button type="button" disabled={experimentBusy} onClick={() => void runExperiments()} className="rounded border px-2 py-1 disabled:opacity-40">{experimentBusy ? "Evaluating…" : "Evaluate forecasts"}</button>
+								{experiments && <div className="mt-2 space-y-2"><ExperimentResult label="FSRS-6" result={experiments.fsrs} /><ExperimentResult label="Recall" result={experiments.recall} /></div>}
+							</details>
 							{/* AI Cognitive Interpretation Result */}
 							{diagnosis && (
 								<div className="rounded-xl border border-primary/30 bg-primary/5 p-3.5">
@@ -426,6 +527,11 @@ export function PlannerCapacityModal({
 										<span className="text-[10px] text-muted-foreground">{diagnosis.modelLabel}</span>
 									</div>
 									<p className="mt-1.5 leading-relaxed text-foreground">{diagnosis.summary}</p>
+									{diagnosis.suggestedScore && <div className="mt-2 rounded border p-2">
+										<p><strong>AI advisory score {diagnosis.suggestedScore.score}/100</strong> · local composite {r.compositeScore ?? "—"}</p>
+										<p>{diagnosis.suggestedScore.reason}</p>
+										<div className="flex flex-wrap gap-2">{diagnosis.suggestedScore.evidenceIds.map((id, index) => <button key={id} type="button" onClick={() => { setEvidenceId(id); showTab("recall"); }} className="underline">Review evidence {index + 1}</button>)}</div>
+									</div>}
 									<div className="mt-2.5 grid gap-2 sm:grid-cols-2">
 										<div className="rounded-lg border bg-background/80 p-2.5">
 											<div className="font-medium text-success">Cognitive Strengths</div>
@@ -461,7 +567,51 @@ export function PlannerCapacityModal({
 							)}
 						</>
 					) : null}
+					{r && visited.has("audit") && <div hidden={tab !== "audit"}><CapacityRecallAudit onApplied={fetchReport} visible={tab === "audit"} /></div>}
+					{r && (visited.has("recall") || visited.has("groups")) && <div hidden={tab !== "recall" && tab !== "groups"}>
+						<CapacityRecallAnalysis report={r} onRefresh={fetchReport} section={tab === "groups" ? "groups" : "recall"}
+							visible={tab === "recall" || tab === "groups"} evidenceId={evidenceId} onEvidenceOpened={clearEvidenceId} />
+					</div>}
 				</div>
+				{calibration && <div role="dialog" aria-modal="true" aria-label="Calibration preview" className="absolute inset-0 z-[55] flex items-center justify-center bg-black/50 p-4">
+					<div className="max-h-[80vh] w-full max-w-xl space-y-3 overflow-auto rounded-xl border bg-card p-4 text-sm shadow-xl">
+						<h3 className="font-semibold">Calibrate workload · {calibration.date}</h3>
+						<p>Planned study: {calibration.plannedStudyHours === null ? "no saved plan" : `${calibration.plannedStudyHours} h`}. Choose the changes to apply.</p>
+						{calibration.proposals.length === 0 && <p className="text-muted-foreground">No upcoming study block has enough current topic evidence for a suggestion.</p>}
+						{calibration.proposals.map((item) => <label key={item.id} className="block rounded border p-2">
+							<input type="checkbox" checked={selectedChanges.includes(item.id)} onChange={(event) => {
+								const checked = event.currentTarget.checked;
+								setSelectedChanges((old) => checked ? [...old, item.id] : old.filter((id) => id !== item.id));
+							}} /> <strong>{item.subject} · {item.date} · {item.startTime}–{item.endTime}</strong>
+							<span className="block">{item.focus.minutes} min · {item.focus.mode === "recheck" ? "Independent self-check" : "Practice incomplete steps"} · {item.focus.topic}</span>
+							{item.focus.task && <span className="block text-muted-foreground">{item.focus.task}</span>}
+							{item.previous && <span className="block text-muted-foreground">Replaces {item.previous.minutes} min on {item.previous.topic}.</span>}
+							<span className="block text-xs text-muted-foreground">{Math.round(item.full * 100)}% estimated full · {item.graded} graded · {item.days} days · {item.provisional} provisional · {item.helpUnknown} help unknown</span>
+						</label>)}
+						<label className="block rounded border p-2"><input type="checkbox" checked={realism} onChange={(event) => setRealism(event.currentTarget.checked)} /> <strong>Realism for the next generated plan</strong>
+							<span className="block">{calibration.realism.current === null ? "Automatic" : `${Math.round(calibration.realism.current * 100)}%`} → {Math.round(calibration.realism.recommended * 100)}%</span>
+						</label>
+						<div className="flex flex-wrap gap-2">
+							<button type="button" onClick={() => setCalibration(null)} className="rounded border px-3 py-1">Close</button>
+							{calibration.undoId && <button type="button" disabled={calibrating} onClick={() => void calibrate("undo_calibration")} className="rounded border px-3 py-1">Undo last calibration</button>}
+							<button type="button" disabled={calibrating || (!realism && selectedChanges.length === 0)} onClick={() => void calibrate("apply_calibration")} className="rounded bg-primary px-3 py-1 text-primary-foreground disabled:opacity-40">Apply selected changes</button>
+						</div>
+					</div>
+				</div>}
+				{diagnosisPreview && <div role="dialog" aria-modal="true" aria-label="AI diagnosis preview" className="absolute inset-0 z-[55] flex items-center justify-center bg-black/50 p-4">
+					<div className="max-h-[80vh] w-full max-w-2xl space-y-3 overflow-auto rounded-xl border bg-card p-4 text-sm shadow-xl">
+						<h3 className="font-semibold">Preview AI diagnosis</h3>
+						<p>Model: {diagnosisPreview.modelLabel}</p>
+						<p>{diagnosisPreview.estimateUsd === null ? "Token pricing is unavailable for this model." : `Illustrative cost: $${diagnosisPreview.estimateUsd.toFixed(4)}, based on ~${diagnosisPreview.inputTokens} input and ${diagnosisPreview.outputTokens} output tokens. Reasoning and retries can cost more.`}</p>
+						<details><summary className="cursor-pointer">Show exact report and instructions to send</summary>
+							<pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border p-2 text-xs">{JSON.stringify({ instructions: diagnosisPreview.systemPrompt, report: diagnosisPreview.payload, responseSchema: diagnosisPreview.responseSchema }, null, 2)}</pre>
+						</details>
+						<div className="flex gap-2">
+							<button type="button" onClick={() => setDiagnosisPreview(null)} disabled={aiBusy} className="rounded border px-3 py-1">Close</button>
+							<button type="button" disabled={aiBusy} onClick={() => void runAiDiagnosis(true)} className="rounded bg-primary px-3 py-1 text-primary-foreground disabled:opacity-40">{aiBusy ? "Running…" : "Send and diagnose"}</button>
+						</div>
+					</div>
+				</div>}
 
 				{/* Footer Actions */}
 				<div className="flex flex-wrap items-center justify-between gap-2 border-t bg-muted/20 px-5 py-3 text-xs">
@@ -484,7 +634,7 @@ export function PlannerCapacityModal({
 						<button
 							type="button"
 							disabled={aiBusy || loading || !data?.aiAvailability.coach.available}
-							onClick={() => void runAiDiagnosis()}
+							onClick={() => void runAiDiagnosis(false)}
 							className="inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 font-medium hover:bg-accent disabled:opacity-40"
 						>
 							{aiBusy ? <BrailleSpinner /> : <SparklesIcon className="size-3.5 text-primary" />} AI Deep Diagnosis
@@ -509,10 +659,10 @@ export function PlannerCapacityModal({
 						<button
 							type="button"
 							disabled={calibrating || loading || !r}
-							onClick={() => void applyCalibration()}
+							onClick={() => void calibrate("preview_calibration")}
 							className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
 						>
-							{calibrating ? <BrailleSpinner /> : null} Apply Calibration to Workload
+							{calibrating ? <BrailleSpinner /> : null} Preview Workload Calibration
 						</button>
 					</div>
 				</div>

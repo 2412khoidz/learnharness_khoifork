@@ -8,6 +8,7 @@ import type { RecallScanResult } from "@/src/core";
 import { ToolContentResponse } from "@/components/ai-elements/message";
 import { RecallAssessmentEditor } from "@/components/recall-assessment-editor";
 import { RecallAudit } from "@/components/recall-audit";
+import { RecallCapacityEvidence } from "@/components/recall-capacity-evidence";
 
 type Row = LearningCapacityReport["subjectBreakdown"][number];
 type PreviewItem = { id: string; fingerprint: string; topic: string; errorType: string; verdict?: string; source?: string; feedback: string; needsReview?: boolean; chatId: string; sourceMessageId?: string; toolCallId?: string };
@@ -15,7 +16,16 @@ type Preview = { subject: string; totalAnswers: number; totalEligible: number; l
 type GroupJob = { id: string; subject: string; model: string; status: string; items: Array<{ id: string }>; completed: string[]; skipped: Array<{ id: string; reason: string }>; groups: RecallGroup[]; usage: { input: number; output: number; calls: number }; error?: string; createdAt: string };
 const splitKey = (groupId: string, answerId: string) => JSON.stringify([groupId, answerId]);
 
-export function RecallAnalysis({ report, onRefresh }: { report: LearningCapacityReport; onRefresh: () => Promise<void> }) {
+export function RecallAnalysis({ report, onRefresh, section = "all", visible = true, evidenceId, onEvidenceOpened }: {
+	report: LearningCapacityReport;
+	onRefresh: () => Promise<void>;
+	section?: "all" | "recall" | "groups";
+	visible?: boolean;
+	evidenceId?: string;
+	onEvidenceOpened?: () => void;
+}) {
+	const showGroups = section !== "recall";
+	const showSummary = section !== "groups";
 	const [subject, setSubject] = useState("");
 	const [resumeSubject, setResumeSubject] = useState("");
 	const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
@@ -91,9 +101,16 @@ export function RecallAnalysis({ report, onRefresh }: { report: LearningCapacity
 	}, [preview, activeSubject, groups, approved, splitSelection, removedGroups, flushProgress]);
 	const openAnswer = async (id: string, source?: { chatId: string; sourceMessageId?: string; toolCallId?: string }) => {
 		setError("");
-		try { const res = await fetch(`/api/planner/recall-groups?answerId=${encodeURIComponent(id)}`, { cache: "no-store" }); const body = await res.json(); if (!res.ok) throw new Error(body.error || "Could not load answer."); setAnswerView({ ...body, source }); }
+		try { const res = await fetch(`/api/planner/recall-groups?answerId=${encodeURIComponent(id)}`, { cache: "no-store" }); const body = await res.json(); if (!res.ok) throw new Error(body.error || "Could not load answer."); setAnswerView({ ...body, source: source ?? body.source }); }
 		catch (err) { setError(err instanceof Error ? err.message : "Could not load answer."); }
 	};
+	const lastEvidence = useRef<string | undefined>(undefined);
+	useEffect(() => {
+		if (!evidenceId) { lastEvidence.current = undefined; return; }
+		if (lastEvidence.current === evidenceId) return;
+		lastEvidence.current = evidenceId;
+		void openAnswer(evidenceId).finally(() => onEvidenceOpened?.());
+	}, [evidenceId]);
 	const removeCurrentMistake = async () => {
 		if (!answerView || !globalThis.confirm("Remove this entry from Mistakes? Its chat and FSRS reviews will remain unchanged.")) return;
 		try {
@@ -128,13 +145,13 @@ export function RecallAnalysis({ report, onRefresh }: { report: LearningCapacity
 		finally { setBusy(false); }
 	};
 	useEffect(() => {
-		if (!resumeSubject || activeSubject !== resumeSubject || preview || resumeRequested.current) return;
+		if (!visible || (!showGroups && returnReviewOpen) || !resumeSubject || activeSubject !== resumeSubject || preview || resumeRequested.current) return;
 		resumeRequested.current = true;
 		try { sessionStorage.removeItem("lh:recall-return-subject"); } catch { /* storage unavailable */ }
 		if (returnReviewOpen) void loadPreview();
 		else { try { const offset = Number(sessionStorage.getItem("lh:recall-return-scroll")); sessionStorage.removeItem("lh:recall-return-scroll"); setTimeout(() => { const scroller = document.querySelector("[data-testid=planner-capacity-modal] .overflow-y-auto"); if (scroller && offset > 0) scroller.scrollTop = offset; }, 100); } catch { /* storage unavailable */ } }
 	// The restore runs once after the requested subject is available.
-	}, [activeSubject, preview, resumeSubject, returnReviewOpen]);
+	}, [activeSubject, preview, resumeSubject, returnReviewOpen, showGroups, visible]);
 	useEffect(() => {
 		if (!preview || preview.subject !== activeSubject) return;
 		const scroller = document.querySelector("[data-testid=planner-capacity-modal] .overflow-y-auto");
@@ -163,10 +180,10 @@ export function RecallAnalysis({ report, onRefresh }: { report: LearningCapacity
 		setGroups((old) => { const seen = new Set(old.map((item) => item.id)); const fresh = groupJob.groups.filter((item) => !seen.has(item.id) && !removedGroups[item.id]); return fresh.length ? [...old, ...fresh] : old; });
 	}, [groupJob, removedGroups]);
 	useEffect(() => {
-		if (groupJob?.status !== "running") return;
+		if (!visible || !showGroups || groupJob?.status !== "running") return;
 		const timer = setInterval(() => { void refreshGroupJobs().catch(() => {}); }, 4000);
 		return () => clearInterval(timer);
-	}, [groupJob?.status, refreshGroupJobs]);
+	}, [groupJob?.status, refreshGroupJobs, showGroups, visible]);
 	const groupAction = async (action: "start_job" | "resume_job" | "pause_job", retrySkipped = false) => {
 		if (!preview) return;
 		setBusy(true); setError(""); setNotice("");
@@ -213,8 +230,8 @@ export function RecallAnalysis({ report, onRefresh }: { report: LearningCapacity
 		setApproved((old) => ({ ...old, [group.id]: false, [id]: false })); setSplitSelection((old) => { const next = { ...old }; for (const member of group.members) delete next[splitKey(group.id, member.id)]; return next; }); setError("");
 	};
 	return <section aria-label="Recall Analysis" className="space-y-3 rounded-xl border bg-background/70 p-4">
-		<h3 className="text-sm font-semibold">Recall Analysis</h3>
-        <RecallAudit onApplied={onRefresh} />
+		<h3 className="text-sm font-semibold">{section === "groups" ? "Topic Groups" : "Recall Analysis"}</h3>
+        {section === "all" && <RecallAudit onApplied={onRefresh} />}
         {answerView && <div role="dialog" aria-label="Answer details" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"><div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded border bg-card p-3 space-y-2">
             <button type="button" onClick={() => setAnswerView(null)} className="rounded border px-2 py-1">Back to review</button>{error && <p role="alert">{error}</p>}
             <p>Question</p><ToolContentResponse>{answerView.answer.draft.question}</ToolContentResponse>
@@ -227,14 +244,18 @@ export function RecallAnalysis({ report, onRefresh }: { report: LearningCapacity
             {answerView.mistake && (answerView.answer.effectiveVerdict ?? answerView.answer.verdict) === "correct" && <p role="note">This answer is assessed correct but remains in Mistakes. Review both before deciding whether to remove it.</p>}
             {answerView.mistake && <button type="button" onClick={() => void removeCurrentMistake()} className="rounded border px-2 py-1">Remove from Mistakes</button>}
             <RecallAssessmentEditor id={answerView.answer.id} verdict={answerView.answer.effectiveVerdict ?? answerView.answer.verdict} onSaved={() => { void openAnswer(answerView.answer.id, answerView.source); void onRefresh(); }} />
-            <a className="underline" onClick={() => { try { sessionStorage.setItem("lh:recall-return-subject", activeSubject); sessionStorage.setItem("lh:recall-return-state", JSON.stringify({ range, expanded: expandedGroups, reviewOpen: Boolean(preview), groupPage, previewPage })); const scroller = document.querySelector("[data-testid=planner-capacity-modal] .overflow-y-auto"); if (scroller) sessionStorage.setItem("lh:recall-return-scroll", String(scroller.scrollTop)); } catch { /* storage unavailable */ } }} href={recallAnswerHref(answerView.answer.draft.chatId, answerView.source?.sourceMessageId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.sourceMessageId, answerView.source?.toolCallId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.toolCallId)}>Open full chat</a>
+            <a className="underline" onClick={() => { try { sessionStorage.setItem("lh:recall-return-subject", activeSubject); sessionStorage.setItem("lh:recall-return-state", JSON.stringify({ range, expanded: expandedGroups, reviewOpen: showGroups && Boolean(preview), groupPage, previewPage, tab: showGroups ? "groups" : "recall" })); const scroller = document.querySelector("[data-testid=planner-capacity-modal] .overflow-y-auto"); if (scroller) sessionStorage.setItem("lh:recall-return-scroll", String(scroller.scrollTop)); } catch { /* storage unavailable */ } }} href={recallAnswerHref(answerView.answer.draft.chatId, answerView.source?.sourceMessageId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.sourceMessageId, answerView.source?.toolCallId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.toolCallId)}>Open full chat</a>
         </div></div>}
-		<p className="text-muted-foreground">Independent evidence from free recall. AI assessments are provisional and can be corrected. Composite, Practice and FSRS remain separate.</p>
+		{showSummary && <><p className="text-muted-foreground">Recall shows your answers and their assessment sources. Recent evidence makes a bounded contribution to the composite.</p>
 		<p className="text-muted-foreground">Coverage: {report.dataCoverage.recallAssigned ?? 0} of {report.dataCoverage.recallAnswers ?? 0} eligible recall/explain answers have an identifiable subject; {report.dataCoverage.recallUnassigned ?? 0} are unassigned. The workspace telemetry counter may also include coding questions and uses a different counting method.</p>
 		{(report.dataCoverage.recallUnassignedExamples?.length ?? 0) > 0 && <details><summary className="cursor-pointer">View unassigned answers</summary>{report.dataCoverage.recallUnassignedExamples?.map((item, index) => <a key={`${item.chatId}:${item.toolCallId ?? index}`} className="mr-2 underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>Answer {index + 1}</a>)}</details>}
+		</>}
 		{!row || !window ? <p>No subject-linked recall answers yet.</p> : <>
 			<div className="flex flex-wrap items-center gap-2"><label>Subject <select aria-label="Recall subject" value={activeSubject} onChange={(event) => { setSubject(event.target.value); setPreview(null); setGroupPage(0); setPreviewPage(0); setError(""); setNotice(""); }} className="rounded border bg-background p-1">{subjects.map((item) => <option key={item.subject} value={item.subject}>{item.subject}</option>)}</select></label><span>Period:</span><button type="button" aria-pressed={range === "last30"} onClick={() => setRange("last30")} className="rounded border px-2 py-1 aria-pressed:bg-accent">Last 30 days</button><button type="button" aria-pressed={range === "allTime"} onClick={() => setRange("allTime")} className="rounded border px-2 py-1 aria-pressed:bg-accent">All time</button></div>
-			<div className="rounded border p-3 space-y-1"><p><strong>{window.responses}</strong> answers · <strong>{window.assessed}</strong> assessed · {window.days} days · {window.responses - window.assessed} not assessed{window.needsReview ? ` (${window.needsReview} changed; needs review)` : ""}</p><p>{window.correct} correct · {window.partial} partial · {window.wrong} incorrect · {window.dontKnow} did not know · {window.uncertain} uncertain</p><p>{window.ai} provisional AI · {window.confirmed} learner-confirmed or corrected</p><p>Help: {window.independent} independent · {window.assisted} assisted · {window.helpUnknown} unknown</p><p>Recorded timer: {window.medianTimerMin === null ? "not enough data" : `median ${window.medianTimerMin} min (${window.timerCount} answers)`}. Elapsed question-to-answer: {window.medianElapsedMin === null ? "not enough data" : `median ${window.medianElapsedMin} min (${window.elapsedCount} answers; includes breaks)`}.</p>{range === "last30" && <p>{row.recallInsights.trend ? `Compared with the prior 30 days: correct ${row.recallInsights.trend.correctRateDelta >= 0 ? "+" : ""}${row.recallInsights.trend.correctRateDelta} pp, partial ${row.recallInsights.trend.partialRateDelta >= 0 ? "+" : ""}${row.recallInsights.trend.partialRateDelta} pp. Question difficulty may differ.` : "Not enough assessed answers across both periods to compare trends."}</p>}{window.staleExamples.map((item, index) => <a key={`${item.chatId}:${index}`} className="mr-2 underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>Review changed answer {index + 1}</a>)}</div>
+			{showSummary && <div className="rounded border p-3 space-y-1"><p><strong>{window.responses}</strong> answers · <strong>{window.assessed}</strong> assessed · {window.days} days · {window.responses - window.assessed} not assessed{window.needsReview ? ` (${window.needsReview} changed; needs review)` : ""}</p><p>{window.correct} correct · {window.partial} partial · {window.wrong} incorrect · {window.dontKnow} did not know · {window.uncertain} uncertain</p><p>{window.ai} provisional AI · {window.confirmed} learner-confirmed or corrected</p><p>Help: {window.independent} independent · {window.assisted} assisted · {window.helpUnknown} unknown</p><p>Recorded timer: {window.medianTimerMin === null ? "not enough data" : `median ${window.medianTimerMin} min (${window.timerCount} answers)`}. Elapsed question-to-answer: {window.medianElapsedMin === null ? "not enough data" : `median ${window.medianElapsedMin} min (${window.elapsedCount} answers; includes breaks)`}.</p>{range === "last30" && <p>{row.recallInsights.trend ? `Compared with the prior 30 days: correct ${row.recallInsights.trend.correctRateDelta >= 0 ? "+" : ""}${row.recallInsights.trend.correctRateDelta} pp, partial ${row.recallInsights.trend.partialRateDelta >= 0 ? "+" : ""}${row.recallInsights.trend.partialRateDelta} pp. Question difficulty may differ.` : "Not enough assessed answers across both periods to compare trends."}</p>}{window.staleExamples.map((item, index) => <a key={`${item.chatId}:${index}`} className="mr-2 underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>Review changed answer {index + 1}</a>)}</div>
+			}
+			{showSummary && range === "last30" && row.recallCapacity && <RecallCapacityEvidence evidence={row.recallCapacity} />}
+			{showGroups && <>
 			<h4 className="font-medium">Approved topic groups</h4><p>Topics can overlap; each answer is counted once in subject totals. A correct answer in a topic is not automatically a mistake.</p>
 			{(row.approvedRecallGroups?.[range] ?? []).length === 0 ? <p className="text-muted-foreground">No approved groups yet. Existing assessments remain available above.</p> : (row.approvedRecallGroups?.[range] ?? []).map((group) => <details key={group.id} open={Boolean(expandedGroups[group.id])} onToggle={(event) => { const open = event.currentTarget.open; setExpandedGroups((old) => old[group.id] === open ? old : { ...old, [group.id]: open }); }} className="rounded border p-2"><summary className="cursor-pointer"><ToolContentResponse>{group.name}</ToolContentResponse> · {group.count} answers {group.stale && "· source changed: review required"}</summary><ToolContentResponse>{group.reason}</ToolContentResponse><p>{group.distribution.correct} correct · {group.distribution.partial} partial · {group.distribution.wrong} incorrect · {group.distribution.dont_know} did not know · {group.distribution.uncertain} uncertain</p><p className="text-muted-foreground">{group.stale ? "This group is excluded from AI planning until reviewed again." : `Approved; suggested by ${group.model}.`}</p>{group.answers.map((answer, index) => <button type="button" key={answer.id} className="mr-2 underline" onClick={() => void openAnswer(answer.id, answer)}>Answer {index + 1}</button>)}</details>)}
 			{!preview && <button type="button" disabled={busy} onClick={() => void loadPreview()} className="rounded border px-3 py-1.5">Review AI grouping input</button>}
@@ -243,6 +264,7 @@ export function RecallAnalysis({ report, onRefresh }: { report: LearningCapacity
 				{groups.length === 0 && preview.groups.length > 0 && <button type="button" disabled={busy} onClick={() => void save()} className="rounded border px-3 py-1.5">Remove all approved groups</button>}
 				{groups.length > 0 && <><p>Review, rename, remove answers or split groups. Saving approved groups replaces this subject’s approved groups with only those checked below; it never changes FSRS or the plan.</p>{groups.slice(groupPage * 10, (groupPage + 1) * 10).map((group) => <div key={group.id} className="space-y-2 rounded border p-2"><button type="button" className="float-right underline" onClick={() => { setGroups((old) => old.filter((item) => item.id !== group.id)); setRemovedGroups((old) => ({ ...old, [group.id]: true })); setApproved((old) => ({ ...old, [group.id]: false })); }}>Remove group</button><label><input type="checkbox" checked={Boolean(approved[group.id])} onChange={(event) => setApproved((old) => ({ ...old, [group.id]: event.target.checked }))} /> Approve this group</label><label className="block">Name <input value={group.name} onChange={(event) => setGroups((old) => old.map((item) => item.id === group.id ? { ...item, name: event.target.value } : item))} className="w-full rounded border bg-background p-1" /></label><label className="block">Reason <textarea value={group.reason} onChange={(event) => setGroups((old) => old.map((item) => item.id === group.id ? { ...item, reason: event.target.value } : item))} className="w-full rounded border bg-background p-1" /></label><p>{group.members.length} answers · {group.model}</p>{group.members.map((member) => { const item = preview.allItems.find((value) => value.id === member.id); const changed = !item || item.fingerprint !== member.fingerprint; return <div key={member.id} className="flex flex-wrap items-center gap-2"><label><input type="checkbox" checked={Boolean(splitSelection[splitKey(group.id, member.id)])} onChange={(event) => setSplitSelection((old) => ({ ...old, [splitKey(group.id, member.id)]: event.target.checked }))} /> <span className="sr-only">Select answer</span></label><ToolContentResponse>{item?.topic || member.id}</ToolContentResponse><span> · {item?.verdict ?? "unavailable"}{changed && " · changed"}</span>{item && <button type="button" className="underline" onClick={() => void openAnswer(item.id, item)}>View answer here</button>}<button type="button" onClick={() => { setGroups((old) => old.map((value) => value.id === group.id ? { ...value, members: value.members.filter((m) => m.id !== member.id) } : value)); setApproved((old) => ({ ...old, [group.id]: false })); }} className="underline">Remove</button>{changed && item && item.verdict && !item.needsReview && <button type="button" onClick={() => { setGroups((old) => old.map((value) => value.id === group.id ? { ...value, members: value.members.map((m) => m.id === member.id ? { ...m, fingerprint: item.fingerprint } : m) } : value)); setApproved((old) => ({ ...old, [group.id]: false })); }} className="underline">Use current assessment</button>}</div>; })}<button type="button" onClick={() => split(group)} className="rounded border px-2 py-1">Split selected answers</button></div>)}<div className="flex gap-3"><button type="button" disabled={groupPage === 0} onClick={() => setGroupPage((p) => p - 1)}>Previous groups</button><span>{groupPage + 1} / {Math.max(1, Math.ceil(groups.length / 10))}</span><button type="button" disabled={(groupPage + 1) * 10 >= groups.length} onClick={() => setGroupPage((p) => p + 1)}>Next groups</button></div><div className="flex gap-2"><button type="button" disabled={busy} onClick={() => void saveDraft()} className="rounded border px-3 py-1.5 disabled:opacity-40">Save draft</button><button type="button" disabled={busy || (!preview.groups.length && !groups.some((group) => approved[group.id]))} onClick={() => void save()} className="rounded bg-primary px-3 py-1.5 text-primary-foreground disabled:opacity-40">Save approved groups</button></div></>}
 			</div>}
+			</>}
 		</>}
 		{error && <p role="alert" className="text-destructive">{error}</p>}{notice && <p role="status">{notice}</p>}
 	</section>;

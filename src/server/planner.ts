@@ -86,6 +86,7 @@ import {
 import {
 	computeLearningCapacityReport,
 	type LearningCapacityReport,
+	type CapacityAiDiagnosis,
 	type PracticeOutcomeSample,
 	type QuizConfidenceSample,
 	type SubjectRecallEvidence,
@@ -2642,7 +2643,7 @@ function collectQuizAndPracticeSamples(opts: {
 	const unassigned = new Map<string, { chatId: string; sourceMessageId?: string; toolCallId?: string }>();
 	const evidenceFor = (subject: string) => recallBySubject[normalizeSubjectKey(subject)] ??= { responses: 0, assessed: 0, correct: 0, partial: 0, wrong: 0, dontKnow: 0, uncertain: 0 };
 
-	const pushQuizDetail = (detail: Record<string, unknown>, origin: string, subject: string | undefined, sessionTitle: string) => {
+	const pushQuizDetail = (detail: Record<string, unknown>, origin: string, subject: string | undefined, sessionTitle: string, answerId?: string) => {
 		if (detail.dismissed || detail.byVoice) return;
 		if (origin === "explain" || origin === "recall" || origin === "coding_question") {
 			recallExplainCount++;
@@ -2661,6 +2662,7 @@ function collectQuizAndPracticeSamples(opts: {
 			correct: detail.correct === true,
 			dontKnow,
 			origin,
+			answerId,
 		});
 	};
 
@@ -2726,7 +2728,9 @@ function collectQuizAndPracticeSamples(opts: {
 					const timerMs = timing && timing.interrupted !== true && typeof timing.timerMs === "number" && Number.isFinite(timing.timerMs) && timing.timerMs >= 0 ? timing.timerMs : undefined;
 					const help = details.recallHelp === "independent" || details.recallHelp === "assisted" ? details.recallHelp : "unknown";
 					if (!recallObservations.has(id)) evidenceFor(recallSubject).responses++;
-					recallObservations.set(id, { observation: { id, chatId: s.id, toolCallId: m.toolCallId, ...(start?.sourceMessageId ? { sourceMessageId: start.sourceMessageId } : {}), subject: recallSubject, answeredAt: draft?.answeredAt ?? (typeof details.answeredAt === "string" ? details.answeredAt : ts !== null ? new Date(ts).toISOString() : ""), ...(elapsedMs !== undefined ? { elapsedMs } : {}), ...(timerMs !== undefined ? { timerMs } : {}), help }, ...(draft ? { draft } : {}) });
+					const question = draft?.question.normalize("NFC").trim();
+					const promptKey = question ? createHash("sha256").update(question).digest("hex") : undefined;
+					recallObservations.set(id, { observation: { id, chatId: s.id, toolCallId: m.toolCallId, askedAt: start?.time ?? undefined, promptKey, ...(start?.sourceMessageId ? { sourceMessageId: start.sourceMessageId } : {}), subject: recallSubject, answeredAt: draft?.answeredAt ?? (typeof details.answeredAt === "string" ? details.answeredAt : ts !== null ? new Date(ts).toISOString() : ""), ...(elapsedMs !== undefined ? { elapsedMs } : {}), ...(timerMs !== undefined ? { timerMs } : {}), help }, ...(draft ? { draft } : {}) });
 				} else { const start = questionTimes.get(m.toolCallId); unassigned.set(id, { chatId: s.id, toolCallId: m.toolCallId, ...(start?.sourceMessageId ? { sourceMessageId: start.sourceMessageId } : {}) }); }
 			}
 			if (toolName === "flag_mistake" && details && typeof details.targetToolCallId === "string" && typeof details.verdict === "string" && ["correct", "partial", "wrong", "dont_know", "uncertain"].includes(details.verdict)) {
@@ -2737,10 +2741,10 @@ function collectQuizAndPracticeSamples(opts: {
 				if (!details || typeof details !== "object") continue;
 				if (Array.isArray(details.batch)) {
 					for (const item of details.batch as Array<Record<string, unknown>>) {
-						if (item && typeof item === "object") pushQuizDetail(item, toolName, subject, sessionTitle);
+						if (item && typeof item === "object") pushQuizDetail(item, toolName, subject, sessionTitle, typeof m.toolCallId === "string" ? `${s.id}:${m.toolCallId}` : undefined);
 					}
 				} else {
-					pushQuizDetail(details, toolName, subject, sessionTitle);
+					pushQuizDetail(details, toolName, subject, sessionTitle, typeof m.toolCallId === "string" ? `${s.id}:${m.toolCallId}` : undefined);
 				}
 			} else if (toolName === "conclude") {
 				const callId = typeof m.toolCallId === "string" ? m.toolCallId : "";
@@ -2788,6 +2792,7 @@ export function readPlannerLearningCapacityServer(
 	let graphFsrs: GraphFsrsSummary = emptyGraphFsrsSummary();
 	let fsrsWeights: number[] | undefined;
 	let fsrsReviewRatings: number[] = [];
+	let fsrsRecallAnswerIds: string[] = [];
 
 	try {
 		const flashcards = isolatedTestMode ? null : readFlashcardsSnapshot(opts?.flashcardsFile);
@@ -2796,6 +2801,7 @@ export function readPlannerLearningCapacityServer(
 				fsrsWeights = flashcards.settings.weights.filter((n): n is number => typeof n === "number" && Number.isFinite(n));
 			}
 			if (Array.isArray(flashcards.reviews)) {
+				fsrsRecallAnswerIds = (flashcards.reviews as Array<Record<string, unknown>>).flatMap((review) => review?.source === "recall" && typeof review.requestId === "string" && review.requestId.startsWith("recall:") ? [review.requestId.slice(7)] : []);
 				fsrsReviewRatings = (flashcards.reviews as Array<Record<string, unknown>>)
 					.map((r) => Number(r?.rating))
 					.filter((n) => Number.isFinite(n) && n >= 1 && n <= 4);
@@ -2865,7 +2871,7 @@ export function readPlannerLearningCapacityServer(
 				else evidence.assessed++;
 				const key = override.verdict === "dont_know" ? "dontKnow" : override.verdict; evidence[key]++;
 			}
-			row.observation.verdict = override.verdict as RecallVerdict; row.observation.source = "user"; row.observation.staleAssessment = false;
+			row.observation.verdict = override.verdict as RecallVerdict; row.observation.source = "user"; row.observation.confirmedAt = Date.parse(override.updatedAt); row.observation.staleAssessment = false;
 		}
 		if (override.help) row.observation.help = override.help;
 		if (override.timerMs !== undefined) row.observation.timerMs = override.timerMs;
@@ -2884,6 +2890,7 @@ export function readPlannerLearningCapacityServer(
 		graphFsrs,
 		fsrsWeights,
 		fsrsReviewRatings,
+		fsrsRecallAnswerIds,
 		graphNodeCount,
 		graphChainCount,
 		quizSamples,
@@ -2938,85 +2945,128 @@ export function calibratePlannerFromCapacityServer(
 	return { snapshot, report };
 }
 
-export interface CapacityAiDiagnosis {
-	summary: string;
-	strengths: string[];
-	bottlenecks: string[];
-	neuroProtocols: string[];
-	suggestedPaceNote: string;
-	modelLabel: string;
-}
-
 const capacityDiagnosisSchema = Type.Object({
 	summary: Type.String(),
 	strengths: Type.Array(Type.String()),
 	bottlenecks: Type.Array(Type.String()),
 	neuroProtocols: Type.Array(Type.String()),
 	suggestedPaceNote: Type.String(),
+	suggestedScore: Type.Optional(Type.Object({
+		score: Type.Number({ minimum: 0, maximum: 100 }),
+		reason: Type.String(),
+		evidenceIds: Type.Array(Type.String(), { maxItems: 8 }),
+	})),
 });
 
-export async function diagnoseLearningCapacityWithAiServer(
-	opts?: PlannerReadOptions & {
-		chatsDir?: string;
-		date?: string;
-		preferredRole?: ModelRole;
-		engineOverride?: PiEngine;
-		signal?: AbortSignal;
-	},
-): Promise<{ report: LearningCapacityReport; diagnosis: CapacityAiDiagnosis }> {
+type CapacityDiagnosisOptions = PlannerReadOptions & {
+	chatsDir?: string;
+	date?: string;
+	preferredRole?: ModelRole;
+	engineOverride?: PiEngine;
+	signal?: AbortSignal;
+	previewRevision?: string;
+};
+
+const CAPACITY_DIAGNOSIS_PROMPT = `Interpret this learner's Learning Capacity report. Submit one short diagnosis with strengths, bottlenecks and practical study suggestions. Reply in the primary language of the learner's subjects.
+Recall accounts for a small, evidence-weighted adjustment to the composite. Topic groups can overlap. Distinguish provisional AI grades, learner confirmations, and help status. A sample does not measure independent performance when help is unknown. No numbers, file names or answer IDs may be invented.
+Optionally offer a separate advisory score on the same 0–100 scale with a reason and IDs from the supplied examples. Omit the score when the evidence is insufficient. Evidence IDs let the learner open original answers and review their ratings. The score is advisory and cannot change the planner or grades.`;
+
+function prepareCapacityDiagnosis(opts?: CapacityDiagnosisOptions) {
 	const now = opts?.now ?? Date.now();
 	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
-	const { report, signals } = readPlannerLearningCapacityServer({ ...opts, date, now });
-
+	const { report, recallSources } = readPlannerLearningCapacityServer({ ...opts, date, now });
 	const resolved = opts?.engineOverride
 		? { role: "prober" as ModelRole, modelLabel: "custom", engine: opts.engineOverride }
 		: resolvePlannerEngine("coach", opts?.preferredRole);
-	if (!resolved) {
-		throw new PlannerAiUnavailable("No AI Coach model is configured (open Settings -> Models).");
+	if (!resolved || (opts?.preferredRole && !opts.engineOverride && resolved.role !== opts.preferredRole)) {
+		throw new PlannerAiUnavailable("The selected AI model is unavailable (open Settings → Models).");
 	}
+	const examples = recallSources
+		.filter(({ observation }) => observation.verdict && !observation.staleAssessment)
+		.sort((a, b) => b.observation.answeredAt.localeCompare(a.observation.answeredAt) || a.observation.id.localeCompare(b.observation.id))
+		.slice(0, 8)
+		.map(({ observation }, i) => ({
+			id: `answer-${i + 1}`,
+			sourceId: observation.id,
+			subject: observation.subject,
+			topic: observation.topic?.slice(0, 160),
+			grade: observation.verdict,
+			gradedBy: observation.source,
+			help: observation.help ?? "unknown",
+			feedback: observation.feedback?.slice(0, 250),
+		}));
+	const payload = {
+		composite: report.compositeScore,
+		legacyComposite: report.legacyCompositeScore,
+		recallContribution: report.recallContribution,
+		dimensions: report.dimensions.map(({ title, score, sampleCount, primaryMetric }) => ({ title, score, sampleCount, primaryMetric })),
+		subjects: capacitySubjectsForAi(report).slice(0, 8).map((row) => ({
+			subject: row.subject,
+			recall: row.recallCapacity,
+			practiceSolveRate: row.solveRatePct,
+			fsrsRetention: row.retentionPct,
+			groups: row.approvedRecallGroups?.last30.slice(0, 5).map(({ name, count, distribution }) => ({ name, count, distribution })),
+		})),
+		examples: examples.map(({ sourceId, ...example }) => { void sourceId; return example; }),
+	};
+	const promptText = JSON.stringify(payload, null, 2);
+	const revision = createHash("sha256").update(JSON.stringify([
+		date, resolved.modelLabel, resolved.role, CAPACITY_DIAGNOSIS_PROMPT, capacityDiagnosisSchema, payload,
+		examples.map(({ sourceId }) => sourceId),
+	])).digest("hex");
+	const cost = resolved.engine.model.cost;
+	const inputTokens = Math.ceil((CAPACITY_DIAGNOSIS_PROMPT.length + promptText.length + JSON.stringify(capacityDiagnosisSchema).length) / 3);
+	const outputTokens = 700;
+	const estimateUsd = cost?.input > 0 && cost?.output > 0 ? (inputTokens * cost.input + outputTokens * cost.output) / 1_000_000 : null;
+	return { report, resolved, examples, promptText, preview: {
+		revision, modelLabel: resolved.modelLabel, systemPrompt: CAPACITY_DIAGNOSIS_PROMPT, payload,
+		responseSchema: capacityDiagnosisSchema, estimateUsd, inputTokens, outputTokens,
+	} };
+}
 
-	interface RawCapDiag {
-		summary: string;
-		strengths: string[];
-		bottlenecks: string[];
-		neuroProtocols: string[];
-		suggestedPaceNote: string;
+export function previewLearningCapacityDiagnosisServer(opts?: CapacityDiagnosisOptions) {
+	return prepareCapacityDiagnosis(opts).preview;
+}
+
+export async function diagnoseLearningCapacityWithAiServer(
+	opts?: CapacityDiagnosisOptions,
+): Promise<{ report: LearningCapacityReport; diagnosis: CapacityAiDiagnosis }> {
+	const { report, resolved, examples, promptText, preview } = prepareCapacityDiagnosis(opts);
+	if (opts?.previewRevision !== undefined && opts.previewRevision !== preview.revision) {
+		throw new Error("The report or model changed. Preview the request again before sending.");
 	}
-
-	const res = await runPlannerSubmit<RawCapDiag>({
+	const sourceIds = new Map(examples.map(({ id, sourceId }) => [id, sourceId]));
+	const res = await runPlannerSubmit<Omit<CapacityAiDiagnosis, "modelLabel">>({
 		role: resolved.role,
 		engine: resolved.engine,
-		systemPrompt: `You are a Cognitive Science & Learning Analytics Coach inside ChronoHarness.
-Interpret the student's quantitative Learning Capacity telemetry (FSRS-6 Stability/Difficulty/Retention, Brier Metacognitive Calibration & Confidence Bias, Problem-Solving Velocity, Graph Foundation Risk, Error Taxonomy, Circadian Adherence) and call submit_capacity_diagnosis ONCE.
-Be strictly honest about sample counts: never invent data. recallEvidence and recallInsights summarize the same answers, not independent samples. recallInsights combines provisional AI assessments and learner corrections; distinguish their sources, and separate partial and uncertain answers. It is not an FSRS review or a validated capacity score. Suggest topics from approvedRecallGroups when available; group membership is user-approved but underlying AI assessments remain provisional. Topic groups may overlap: count unique answer IDs once in subject totals and never add group counts as independent samples. Elapsed question-to-answer time includes breaks and is not solving speed. A readinessBaseline or paceBaseline is a default, not a measurement of the student's ability. Write clearly in the primary language of the student's subjects/sessions (Vietnamese if subjects/sessions are Vietnamese).`,
-		promptText: JSON.stringify({
-			learningCapacityReport: { ...report, subjectBreakdown: capacitySubjectsForAi(report) },
-			mistakeRules: signals.mistakeHints?.recentRules.slice(0, 5) ?? [],
-			subjectSignals: signals.subjectSignals.slice(0, 8).map((s) => ({
-				label: s.label,
-				readinessPct: s.readinessPct,
-				dueCount: s.dueCount,
-				weakCount: s.weakCount,
-				untrackedCount: s.untrackedCount,
-			})),
-		}),
+		systemPrompt: CAPACITY_DIAGNOSIS_PROMPT,
+		promptText,
 		toolName: "submit_capacity_diagnosis",
-		toolDescription: "Submit cognitive science interpretation and neuro-study protocols.",
+		toolDescription: "Submit the diagnosis and optionally an advisory score with evidence.",
 		parameters: capacityDiagnosisSchema,
 		signal: opts?.signal,
-		fill: (raw) => raw as RawCapDiag,
-		validate: (v) => (v.summary?.trim() ? null : "Provide cognitive diagnosis summary."),
+		fill: (raw) => raw as Omit<CapacityAiDiagnosis, "modelLabel">,
+		validate: (v) => {
+			if (!v.summary?.trim()) return "Provide a diagnosis summary.";
+			if (v.suggestedScore && (!v.suggestedScore.reason.trim() || !v.suggestedScore.evidenceIds.length ||
+				v.suggestedScore.evidenceIds.some((id) => !sourceIds.has(id)))) return "Use only the supplied evidence IDs, or omit the score.";
+			return null;
+		},
 	});
-
 	return {
 		report,
 		diagnosis: {
 			summary: res.summary.trim().slice(0, 700),
-			strengths: (res.strengths ?? []).slice(0, 4).map((s) => String(s).trim()).filter(Boolean),
-			bottlenecks: (res.bottlenecks ?? []).slice(0, 4).map((s) => String(s).trim()).filter(Boolean),
-			neuroProtocols: (res.neuroProtocols ?? []).slice(0, 4).map((s) => String(s).trim()).filter(Boolean),
+			strengths: (res.strengths ?? []).slice(0, 4).map((item) => item.trim()).filter(Boolean),
+			bottlenecks: (res.bottlenecks ?? []).slice(0, 4).map((item) => item.trim()).filter(Boolean),
+			neuroProtocols: (res.neuroProtocols ?? []).slice(0, 4).map((item) => item.trim()).filter(Boolean),
 			suggestedPaceNote: String(res.suggestedPaceNote ?? "").trim().slice(0, 260),
 			modelLabel: resolved.modelLabel,
+			...(res.suggestedScore ? { suggestedScore: {
+				score: res.suggestedScore.score,
+				reason: res.suggestedScore.reason.trim().slice(0, 400),
+				evidenceIds: [...new Set(res.suggestedScore.evidenceIds)].map((id) => sourceIds.get(id)!),
+			} } : {}),
 		},
 	};
 }

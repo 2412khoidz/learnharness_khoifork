@@ -118,5 +118,6 @@ export * from "./mistakes.ts";
 export * from "./planner.ts";
 export * from "./learning-capacity.ts";
 export * from "./recall-insights.ts";
+export type { RecallCapacityProfile, RecallRate } from "./recall-capacity.ts";
 export * from "./recall-groups.ts";
 export * from "./recall-mapping.ts";

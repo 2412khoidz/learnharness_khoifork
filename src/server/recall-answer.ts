@@ -19,5 +19,5 @@ export function readRecallAnswer(id: string) {
  const fallback: RecallScanResult = { id, draft: candidate.draft, sessionTitle: chat.title, verdict: "uncertain", strengths: "", missing: "", correction: "", evidence: "", errorType: "knowledge-gap", topic: "", rule: "" };
  const answer = { ...(current ?? fallback), draft: candidate.draft, effectiveVerdict: override?.verdict ?? current?.verdict, assessmentSource: override?.verdict ? "user" as const : current ? "ai" as const : "unassessed" as const, assessmentStale: Boolean(prior && !current), tutorFeedback: candidate.feedback };
  const mistake = readMistakes().find((item) => item.id === id);
- return { answer, mistake: mistake ? { status: mistake.status } : null };
+ return { answer, source: { chatId, toolCallId: id.slice(separator + 1) }, mistake: mistake ? { status: mistake.status } : null };
 }

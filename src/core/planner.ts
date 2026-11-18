@@ -212,6 +212,21 @@ export interface PlannedBlock {
 	reason?: string;
 	strictSwitch?: boolean;
 	actionTopic?: string;
+	recallFocus?: RecallWorkloadFocus;
+}
+
+export interface RecallWorkloadFocus {
+	topic: string;
+	minutes: number;
+	mode: "recheck" | "practice";
+	task?: string;
+}
+
+export interface CapacityCalibrationUndo {
+	id: string;
+	date: string;
+	realism?: { before: number | null; after: number };
+	blocks: Array<{ id: string; date: string; revision: string; before?: RecallWorkloadFocus; after: RecallWorkloadFocus }>;
 }
 
 export interface QuotaChecklistItem {
@@ -369,6 +384,7 @@ export interface PlannerConfig {
 	realismFactor?: number;
 	coachChat?: CoachChatMessage[];
 	lastCoachUndo?: CoachUndoSnapshot;
+	lastCapacityCalibration?: CapacityCalibrationUndo;
 	updatedAt: string;
 }
 
@@ -874,6 +890,7 @@ function sanitizePlannedBlocks(raw: unknown, dateFallback: string): PlannedBlock
 			b.cognitiveLoad === "heavy" || b.cognitiveLoad === "medium" || b.cognitiveLoad === "light"
 				? b.cognitiveLoad
 				: undefined;
+		const recallFocus = type === "study" ? sanitizeRecallFocus(b.recallFocus) : undefined;
 		out.push({
 			id: typeof b.id === "string" && b.id.trim() ? b.id.trim().slice(0, 80) : `blk_custom_${dateFallback}_${i}`,
 			date: isValidDateString(b.date) ? b.date : dateFallback,
@@ -890,6 +907,7 @@ function sanitizePlannedBlocks(raw: unknown, dateFallback: string): PlannedBlock
 			...(typeof b.reason === "string" && b.reason.trim() ? { reason: b.reason.trim().slice(0, 140) } : {}),
 			...(typeof b.strictSwitch === "boolean" ? { strictSwitch: b.strictSwitch } : {}),
 			...(typeof b.actionTopic === "string" && b.actionTopic.trim() ? { actionTopic: b.actionTopic.trim().slice(0, 140) } : {}),
+			...(recallFocus && recallFocus.minutes * 3 <= durationMin ? { recallFocus } : {}),
 		});
 	}
 	return out.sort((a, b) => a.startMin - b.startMin);
@@ -1379,6 +1397,29 @@ function sanitizeCoachUndo(raw: unknown): CoachUndoSnapshot | undefined {
 	};
 }
 
+function sanitizeRecallFocus(value: unknown): RecallWorkloadFocus | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const { topic, minutes, mode, task } = value as Partial<RecallWorkloadFocus>;
+	if (typeof topic !== "string" || !topic.trim() || typeof minutes !== "number" || ![5, 10, 15].includes(minutes) ||
+		(mode !== "recheck" && mode !== "practice")) return undefined;
+	return { topic: topic.trim().slice(0, 160), minutes, mode, ...(typeof task === "string" && task.trim() ? { task: task.trim().slice(0, 250) } : {}) };
+}
+
+function sanitizeCapacityUndo(value: unknown): CapacityCalibrationUndo | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const entry = value as Partial<CapacityCalibrationUndo>;
+	if (typeof entry.id !== "string" || !isValidDateString(entry.date) || !Array.isArray(entry.blocks)) return undefined;
+	const blocks = entry.blocks.slice(0, 50).flatMap((block) => {
+		const after = sanitizeRecallFocus(block?.after);
+		if (!after || typeof block?.id !== "string" || typeof block.revision !== "string") return [];
+		return [{ id: block.id, date: isValidDateString(block.date) ? block.date : entry.date!, revision: block.revision, before: sanitizeRecallFocus(block.before), after }];
+	});
+	const realism = entry.realism;
+	const validFactor = (factor: unknown): factor is number => typeof factor === "number" && factor >= 0.65 && factor <= 1.25;
+	return { id: entry.id, date: entry.date, blocks,
+		...(realism && (realism.before === null || validFactor(realism.before)) && validFactor(realism.after) ? { realism } : {}) };
+}
+
 export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DEFAULT_PLANNER_CONFIG): PlannerConfig {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		return {
@@ -1412,6 +1453,7 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 			: undefined;
 	const coachChat = sanitizeCoachChat(obj.coachChat);
 	const lastCoachUndo = sanitizeCoachUndo(obj.lastCoachUndo);
+	const lastCapacityCalibration = sanitizeCapacityUndo(obj.lastCapacityCalibration);
 	return {
 		version: 1,
 		engineMode,
@@ -1431,6 +1473,7 @@ export function sanitizePlannerConfig(raw: unknown, fallback: PlannerConfig = DE
 		...(realismFactor !== undefined ? { realismFactor } : {}),
 		...(coachChat.length > 0 ? { coachChat } : {}),
 		...(lastCoachUndo ? { lastCoachUndo } : {}),
+		...(lastCapacityCalibration ? { lastCapacityCalibration } : {}),
 		updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : fallback.updatedAt,
 	};
 }

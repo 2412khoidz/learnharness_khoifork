@@ -911,7 +911,7 @@ export function PlannerPage() {
 					selectedRole={coachRole}
 					onChangeRole={setCoachRole}
 					onSnapshotUpdated={load}
-					onAskCoachWithReport={(prompt) => void sendToCoach(prompt, "general")}
+					onAskCoachWithReport={(prompt) => { setCoachFocusArea("general"); setCoachDraft(prompt); setCoachOpen(true); }}
 				/>
 			)}
 		</div>
@@ -1689,6 +1689,8 @@ function TodayQuotasTab({
 									<div className={cn("truncate text-sm font-medium", isDone && "line-through")}>
 										<PlannerMathText text={blk.title} />
 									</div>
+									{blk.recallFocus && <p className="mt-1 text-xs text-primary"><PlannerMathText text={`${blk.recallFocus.minutes} min · ${blk.recallFocus.mode === "recheck" ? "Recall self-check" : "Focused practice"} · ${blk.recallFocus.topic}`} /></p>}
+									{blk.recallFocus?.task && <p className="text-xs text-muted-foreground"><PlannerMathText text={blk.recallFocus.task} /></p>}
 									{(blk.reason || blk.cognitiveLoad) && (
 										<div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
 											{blk.cognitiveLoad && (

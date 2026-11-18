@@ -15,8 +15,10 @@
 import type { ExamPrepMistakeHints } from "./exam-prep.ts";
 import type { GraphFsrsSummary } from "./fsrs-graph.ts";
 import { summarizeRecallObservations, type RecallObservation, type RecallSubjectInsights } from "./recall-insights.ts";
+import { computeRecallCapacity, recallCompositeAdjustment, type RecallCapacityProfile } from "./recall-capacity.ts";
 import type { RecallGroupView } from "./recall-groups.ts";
 import type { MistakeRecord } from "./mistakes.ts";
+import type { RecallWorkloadFocus } from "./planner.ts";
 import {
 	addDaysToDate,
 	journalBedtimeForNight,
@@ -35,6 +37,7 @@ export type LearningCapacityAxisId =
 	| "circadian_endurance";
 
 export interface QuizConfidenceSample {
+	answerId?: string;
 	subject?: string;
 	sessionTitle: string;
 	confidencePct: number | null; // 0-100 stated probability (null when dontKnow or legacy)
@@ -86,6 +89,7 @@ export interface SubjectLearningCapacityDetail {
 	sampleCount: number;
 	recallEvidence: SubjectRecallEvidence;
 	recallInsights: RecallSubjectInsights;
+	recallCapacity?: RecallCapacityProfile;
 	approvedRecallGroups?: { last30: RecallGroupView[]; allTime: RecallGroupView[] };
 }
 
@@ -103,6 +107,8 @@ export interface SubjectRecallEvidence {
 export interface LearningCapacityReport {
 	generatedAt: string;
 	compositeScore: number | null; // 0-100 weighted index
+	legacyCompositeScore?: number | null;
+	recallContribution?: { delta: number; eligibleSubjects: number; activeSubjects: number };
 	tierLabel: string;
 	confidenceLevel: "calibrated" | "emerging" | "insufficient";
 	recommendedPaceFactor: number; // 0.75..1.65 (workload multiplier)
@@ -153,6 +159,7 @@ export interface LearningCapacityTelemetryInput {
 	graphFsrs?: GraphFsrsSummary | null;
 	fsrsWeights?: readonly number[];
 	fsrsReviewRatings?: readonly number[];
+	fsrsRecallAnswerIds?: readonly string[];
 	graphNodeCount?: number;
 	graphChainCount?: number;
 	quizSamples?: readonly QuizConfidenceSample[];
@@ -163,6 +170,50 @@ export interface LearningCapacityTelemetryInput {
 	pastChatSessionCount?: number;
 	mistakes?: readonly MistakeRecord[];
 	now?: number;
+}
+
+export interface CapacityAiDiagnosis {
+	summary: string;
+	strengths: string[];
+	bottlenecks: string[];
+	neuroProtocols: string[];
+	suggestedPaceNote: string;
+	modelLabel: string;
+	suggestedScore?: { score: number; reason: string; evidenceIds: string[] };
+}
+
+export interface CapacityCalibrationPreview {
+	date: string;
+	revision: string;
+	plannedStudyHours: number | null;
+	undoId: string | null;
+	realism: { current: number | null; recommended: number };
+	proposals: Array<{
+		id: string;
+		blockId: string;
+		date: string;
+		subject: string;
+		title: string;
+		startTime: string;
+		endTime: string;
+		previous?: RecallWorkloadFocus;
+		focus: RecallWorkloadFocus;
+		graded: number;
+		days: number;
+		provisional: number;
+		helpUnknown: number;
+		full: number;
+	}>;
+}
+
+type ExperimentLoss = { brier: number; logLoss: number };
+export type CapacityExperiment =
+	| { status: "insufficient"; observations: number }
+	| { status: "improved" | "baseline"; train: number; test: number; measured: ExperimentLoss; reference: ExperimentLoss };
+
+export interface CapacityExperiments {
+	fsrs: CapacityExperiment;
+	recall: CapacityExperiment & { next?: { subject: string; full: number } };
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -625,14 +676,14 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 				? "emerging"
 				: "insufficient";
 
-	const tierLabel =
-		compositeScore === null || confidenceLevel === "insufficient"
+	const tierFor = (score: number | null) =>
+		score === null || confidenceLevel === "insufficient"
 			? "Telemetry Collecting"
-			: compositeScore >= 82
+			: score >= 82
 				? "High Mastery Velocity"
-				: compositeScore >= 68
+				: score >= 68
 					? "Steady Balanced"
-					: compositeScore >= 52
+					: score >= 52
 						? "High-Effort Builder"
 						: "High Friction / Needs Scaffolding";
 
@@ -658,6 +709,8 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 
 	// ── Per-Subject Calibration Breakdown ──────────────────────────────────────
 	const subjectBreakdown: SubjectLearningCapacityDetail[] = [];
+	const recallOverlap = new Set([...(input.fsrsRecallAnswerIds ?? []), ...mistakes.map((item) => item.id)]);
+	for (const quiz of quizSamples) if (quiz.answerId) recallOverlap.add(quiz.answerId);
 	const seenSubjKeys = new Set<string>();
 
 	const quizBiasForSubject = (subjName: string): { bias: number | null; brier: number | null; accPct: number | null; n: number } => {
@@ -742,11 +795,14 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 			sampleCount,
 			recallEvidence,
 			recallInsights: summarizeRecallObservations(input.recallObservationsBySubject?.[nk] ?? [], now),
+			recallCapacity: computeRecallCapacity(input.recallObservationsBySubject?.[nk] ?? [], now, recallOverlap),
 		};
 	};
 
 	for (const sig of signals.subjectSignals) {
-		seenSubjKeys.add(normalizeSubjectKey(sig.label));
+		const key = normalizeSubjectKey(sig.label);
+		if (seenSubjKeys.has(key)) continue;
+		seenSubjKeys.add(key);
 		const metrics = lp?.bySubject[sig.label];
 		subjectBreakdown.push(buildSubjectDetail(sig.label, sig.readinessPct, (metrics?.fsrsTrackedNodes ?? 0) === 0, sig.nodeCount, metrics));
 	}
@@ -755,12 +811,17 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 		for (const metrics of Object.values(lp.bySubject)) {
 			const nk = normalizeSubjectKey(metrics.subject);
 			if (seenSubjKeys.has(nk)) continue;
-			seenSubjKeys.add(nk);
 			const detail = buildSubjectDetail(metrics.subject, 35, true, 0, metrics);
 			if (detail.sampleCount === 0 && metrics.loggedPlannerMinutes === 0 && detail.recallEvidence.responses === 0 && detail.recallEvidence.assessed === 0) continue;
+			seenSubjKeys.add(nk);
 			subjectBreakdown.push(detail);
 		}
 	}
+
+	for (const [key, rows] of Object.entries(input.recallObservationsBySubject ?? {})) {
+		if (!seenSubjKeys.has(key) && rows[0]) subjectBreakdown.push(buildSubjectDetail(rows[0].subject, 35, true, 0));
+	}
+	const { score, ...recallContribution } = recallCompositeAdjustment(compositeScore, subjectBreakdown.flatMap((row) => row.recallCapacity ? [row.recallCapacity] : []));
 
 	subjectBreakdown.sort((a, b) => b.sampleCount - a.sampleCount || b.paceFactor - a.paceFactor);
 
@@ -792,8 +853,10 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 
 	return {
 		generatedAt: new Date(now).toISOString(),
-		compositeScore,
-		tierLabel,
+		compositeScore: score,
+		legacyCompositeScore: compositeScore,
+		recallContribution,
+		tierLabel: tierFor(score),
 		confidenceLevel,
 		recommendedPaceFactor,
 		recommendedRealismFactor,

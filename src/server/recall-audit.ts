@@ -52,6 +52,11 @@ export function recallAuditPreview() {
  return { items, count: items.length, roles, inputCharacters, model: roles.find((entry) => entry.role === "analyst")?.modelLabel ?? "Analyst", estimate: "Cost depends on the selected model, output length and retries; catalog prices can be outdated." };
 }
 export function recallAudits() { return read().map((run) => ({ ...run, status: run.status === "running" && !active().has(run.id) ? "paused" as const : run.status })); }
+export function recallAuditActivity() {
+ const running = active();
+ if (!running.size) return [];
+ return read().filter((run) => running.has(run.id)).map((run) => ({ done: run.results.length, total: run.items.length }));
+}
 export function startRecallAudit(input: { role?: ModelRole; expected: Array<{ id: string; fingerprint: string }> }) {
  if (active().size) throw new Error("An audit is already running.");
  const items = sources();
