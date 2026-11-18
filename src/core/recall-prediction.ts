@@ -60,7 +60,7 @@ export function evaluateRecallPrediction(observations: readonly RecallObservatio
 	const full = train.filter((row) => row.y === 1).length;
 	if (train.length < 80 || full < 30 || train.length - full < 30 || new Set(train.map((row) => row.day)).size < 5 ||
 		test.length < 20 || !test.some((row) => row.y === 1) || !test.some((row) => row.y === 0)) return insufficient;
-	const baseline = (full + 0.5) / (train.length + 1);
+	const baseline = full / train.length;
 	const beta = [Math.log(baseline / (1 - baseline)), 0, 0, 0, 0, 0, 0];
 	const predict = (x: number[]) => sigmoid(x.reduce((sum, value, j) => sum + value * beta[j]!, 0));
 	// The Hessian norm is bounded by mean(||x||²)/4 plus the L2 penalty.

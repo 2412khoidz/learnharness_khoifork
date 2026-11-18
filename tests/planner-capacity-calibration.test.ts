@@ -115,6 +115,14 @@ it("keeps the AI preview local, shows the exact model input and rejects a stale 
 	assert.equal(calls, 0);
 });
 
+it("requires a versioned preview at the API before changing realism", async () => {
+	const { POST } = await import("../app/api/planner/capacity/route.ts");
+	for (const body of [{}, { action: "apply_realism" }, { action: "apply_calibration", items: [], realism: true }]) {
+		const response = await POST(new Request("http://localhost/api/planner/capacity", { method: "POST", body: JSON.stringify(body) }));
+		assert.equal(response.status, 400);
+	}
+});
+
 it("evaluates optimized Flashcard FSRS on later reviews and leaves Recall and Practice reviews out of the experiment", async () => {
 	const { evaluateFsrsForecast } = await import("../src/server/planner-capacity-experiments.ts");
 	const now = Date.parse("2026-11-18T12:00:00Z");

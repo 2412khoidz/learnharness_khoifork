@@ -1,7 +1,6 @@
 import type { ModelRole } from "@/config";
 import {
 	applyCapacityCalibration,
-	calibratePlannerFromCapacityServer,
 	CapacityCalibrationConflict,
 	diagnoseLearningCapacityWithAiServer,
 	previewCapacityCalibration,
@@ -38,7 +37,7 @@ export async function POST(request: Request) {
 		return Response.json({ error: "Invalid JSON body" }, { status: 400 });
 	}
 
-	const action = typeof body.action === "string" ? body.action : "apply_realism";
+	const action = typeof body.action === "string" ? body.action : "";
 	const date = typeof body.date === "string" ? body.date : undefined;
 	const preferredRole =
 		typeof body.preferredRole === "string" && ALLOWED_ROLES.has(body.preferredRole)
@@ -85,10 +84,5 @@ export async function POST(request: Request) {
 		}
 	}
 
-	if (action === "apply_realism") {
-		const res = calibratePlannerFromCapacityServer({ date });
-		return Response.json(res, { headers: { "Cache-Control": "no-store" } });
-	}
-
-	return Response.json({ error: `Unsupported action: ${action}` }, { status: 400 });
+	return Response.json({ error: "Choose an available action. Workload changes require a current calibration preview." }, { status: 400 });
 }
