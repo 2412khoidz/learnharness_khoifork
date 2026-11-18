@@ -1679,7 +1679,7 @@ export function Chat({
 	const sessionMistakes = useChatMistakes(chatId);
 	const sessionRecallGrades = useChatRecallGrades(chatId);
 	const [returnToRecall, setReturnToRecall] = useState(false);
-	useEffect(() => { try { setReturnToRecall(Boolean(sessionStorage.getItem("lh:recall-return-subject"))); } catch { /* storage unavailable */ } }, []);
+	useEffect(() => { try { setReturnToRecall(Boolean(sessionStorage.getItem("lh:recall-return-state") || sessionStorage.getItem("lh:recall-return-subject"))); } catch { /* storage unavailable */ } }, []);
 
 	return (
 		<>

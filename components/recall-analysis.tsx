@@ -30,13 +30,29 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
 	const [resumeSubject, setResumeSubject] = useState("");
 	const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 	const [returnReviewOpen, setReturnReviewOpen] = useState(true);
+	const [returnAnswer, setReturnAnswer] = useState<{ id: string; source?: { chatId: string; sourceMessageId?: string; toolCallId?: string } } | null>(null);
 	useEffect(() => {
 		let current = "";
-		try { current = sessionStorage.getItem("lh:recall-return-subject") ?? ""; } catch { /* storage unavailable */ }
-		if (current) {
-			try { const saved = JSON.parse(sessionStorage.getItem("lh:recall-return-state") ?? "null") as { range?: "last30" | "allTime"; expanded?: Record<string, boolean>; reviewOpen?: boolean; groupPage?: number; previewPage?: number } | null; if (saved?.range) setRange(saved.range); if (saved?.expanded) setExpandedGroups(saved.expanded); if (saved?.reviewOpen === false) setReturnReviewOpen(false); if (Number.isInteger(saved?.groupPage) && saved!.groupPage! >= 0) setGroupPage(saved!.groupPage!); if (Number.isInteger(saved?.previewPage) && saved!.previewPage! >= 0) setPreviewPage(saved!.previewPage!); sessionStorage.removeItem("lh:recall-return-state"); } catch { /* storage unavailable */ }
-			setSubject(current); setResumeSubject(current); return;
-		}
+		try {
+			current = sessionStorage.getItem("lh:recall-return-subject") ?? "";
+			const saved = JSON.parse(sessionStorage.getItem("lh:recall-return-state") ?? "null") as {
+				range?: "last30" | "allTime"; expanded?: Record<string, boolean>; reviewOpen?: boolean; groupPage?: number; previewPage?: number; answer?: NonNullable<typeof returnAnswer>;
+			} | null;
+			if (current || saved) {
+				if (saved?.range) setRange(saved.range);
+				if (saved?.expanded) setExpandedGroups(saved.expanded);
+				if (saved?.reviewOpen === false) setReturnReviewOpen(false);
+				if (typeof saved?.groupPage === "number" && Number.isInteger(saved.groupPage) && saved.groupPage >= 0) setGroupPage(saved.groupPage);
+				if (typeof saved?.previewPage === "number" && Number.isInteger(saved.previewPage) && saved.previewPage >= 0) setPreviewPage(saved.previewPage);
+				if (saved?.answer?.id) setReturnAnswer(saved.answer);
+				if (report.subjectBreakdown.some((item) => item.subject === current)) {
+					setSubject(current); setResumeSubject(current);
+				}
+				sessionStorage.removeItem("lh:recall-return-state");
+				sessionStorage.removeItem("lh:recall-return-subject");
+				return;
+			}
+		} catch { /* storage unavailable */ }
 		void fetch("/api/planner/recall-progress?key=meta%3Agroup", { cache: "no-store" }).then(async (res) => {
 			if (!res.ok) return;
 			const body = await res.json() as { progress?: { value?: { subject?: string; scrollTop?: number; groupPage?: number; previewPage?: number; range?: "last30" | "allTime"; expanded?: Record<string, boolean> } } };
@@ -104,6 +120,11 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
 		try { const res = await fetch(`/api/planner/recall-groups?answerId=${encodeURIComponent(id)}`, { cache: "no-store" }); const body = await res.json(); if (!res.ok) throw new Error(body.error || "Could not load answer."); setAnswerView({ ...body, source: source ?? body.source }); }
 		catch (err) { setError(err instanceof Error ? err.message : "Could not load answer."); }
 	};
+	useEffect(() => {
+		if (!visible || !returnAnswer) return;
+		setReturnAnswer(null);
+		void openAnswer(returnAnswer.id, returnAnswer.source);
+	}, [returnAnswer, visible]);
 	const lastEvidence = useRef<string | undefined>(undefined);
 	useEffect(() => {
 		if (!evidenceId) { lastEvidence.current = undefined; return; }
@@ -153,18 +174,20 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
 	// The restore runs once after the requested subject is available.
 	}, [activeSubject, preview, resumeSubject, returnReviewOpen, showGroups, visible]);
 	useEffect(() => {
-		if (!preview || preview.subject !== activeSubject) return;
+		if (!visible || !showGroups || !preview || preview.subject !== activeSubject) return;
 		const scroller = document.querySelector("[data-testid=planner-capacity-modal] .overflow-y-auto");
 		if (!scroller) return;
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let lastScroll = scroller.scrollTop;
 		const persistLocation = () => {
 			const sequence = Math.max(locationSequence.current + 1, Date.now() * 1000); locationSequence.current = sequence;
-			void fetch("/api/planner/recall-progress", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: "meta:group", sequence, value: { subject: activeSubject, scrollTop: scroller.scrollTop, groupPage, previewPage, range, expanded: expandedGroups } }), keepalive: true }).catch(() => {});
+			void fetch("/api/planner/recall-progress", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: "meta:group", sequence, value: { subject: activeSubject, scrollTop: lastScroll, groupPage, previewPage, range, expanded: expandedGroups } }), keepalive: true }).catch(() => {});
 		};
-		const onScroll = () => { if (timer) clearTimeout(timer); timer = setTimeout(persistLocation, 500); };
-		scroller.addEventListener("scroll", onScroll); persistLocation();
+		const onScroll = () => { lastScroll = scroller.scrollTop; if (timer) clearTimeout(timer); timer = setTimeout(persistLocation, 500); };
+		scroller.addEventListener("scroll", onScroll);
+		timer = setTimeout(() => { lastScroll = scroller.scrollTop; persistLocation(); }, 0);
 		return () => { scroller.removeEventListener("scroll", onScroll); if (timer) { clearTimeout(timer); persistLocation(); } };
-	}, [activeSubject, preview?.subject, groupPage, previewPage, range, expandedGroups]);
+	}, [activeSubject, preview?.subject, groupPage, previewPage, range, expandedGroups, visible, showGroups]);
 	const refreshGroupJobs = useCallback(async () => {
 		if (!activeSubject || !preview || preview.subject !== activeSubject) return;
 		const response = await fetch(`/api/planner/recall-groups?jobs=1&subject=${encodeURIComponent(activeSubject)}`, { cache: "no-store" });
@@ -173,7 +196,7 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
 		const jobs = body.jobs ?? []; setGroupJobs(jobs);
 		setGroupJobId((id) => jobs.some((job) => job.id === id) ? id : jobs.at(-1)?.id ?? "");
 	}, [activeSubject, preview?.subject]);
-	useEffect(() => { void refreshGroupJobs().catch(() => {}); }, [refreshGroupJobs]);
+	useEffect(() => { if (visible && showGroups) void refreshGroupJobs().catch(() => {}); }, [refreshGroupJobs, visible, showGroups]);
 	const groupJob = groupJobs.find((job) => job.id === groupJobId);
 	useEffect(() => {
 		if (!groupJob) return;
@@ -244,7 +267,7 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
             {answerView.mistake && (answerView.answer.effectiveVerdict ?? answerView.answer.verdict) === "correct" && <p role="note">This answer is assessed correct but remains in Mistakes. Review both before deciding whether to remove it.</p>}
             {answerView.mistake && <button type="button" onClick={() => void removeCurrentMistake()} className="rounded border px-2 py-1">Remove from Mistakes</button>}
             <RecallAssessmentEditor id={answerView.answer.id} verdict={answerView.answer.effectiveVerdict ?? answerView.answer.verdict} onSaved={() => { void openAnswer(answerView.answer.id, answerView.source); void onRefresh(); }} />
-            <a className="underline" onClick={() => { try { sessionStorage.setItem("lh:recall-return-subject", activeSubject); sessionStorage.setItem("lh:recall-return-state", JSON.stringify({ range, expanded: expandedGroups, reviewOpen: showGroups && Boolean(preview), groupPage, previewPage, tab: showGroups ? "groups" : "recall" })); const scroller = document.querySelector("[data-testid=planner-capacity-modal] .overflow-y-auto"); if (scroller) sessionStorage.setItem("lh:recall-return-scroll", String(scroller.scrollTop)); } catch { /* storage unavailable */ } }} href={recallAnswerHref(answerView.answer.draft.chatId, answerView.source?.sourceMessageId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.sourceMessageId, answerView.source?.toolCallId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.toolCallId)}>Open full chat</a>
+            <a className="underline" onClick={() => { try { sessionStorage.setItem("lh:recall-return-subject", activeSubject); sessionStorage.setItem("lh:recall-return-state", JSON.stringify({ range, expanded: expandedGroups, reviewOpen: showGroups && Boolean(preview), groupPage, previewPage, tab: showGroups ? "groups" : "recall", answer: { id: answerView.answer.id, source: answerView.source } })); const scroller = document.querySelector("[data-testid=planner-capacity-modal] .overflow-y-auto"); if (scroller) sessionStorage.setItem("lh:recall-return-scroll", String(scroller.scrollTop)); } catch { /* storage unavailable */ } }} href={recallAnswerHref(answerView.answer.draft.chatId, answerView.source?.sourceMessageId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.sourceMessageId, answerView.source?.toolCallId ?? preview?.allItems.find((item) => item.id === answerView.answer.id)?.toolCallId)}>Open full chat</a>
         </div></div>}
 		{showSummary && <><p className="text-muted-foreground">Recall shows your answers and their assessment sources. Recent evidence makes a bounded contribution to the composite.</p>
 		<p className="text-muted-foreground">Coverage: {report.dataCoverage.recallAssigned ?? 0} of {report.dataCoverage.recallAnswers ?? 0} eligible recall/explain answers have an identifiable subject; {report.dataCoverage.recallUnassigned ?? 0} are unassigned. The workspace telemetry counter may also include coding questions and uses a different counting method.</p>

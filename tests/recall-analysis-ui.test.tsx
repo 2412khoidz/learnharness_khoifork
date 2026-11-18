@@ -67,7 +67,7 @@ it("opens an approved group answer inline and preserves the exact chat link", as
   if (url.includes("recall-audit")) return new Response(JSON.stringify({ runs: [] }));
   return new Response(JSON.stringify({ progress: null }));
  };
- const root = createRoot(document.querySelector("main")!);
+ let root = createRoot(document.querySelector("main")!);
  try {
   await act(async () => root.render(<RecallAnalysis report={report} onRefresh={async () => {}} />));
   const answer = [...document.querySelectorAll("button")].find((button) => button.textContent === "Answer 4"); assert.ok(answer);
@@ -78,6 +78,17 @@ it("opens an approved group answer inline and preserves the exact chat link", as
   assert.ok(fullChat?.getAttribute("href")?.includes("recallAnswer=call3")); assert.ok(fullChat?.getAttribute("href")?.includes("message-message3"));
   await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Back to review")?.click());
   assert.equal(document.querySelector('[aria-label="Answer details"]'), null);
+  await act(async () => answer.click());
+  const chatLink = [...document.querySelectorAll("a")].find((item) => item.textContent === "Open full chat");
+  assert.ok(chatLink);
+  await act(async () => chatLink.dispatchEvent(new dom.window.Event("click", { bubbles: true, cancelable: true })));
+  assert.equal(JSON.parse(storage.get("lh:recall-return-state")!).answer.id, "chat:call3");
+  await act(async () => root.unmount());
+  root = createRoot(document.querySelector("main")!);
+  await act(async () => root.render(<RecallAnalysis report={report} onRefresh={async () => {}} section="groups" />));
+  const returnedLink = [...document.querySelectorAll('[aria-label="Answer details"] a')].find((item) => item.textContent === "Open full chat");
+  assert.ok(returnedLink?.getAttribute("href")?.includes("recallAnswer=call3"));
+  assert.ok(returnedLink?.getAttribute("href")?.includes("message-message3"));
  } finally { await act(async () => root.unmount()); globalThis.fetch = previousFetch; }
 });
 

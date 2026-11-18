@@ -130,7 +130,7 @@ export function PlannerCapacityModal({
 			setStatusMsg(null);
 			void fetchReport();
 			try {
-				if (sessionStorage.getItem("lh:recall-return-subject")) {
+				if (sessionStorage.getItem("lh:recall-return-state") || sessionStorage.getItem("lh:recall-return-subject")) {
 					const saved = JSON.parse(sessionStorage.getItem("lh:recall-return-state") ?? "null") as { tab?: CapacityTab } | null;
 					const next = saved?.tab === "recall" ? "recall" : "groups";
 					setVisited((old) => new Set([...old, next]));
