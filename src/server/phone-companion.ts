@@ -41,7 +41,7 @@ import {
 	type PlannerIntensity,
 } from "../core/planner.ts";
 import { graphView } from "./graph.ts";
-import { defaultFlashcardsStorePath, loadFlashcardsScheduler, readFlashcardsSnapshot } from "./graph-fsrs.ts";
+import { defaultFlashcardsStorePath, loadFlashcardsScheduler, readRawFlashcardsFile } from "./graph-fsrs.ts";
 import { effectiveSettings, stores } from "./stores.ts";
 
 export interface MobileCompanionDueCard {
@@ -207,7 +207,7 @@ export class MobileCompanionError extends Error {
 }
 
 function readFlashcardsStore(file: string): StoredFlashcardsFile | null {
-	const snap = readFlashcardsSnapshot(file);
+	const snap = readRawFlashcardsFile(file);
 	if (!snap || !snap.propositions || Object.keys(snap.propositions).length === 0) {
 		// Re-check existence in case store file was missing vs empty valid JSON.
 		try {

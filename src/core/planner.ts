@@ -1491,22 +1491,32 @@ function journalSleepMarkers(text: string | undefined, kind: "bed" | "wake"): st
 	if (!text) return [];
 	const times: string[] = [];
 	for (const line of text.split(/\r?\n/)) {
-		const match = line.match(/^\s*(\d{1,2})(?::|h)(\d{1,2})?\s*:?\s*(.+)$/i);
+		const match = line.match(/^\s*(\d{1,2})(?:(?::|h)(\d{1,2})?|([rR])(?![\p{L}\p{N}_]))\s*:?\s*(.+)$/iu);
 		if (!match) continue;
-		const minutes = Number(match[1]) * 60 + Number(match[2] ?? 0);
-		if (Number(match[1]) > 23 || Number(match[2] ?? 0) > 59) continue;
-		const textNorm = normalizeSubjectKey(match[3]!);
-		if (kind === "bed" ? /^(?:di )?(?:ngu|sleep|bedtime)(?:\s|$)/.test(textNorm) : /^(?:thuc day|day|wake(?: up)?)(?:\s|$)/.test(textNorm)) times.push(formatClockMin(minutes));
+		const hour = Number(match[1]);
+		const minute = match[3] ? 30 : Number(match[2] ?? 0);
+		if (hour > 23 || minute > 59) continue;
+		const textLower = match[4]!.trim().toLowerCase();
+		if (kind === "bed") {
+			if (
+				!/^(?:ngủ\s*trưa|ngu\s*trua|chợp\s*mắt|chop\s*mat|nap)(?=$|\s|[.,;(!-])/iu.test(textLower) &&
+				/^(?:đi\s*ngủ|di\s*ngu|ngủ|ngu|sleep|bedtime)(?=$|\s|[.,;(!-])/iu.test(textLower)
+			) {
+				times.push(formatClockMin(hour * 60 + minute));
+			}
+		} else if (/^(?:thức\s*dậy|thuc\s*day|ngủ\s*dậy|ngu\s*day|dậy|wake(?:\s+up)?)(?=$|\s|[.,;(!-])/iu.test(textLower)) {
+			times.push(formatClockMin(hour * 60 + minute));
+		}
 	}
 	return [...new Set(times)];
 }
 
-/** Bedtime belongs to the night starting on date; early clocks belong to its next morning. */
+/** Bedtime belongs to the night starting on date; early clocks (before 06:00) belong to its next morning. */
 export function journalBedtimeForNight(logs: Record<string, DailyHabitLog>, date: string): { time: string; source: "check-in" | "journal" } | null {
 	const explicit = logs[date]?.actualBedtime;
 	if (explicit && parseClockMin(explicit) !== null) return { time: explicit, source: "check-in" };
 	const evening = journalSleepMarkers(logs[date]?.journalText, "bed").filter((time) => (parseClockMin(time) ?? 0) >= 15 * 60);
-	const morning = journalSleepMarkers(logs[addDaysToDate(date, 1)]?.journalText, "bed").filter((time) => (parseClockMin(time) ?? 1440) < 15 * 60);
+	const morning = journalSleepMarkers(logs[addDaysToDate(date, 1)]?.journalText, "bed").filter((time) => (parseClockMin(time) ?? 1440) < 6 * 60);
 	const candidates = [...new Set([...evening, ...morning])];
 	return candidates.length === 1 ? { time: candidates[0]!, source: "journal" } : null;
 }
@@ -4146,7 +4156,7 @@ export function computePersonalizedMilestoneEstimate(opts: {
 }
 
 const SENSITIVE_JOURNAL_RE =
-	/\b(?:thu\s*dam|quay\s*tay|soc\s*lo|phim\s*(?:sex|18\+|nguoi\s*lon|nong)|xem\s*(?:sex|porn|hentai|jav|18\+)|porn(?:ography)?|hentai|masturbat(?:e|ed|es|ing|ion)|fap(?:ping|ped)?|no\s*fap|pmo|fetish(?:es)?|erotica|orgasm(?:s)?|jerk(?:ed|ing)?\s*off|libido\s*(?:spike|cao|tang)|nung)\b/gi;
+	/(?<![\p{L}\p{N}_])(?:thu\s*dam|quay\s*tay|soc\s*lo|phim\s*(?:sex|18\+|nguoi\s*lon|nong)|xem\s*(?:sex|porn|hentai|jav|18\+)|porn(?:ography)?|hentai|masturbat(?:e|ed|es|ing|ion)|fap(?:ping|ped)?|no\s*fap|pmo|fetish(?:es)?|erotica|orgasm(?:s)?|jerk(?:ed|ing)?\s*off|libido\s*(?:spike|cao|tang)|nung)(?=$|[^\p{L}\p{N}_])/giu;
 
 /**
  * Redacts explicit/intimate terms from journal text before showing in history previews
@@ -4296,7 +4306,7 @@ export function parseJournalTextLocal(
 /** Explicit clock points in natural text, including Vietnamese 8r = 08:30. */
 export function journalClockPoints(text: string): Set<string> {
 	const points = new Set<string>();
-	for (const match of text.matchAll(/\b(\d{1,2})\s*(?:(:|h)\s*(\d{1,2})?|([rR])\b)/gi)) {
+	for (const match of text.matchAll(/(?<![\p{L}\p{N}_])(\d{1,2})\s*(?:(:|h)\s*(\d{1,2})?|([rR])(?![\p{L}\p{N}_]))/giu)) {
 		const hour = Number(match[1]), minute = match[4] ? 30 : Number(match[3] ?? 0);
 		if (hour <= 23 && minute <= 59) points.add(formatClockMin(hour * 60 + minute));
 	}

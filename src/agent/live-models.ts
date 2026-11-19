@@ -39,6 +39,88 @@ const CARBON_THINKING_LEVEL_MAP = {
 	xhigh: "xhigh",
 };
 
+const OPENAI_THINKING_LEVEL_MAP = {
+	off: "none",
+	minimal: null,
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: "max",
+};
+
+const OPENAI_PRO_THINKING_LEVEL_MAP = {
+	off: null,
+	minimal: null,
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: "max",
+};
+
+const OPENAI_INPUT_LIMITS = {
+	maxRequestBytes: 536_870_912,
+	images: {
+		maxPerRequest: 1500,
+		resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4_718_592, jpegQuality: 80 },
+	},
+};
+
+function makeOpenAIResponsesModel(
+	id: string,
+	name: string,
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number },
+	thinkingLevelMap: Record<string, string | null> = OPENAI_THINKING_LEVEL_MAP,
+): Model<Api> {
+	return {
+		id,
+		name,
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost,
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+		thinkingLevelMap: { ...thinkingLevelMap },
+		compat: {
+			supportsStrictMode: true,
+			supportsOpenAIGrammarTools: true,
+			supportsAdditionalTools: true,
+			supportsToolSearch: true,
+			supportsMidConvoSystemMessages: true,
+			supportsExplicitPromptCacheMode: true,
+			supportsMidConvoEffort: true,
+		},
+		inputLimits: OPENAI_INPUT_LIMITS,
+	} as Model<Api>;
+}
+
+function makeCopilotResponsesModel(
+	id: string,
+	name: string,
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number },
+	thinkingLevelMap: Record<string, string | null> = OPENAI_THINKING_LEVEL_MAP,
+): Model<Api> {
+	return {
+		id,
+		name,
+		api: "openai-responses",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost,
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+		thinkingLevelMap: { ...thinkingLevelMap },
+		headers: { ...COPILOT_HEADERS },
+		inputLimits: VERTEX_INPUT_LIMITS,
+	} as Model<Api>;
+}
+
 /**
  * Curated newly-released models that may not yet exist in the bundled
  * `@earendil-works/pi-ai` static JSON catalogs. Merged with provider catalogs
@@ -74,6 +156,34 @@ export const SUPPLEMENTAL_MODELS: Readonly<Record<string, readonly Model<Api>[]>
 			thinkingLevelMap: { ...CARBON_THINKING_LEVEL_MAP },
 			inputLimits: GOOGLE_INPUT_LIMITS,
 		},
+		{
+			id: "gemini-4-neon",
+			name: "Gemini 4 Neon",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			thinkingLevelMap: { ...GOOGLE_THINKING_LEVEL_MAP },
+			inputLimits: GOOGLE_INPUT_LIMITS,
+		},
+		{
+			id: "gemini-4-argon",
+			name: "Gemini 4 Argon",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 2.0, output: 10.0, cacheRead: 0.1, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			thinkingLevelMap: { ...GOOGLE_THINKING_LEVEL_MAP },
+			inputLimits: GOOGLE_INPUT_LIMITS,
+		},
 	],
 	"google-vertex": [
 		{
@@ -104,6 +214,49 @@ export const SUPPLEMENTAL_MODELS: Readonly<Record<string, readonly Model<Api>[]>
 			thinkingLevelMap: { ...CARBON_THINKING_LEVEL_MAP },
 			inputLimits: VERTEX_INPUT_LIMITS,
 		},
+		{
+			id: "gemini-4-neon",
+			name: "Gemini 4 Neon",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: "https://{location}-aiplatform.googleapis.com",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			thinkingLevelMap: { ...GOOGLE_THINKING_LEVEL_MAP },
+			inputLimits: VERTEX_INPUT_LIMITS,
+		},
+		{
+			id: "gemini-4-argon",
+			name: "Gemini 4 Argon",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: "https://{location}-aiplatform.googleapis.com",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 2.0, output: 10.0, cacheRead: 0.1, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			thinkingLevelMap: { ...GOOGLE_THINKING_LEVEL_MAP },
+			inputLimits: VERTEX_INPUT_LIMITS,
+		},
+	],
+	openai: [
+		makeOpenAIResponsesModel("gpt-6.2-astra", "GPT-6.2 Astra", { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.2-astra-pro", "GPT-6.2 Astra Pro", { input: 20, output: 100, cacheRead: 2, cacheWrite: 25 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.2-sol", "GPT-6.2 Sol", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, OPENAI_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.2-sol-pro", "GPT-6.2 Sol Pro", { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.2-terra", "GPT-6.2 Terra", { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 }, OPENAI_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.2-terra-pro", "GPT-6.2 Terra Pro", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.2-luna", "GPT-6.2 Luna", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }, OPENAI_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.2-luna-pro", "GPT-6.2 Luna Pro", { input: 0.2, output: 1.0, cacheRead: 0.02, cacheWrite: 0.25 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.1-terra-pro", "GPT-6.1 Terra Pro", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6.1-sol-pro", "GPT-6.1 Sol Pro", { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6-astra-pro", "GPT-6 Astra Pro", { input: 20, output: 100, cacheRead: 2, cacheWrite: 25 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6-sol-pro", "GPT-6 Sol Pro", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeOpenAIResponsesModel("gpt-6-luna-pro", "GPT-6 Luna Pro", { input: 0.2, output: 1.0, cacheRead: 0.02, cacheWrite: 0.25 }, OPENAI_PRO_THINKING_LEVEL_MAP),
 	],
 	"github-copilot": [
 		{
@@ -147,6 +300,56 @@ export const SUPPLEMENTAL_MODELS: Readonly<Record<string, readonly Model<Api>[]>
 			},
 			inputLimits: VERTEX_INPUT_LIMITS,
 		},
+		{
+			id: "gemini-4-neon",
+			name: "Gemini 4 Neon",
+			api: "openai-completions",
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			thinkingLevelMap: { ...GOOGLE_THINKING_LEVEL_MAP },
+			headers: { ...COPILOT_HEADERS },
+			compat: {
+				supportsStrictMode: true,
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: false,
+			},
+			inputLimits: VERTEX_INPUT_LIMITS,
+		},
+		{
+			id: "gemini-4-argon",
+			name: "Gemini 4 Argon",
+			api: "openai-completions",
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 2.0, output: 10.0, cacheRead: 0.1, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			thinkingLevelMap: { ...GOOGLE_THINKING_LEVEL_MAP },
+			headers: { ...COPILOT_HEADERS },
+			compat: {
+				supportsStrictMode: true,
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: false,
+			},
+			inputLimits: VERTEX_INPUT_LIMITS,
+		},
+		makeCopilotResponsesModel("gpt-6.2-astra", "GPT-6.2 Astra", { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeCopilotResponsesModel("gpt-6.2-astra-pro", "GPT-6.2 Astra Pro", { input: 20, output: 100, cacheRead: 2, cacheWrite: 25 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeCopilotResponsesModel("gpt-6.2-sol", "GPT-6.2 Sol", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, OPENAI_THINKING_LEVEL_MAP),
+		makeCopilotResponsesModel("gpt-6.2-sol-pro", "GPT-6.2 Sol Pro", { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
+		makeCopilotResponsesModel("gpt-6.2-terra", "GPT-6.2 Terra", { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 }, OPENAI_THINKING_LEVEL_MAP),
+		makeCopilotResponsesModel("gpt-6.2-luna", "GPT-6.2 Luna", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }, OPENAI_THINKING_LEVEL_MAP),
+		makeCopilotResponsesModel("gpt-6.1-terra", "GPT-6.1 Terra", { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 }, OPENAI_THINKING_LEVEL_MAP),
+		makeCopilotResponsesModel("gpt-6.1-sol", "GPT-6.1 Sol", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, OPENAI_PRO_THINKING_LEVEL_MAP),
 	],
 };
 

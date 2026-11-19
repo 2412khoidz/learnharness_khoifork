@@ -51,6 +51,7 @@ const ALLOWED_DIR_FILE_PATTERNS: ReadonlyArray<RegExp> = [
 	/^graph\/[A-Za-z0-9_.-]+\.(json|jsonl)$/,
 	/^chats\/[A-Za-z0-9_.-]+\.json$/,
 	/^core-plugin-data\/flashcards\/sources\/[A-Za-z0-9_.-]+\.md$/,
+	/^coach-attachments\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
 ];
 
 export function isAllowedBackupRelativePath(relPath: string): boolean {
@@ -145,7 +146,9 @@ function collectAllowedDirFiles(
 		const absFile = path.join(/* turbopackIgnore: true */ absDir, entry);
 		try {
 			if (fs.statSync(/* turbopackIgnore: true */ absFile).isFile()) {
-				out[rel] = fs.readFileSync(/* turbopackIgnore: true */ absFile, "utf8");
+				out[rel] = subdir === "coach-attachments"
+					? `base64:${fs.readFileSync(/* turbopackIgnore: true */ absFile).toString("base64")}`
+					: fs.readFileSync(/* turbopackIgnore: true */ absFile, "utf8");
 			}
 		} catch {
 			// Skip unreadable entries
@@ -175,6 +178,7 @@ export function exportLearningBackup(dataDir = PATHS.data): KronoHarnessBackupBu
 	collectAllowedDirFiles(dataDir, "graph", files);
 	collectAllowedDirFiles(dataDir, "chats", files);
 	collectAllowedDirFiles(dataDir, "core-plugin-data/flashcards/sources", files);
+	collectAllowedDirFiles(dataDir, "coach-attachments", files);
 
 	return {
 		format: "kronoharness-backup-v1",
@@ -218,7 +222,11 @@ export function importLearningBackup(
 
 	for (const item of validated) {
 		fs.mkdirSync(path.dirname(item.absPath), { recursive: true });
-		writeFileAtomicSync(item.absPath, item.content, { allowInPlaceFallback: true });
+		const payload: string | Buffer =
+			item.relPath.startsWith("coach-attachments/") && item.content.startsWith("base64:")
+				? Buffer.from(item.content.slice(7), "base64")
+				: item.content;
+		writeFileAtomicSync(item.absPath, payload, { allowInPlaceFallback: true });
 	}
 
 	return {

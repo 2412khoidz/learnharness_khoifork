@@ -33,7 +33,7 @@ export function recallFailureKind(error: unknown): "cancelled" | "auth" | "quota
  if ((error instanceof Error && error.name === "AbortError") || /cancelled|canceled|aborted/i.test(msg)) return "cancelled";
  if (/quota|rate.limit|429|resource.exhausted/i.test(msg)) return "quota";
  if (/unauthori|forbidden|api.key|\b401\b|\b403\b/i.test(msg)) return "auth";
- if (isIncompleteProviderResponse(error) || /did not submit|never submitted|invalid.*(json|schema|argument)|context.{0,20}(length|limit|window)|too (large|long|many tokens)|max(imum)?[_ -]?(output|context|token)|output.{0,20}(truncat|limit)|finish.reason.{0,8}length/i.test(msg)) return "split";
+ if (isIncompleteProviderResponse(error) || /did not submit|never submitted|context.{0,20}(length|limit|window)|too (large|long|many tokens)|max(imum)?[_ -]?(output|context|token)|output.{0,20}(truncat|limit)|finish.reason.{0,8}length/i.test(msg)) return "split";
  if (/timeout|timed out|network|connection|socket|\b5\d\d\b/i.test(msg)) return "transient";
  return "unknown";
 }

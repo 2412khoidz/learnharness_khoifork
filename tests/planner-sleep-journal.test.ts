@@ -27,5 +27,27 @@ it("allows removing a mistaken sleep check-in without erasing the journal", () =
 
 it("recognizes Vietnamese half hours and only masks the sensitive phrase", () => {
 	assert.deepEqual([...journalClockPoints("7h40; 8r; 10h; 10:40")], ["07:40", "08:30", "10:00", "10:40"]);
+	assert.deepEqual([...journalClockPoints("Làm được 10 rồi nghỉ, học từ 8r đến 10h")], ["08:30", "10:00"]);
 	assert.equal(redactSensitiveJournalText("📚 Break and masturbation, then continue reading."), "📚 Break and [private], then continue reading.");
+	const masked18 = redactSensitiveJournalText("Tối xem phim 18+ rồi đi ngủ");
+	assert.ok(masked18.includes("[private]"));
+	assert.equal(/18\+/.test(masked18), false);
+	assert.equal(redactSensitiveJournalText("Học bài 18 rồi nghỉ"), "Học bài 18 rồi nghỉ");
+});
+
+it("avoids false Vietnamese wake/bedtime matches for teaching, sequences, and midday naps while keeping half-hour sleep markers", () => {
+	const falseWakeLogs = {
+		"2026-11-17": log("2026-11-17", "08:00: Dạy giải tích olympic sinh viên\n14:00: Dãy số"),
+	};
+	assert.equal(journalWakeForDate(falseWakeLogs, "2026-11-17"), null);
+	assert.equal(
+		journalWakeForDate({ "2026-11-17": log("2026-11-17", "7r: Thức dậy\n08:00: Dạy giải tích olympic sinh viên") }, "2026-11-17")?.time,
+		"07:30",
+	);
+
+	const napLogs = {
+		"2026-11-16": log("2026-11-16", "13:00: Ngủ trưa\n23r: Đi ngủ"),
+	};
+	assert.equal(journalBedtimeForNight(napLogs, "2026-11-16")?.time, "23:30");
+	assert.equal(journalBedtimeForNight({ "2026-11-16": log("2026-11-16", "13:00: Ngủ trưa") }, "2026-11-16"), null);
 });

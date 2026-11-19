@@ -44,7 +44,10 @@ export function resumeRecallGroupJob(id: string, role?: ModelRole, retrySkipped 
 }
 export function pauseRecallGroupJob(id: string) { active().get(id)?.abort(); return read().find((job) => job.id === id); }
 function launch(job: GroupJob, engine: import("../agent/models.ts").PiEngine) {
- const controller = new AbortController(); active().set(job.id, controller); job.status = "running"; job.error = undefined; save(job);
+ const controller = new AbortController();
+ job.status = "running"; job.error = undefined;
+ save(job);
+ active().set(job.id, controller);
  void (async () => {
   try {
    const preview = recallGroupPreview(job.subject), current = new Map(preview.items.map((item) => [item.id, item]));
@@ -65,7 +68,7 @@ function launch(job: GroupJob, engine: import("../agent/models.ts").PiEngine) {
      job.groups.push(...result.groups);
      job.completed.push(...part.map((item) => item.id)); save(job);
      // The job ledger is the durable checkpoint; the legacy draft is a secondary view.
-     saveRecallGroupDraft(job.subject, job.groups, sources, undefined, result.model, job.id);
+     try { saveRecallGroupDraft(job.subject, job.groups, sources, undefined, result.model, job.id); } catch { /* keep durable job checkpoint if an earlier answer changed */ }
     } catch (error) {
      const kind = recallFailureKind(error);
      if (controller.signal.aborted || kind === "cancelled" || kind === "auth" || kind === "quota") throw error;
@@ -75,21 +78,43 @@ function launch(job: GroupJob, engine: import("../agent/models.ts").PiEngine) {
      throw error;
     }
    };
-   for (const batch of batches) { if (controller.signal.aborted) break; await assess(batch, 0); }
+   let consecutiveFailedBatches = 0;
+   for (const batch of batches) {
+    if (controller.signal.aborted) break;
+    const beforeCompleted = job.completed.length;
+    await assess(batch, 0);
+    const onlyDeferredNoContext = batch.length === 1 && job.skipped.some((item) => item.id === batch[0]!.id && item.reason === noContext);
+    if (job.completed.length === beforeCompleted && !onlyDeferredNoContext && !controller.signal.aborted) {
+     consecutiveFailedBatches++;
+     if (consecutiveFailedBatches >= 2) throw new Error("Stopped after repeated batch failures; check the selected model or retry later.");
+    } else if (job.completed.length > beforeCompleted) {
+     consecutiveFailedBatches = 0;
+    }
+   }
    // A split may leave an early singleton before any groups exist. Once later
    // batches have proposed topics, compare that deferred item automatically.
    if (!controller.signal.aborted && job.groups.length) {
     const deferred = new Set(job.skipped.filter((item) => item.reason === noContext).map((item) => item.id));
     if (deferred.size) {
      job.skipped = job.skipped.filter((item) => !deferred.has(item.id)); save(job);
-     for (const batch of batchRecallBySize(valid.filter((item) => deferred.has(item.id)), (item) => item.topic.length + item.feedback.length + 150, 20, 12000)) {
+     const deferredItems: RecallGroupItem[] = [];
+     for (const id of deferred) {
+      const entry = job.items.find((row) => row.id === id);
+      const item = current.get(id);
+      if (entry && item && item.fingerprint === entry.fingerprint) deferredItems.push(item);
+      else job.skipped.push({ id, reason: "The answer or assessment changed; review it before grouping." });
+     }
+     for (const batch of batchRecallBySize(deferredItems, (item) => item.topic.length + item.feedback.length + 150, 20, 12000)) {
       if (controller.signal.aborted) break;
       await assess(batch, 0);
      }
     }
    }
    job.status = controller.signal.aborted ? "paused" : "complete";
-  } catch (error) { job.status = controller.signal.aborted ? "paused" : "error"; job.error = `${mappingErrorMessage(error, controller.signal)} (Category: ${recallFailureKind(error)}.)`; }
+  } catch (error) {
+   job.status = controller.signal.aborted ? "paused" : "error";
+   job.error = controller.signal.aborted ? undefined : `${mappingErrorMessage(error, controller.signal)} (Category: ${recallFailureKind(error)}.)`;
+  }
   finally { active().delete(job.id); save(job); }
  })();
 }

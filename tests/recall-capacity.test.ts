@@ -68,22 +68,33 @@ it("uses subject shrinkage, includes low-evidence subjects in the denominator an
 	}
 });
 
-it("excludes the same source answer across Quiz, Mistakes and Recall-FSRS from the composite contribution once", () => {
+it("excludes only calibrated quizzes and Recall-FSRS from composite contribution without dropping misses in Mistakes", () => {
 	const signals: PlannerPersonalSignals = {
 		date: "2026-11-18", examPrep: { subjects: [] } as unknown as PlannerPersonalSignals["examPrep"], subjectSignals: [],
 		recentSessions: [], habitTrend: { loggedDays: 0, avgEnergy: null, latestBedtime: null, avgStudyMin: 0 },
 	};
 	const report = computeLearningCapacityReport({
 		config: DEFAULT_PLANNER_CONFIG, signals, now,
-		recallObservationsBySubject: { math: [answer("quiz", 0), answer("mistake", 1), answer("fsrs", 1), answer("independent", 0)] },
-		quizSamples: [{ subject: "Math", sessionTitle: "Math", origin: "quiz", confidencePct: 80, correct: true, dontKnow: false, answerId: "quiz" }],
+		recallObservationsBySubject: {
+			math: [
+				answer("quiz", 0),
+				answer("dontknow-uncalibrated", 1, { verdict: "dont_know" }),
+				answer("mistake", 1, { verdict: "wrong" }),
+				answer("fsrs", 1),
+				answer("independent", 0),
+			],
+		},
+		quizSamples: [
+			{ subject: "Math", sessionTitle: "Math", origin: "quiz", confidencePct: 80, correct: true, dontKnow: false, answerId: "quiz" },
+			{ subject: "Math", sessionTitle: "Math", origin: "recall", confidencePct: null, correct: false, dontKnow: true, answerId: "dontknow-uncalibrated" },
+		],
 		mistakes: [{ id: "mistake", status: "failed" }] as unknown as NonNullable<Parameters<typeof computeLearningCapacityReport>[0]["mistakes"]>,
 		fsrsRecallAnswerIds: ["fsrs", "quiz"],
 	});
-	assert.equal(report.subjectBreakdown[0]?.recallCapacity?.overlapExcluded, 3);
-	assert.equal(report.subjectBreakdown[0]?.recallCapacity?.raw?.full, 1);
-	assert.equal(report.subjectBreakdown[0]?.recallCapacity?.usable, 1);
-	assert.equal(report.compositeScore, report.legacyCompositeScore);
+	// Only calibrated `quiz` and `fsrs` are excluded as overlap; `mistake` (wrong) and uncalibrated `dont_know` remain in Recall evidence.
+	assert.equal(report.subjectBreakdown[0]?.recallCapacity?.overlapExcluded, 2);
+	assert.equal(report.subjectBreakdown[0]?.recallCapacity?.usable, 3);
+	assert.deepEqual(report.subjectBreakdown[0]?.recallCapacity?.raw, { full: 3 / 5, atLeastPartial: 3 / 5 });
 });
 
 it("constructs Recall forecasts with only the labels known before that question", () => {

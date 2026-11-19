@@ -12,7 +12,7 @@ it("supports pausing and manual correction, and marks a restarted timer interrup
 	const originalNow = Date.now; let now = new Date(2026, 10, 16, 23, 59).getTime(); Date.now = () => now;
 	function View() {
 		const timer = useRecallTimer("chat:q", true);
-		return <div><button onClick={timer.pause}>Pause</button><button onClick={() => timer.adjust(2.5)}>Adjust</button><button onClick={() => timer.setHelp("assisted")}>Help</button><output>{JSON.stringify(timer.snapshot())}</output></div>;
+		return <div><button onClick={timer.pause}>Pause</button><button onClick={timer.resume}>Resume</button><button onClick={() => timer.adjust(2.5)}>Adjust</button><button onClick={() => timer.setHelp("assisted")}>Help</button><output>{JSON.stringify(timer.snapshot())}</output></div>;
 	}
 	let root = createRoot(document.querySelector("main")!);
 	await act(async () => root.render(<View />));
@@ -29,6 +29,11 @@ it("supports pausing and manual correction, and marks a restarted timer interrup
 	await act(async () => root.render(<View />));
 	const restarted = JSON.parse(document.querySelector("output")!.textContent!);
 	assert.equal(restarted.recallTiming.timerMs, 150000); assert.equal(restarted.recallTiming.interrupted, true);
+	now += 30000;
+	await act(async () => button("Resume").click());
+	const resumed = JSON.parse(document.querySelector("output")!.textContent!);
+	assert.equal(resumed.recallTiming.timerMs, 150000);
+	assert.equal(resumed.recallTiming.interrupted, undefined);
 	await act(async () => root.unmount());
 	Date.now = originalNow;
 });

@@ -709,8 +709,14 @@ export function computeLearningCapacityReport(input: LearningCapacityTelemetryIn
 
 	// ── Per-Subject Calibration Breakdown ──────────────────────────────────────
 	const subjectBreakdown: SubjectLearningCapacityDetail[] = [];
-	const recallOverlap = new Set([...(input.fsrsRecallAnswerIds ?? []), ...mistakes.map((item) => item.id)]);
-	for (const quiz of quizSamples) if (quiz.answerId) recallOverlap.add(quiz.answerId);
+	// Exclude only Recall items already scored in Recall-FSRS or in calibrated quizzes
+	// (mistakes.json only contains misses, so excluding it would cause survivorship bias).
+	const recallOverlap = new Set(input.fsrsRecallAnswerIds ?? []);
+	for (const quiz of quizSamples) {
+		if (quiz.answerId && !quiz.dontKnow && quiz.confidencePct !== null) {
+			recallOverlap.add(quiz.answerId);
+		}
+	}
 	const seenSubjKeys = new Set<string>();
 
 	const quizBiasForSubject = (subjName: string): { bias: number | null; brier: number | null; accPct: number | null; n: number } => {

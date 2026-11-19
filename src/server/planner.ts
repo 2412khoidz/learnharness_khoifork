@@ -118,6 +118,7 @@ import { readExamPrepConfig, readExamPrepStatus, writeExamPrepConfig } from "./e
 import { sanitizeExamPrepConfig, type ExamPrepConfig } from "../core/exam-prep.ts";
 import { graphView } from "./graph.ts";
 import { readFlashcardsSnapshot } from "./graph-fsrs.ts";
+import { loadCoachAttachments, pruneUnreferencedCoachAttachments, readCoachAttachment } from "./coach-attachments.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
 import { stores } from "./stores.ts";
 
@@ -1563,12 +1564,14 @@ STRICT RULES:
 		? "Một số khung đã được điều chỉnh cho phù hợp với thời gian còn lại."
 		: groundedScheduleAdvice(rawAdvice, aiPlan.blocks).slice(0, 260);
 	aiPlan.coachSummary = `${advice}${advice ? "\n\n" : ""}${actualScheduleText(aiPlan.blocks)}`.slice(0, 800);
+	const saveNow = opts.now ?? Date.now();
+	const latest = readPlannerConfig(filePath);
 	config = savePlannerConfig(
 		{
-			...archivePlannerPlan(config, date, now),
+			...archivePlannerPlan(latest, date, saveNow),
 			engineMode: "llm",
-			plans: { ...config.plans, [date]: aiPlan },
-			updatedAt: new Date(now).toISOString(),
+			plans: { ...latest.plans, [date]: aiPlan },
+			updatedAt: new Date(saveNow).toISOString(),
 		},
 		filePath,
 	);
@@ -2324,11 +2327,7 @@ export async function evaluateDailyJournalServer(
 	const isToday = date === localDateString(now);
 	const nowObj = new Date(now);
 	const nowClockMin = nowObj.getHours() * 60 + nowObj.getMinutes();
-	const lastLoggedEndMin = localEval.parsedEntries.reduce((mx, e) => {
-		const m = parseClockMin(e.endTime);
-		return m !== null ? Math.max(mx, m) : mx;
-	}, 0);
-	const cutoffMin = Math.max(isToday ? nowClockMin : 24 * 60, lastLoggedEndMin);
+	const cutoffMin = isToday ? nowClockMin : 24 * 60;
 	const remainingPlannedBlocks = isToday ? plannedStudyBlocks.filter((b) => b.endMin > cutoffMin) : [];
 	const remainingPlannedMin = remainingPlannedBlocks.reduce((a, b) => a + Math.max(0, b.endMin - Math.max(b.startMin, cutoffMin)), 0);
 	const plannedSoFarMin = isToday
@@ -2445,9 +2444,19 @@ export async function evaluateDailyJournalServer(
 		nextDayAdvice: maskOut(aiOut.nextDayAdvice.trim()).slice(0, 260),
 	};
 
-	const updated = applyJournalEvaluationToConfig(current, date, {
-		journalText: opts.journalText,
-		entries: combinedEntries,
+	const latest = readPlannerConfig(filePath);
+	const latestManual = opts.manualEntries === undefined
+		? (latest.logs[date]?.actualEntries ?? []).filter((entry) => entry.source === "manual")
+		: [];
+	const mergedEntries = latestManual.length
+		? [
+			...combinedEntries,
+			...latestManual.filter((entry) => !combinedEntries.some((item) => item.id === entry.id)),
+		]
+		: combinedEntries;
+	const updated = applyJournalEvaluationToConfig(latest, date, {
+		journalText: opts.journalText ?? latest.logs[date]?.journalText,
+		entries: mergedEntries,
 		report,
 		suggestedRealismFactor,
 		now,
@@ -2457,7 +2466,7 @@ export async function evaluateDailyJournalServer(
 	return {
 		snapshot: readPlannerSnapshot({ ...opts, date, now }),
 		report,
-		parsedEntries: combinedEntries,
+		parsedEntries: mergedEntries,
 		modelLabel: resolved.modelLabel,
 	};
 }
@@ -3551,13 +3560,10 @@ export async function chatWithPlannerCoachServer(
 	let requestImages = opts.images;
 	let attachmentText = opts.attachmentText ?? "";
 	if (!opts.attachments?.length && !opts.images?.length && !opts.attachmentText?.trim()) {
-		const latestAttachments = [...(current.coachChat ?? [])].reverse().find((message) => message.attachments?.length)?.attachments;
+		const latestAttachments = [...(current.coachChat ?? []).slice(-4)].reverse().find((message) => message.attachments?.length)?.attachments;
 		if (latestAttachments?.length) {
-			// The attachment helper also imports the material extractor from this
-			// module; defer the import to avoid a module-initialization cycle.
-			const { loadCoachAttachments } = await import("./coach-attachments.ts");
 			const loaded = await loadCoachAttachments(latestAttachments, path.dirname(filePath));
-			requestImages = loaded.images;
+			requestImages = resolved.engine.model.input.includes("image") ? loaded.images : undefined;
 			attachmentText = loaded.attachmentText;
 		}
 	}
@@ -4170,8 +4176,12 @@ OPERATING RULES:
 		if (changedSettingsSections.size && beforeSettings && afterSettings) preview.changes.settings = { before: Object.fromEntries([...changedSettingsSections].map((section) => [section, beforeSettings![section as keyof UserSettings] ?? null])), after: Object.fromEntries([...changedSettingsSections].map((section) => [section, afterSettings![section as keyof UserSettings] ?? null])) };
 		if (previousExam && pendingExam && JSON.stringify(coachExamState(previousExam)) !== JSON.stringify(coachExamState(pendingExam))) preview.changes.examPrep = { before: coachExamState(previousExam), after: coachExamState(pendingExam) };
 		const proposals = coachProposals();
-		for (const [key, item] of proposals) if (Date.now() - item.createdAt > 15 * 60_000) proposals.delete(key);
+		let prunedExpired = false;
+		for (const [key, item] of proposals) {
+			if (Date.now() - item.createdAt > 15 * 60_000) { proposals.delete(key); prunedExpired = true; }
+		}
 		proposals.set(id, { preview, createdAt: Date.now(), referenceAt: now, date, plannerFile: filePath, examPrepFile: opts.examPrepFile, before: coachUndoPlannerState(current), after: nextConfig, beforeExam: previousExam, afterExam: pendingExam, sessionChanges, graphChanges, beforeSettings: changedSettingsSections.size ? beforeSettings : undefined, afterSettings: changedSettingsSections.size ? afterSettings : undefined, settingsRequests, userMessage: userMsg, assistantMessage: assistantMsg });
+		if (prunedExpired) pruneCoachProposalAttachments(path.dirname(filePath), proposals);
 		return { snapshot: { config: current, plan: todayPlan, activeStatus: resolveActiveBlockStatus(todayPlan, current.logs[date], now), signals, aiAvailability: getPlannerAiAvailability() }, assistantMessage: { ...assistantMsg, text: "Mình đã chuẩn bị đề xuất; chưa áp dụng thay đổi nào. Hãy xem chi tiết trước khi xác nhận.", appliedChange: undefined }, proposal: preview };
 	}
 
@@ -4254,7 +4264,21 @@ export function confirmPlannerCoachProposal(id: string): { snapshot: PlannerSnap
 	return { snapshot: readPlannerSnapshot({ plannerFile: proposal.plannerFile, examPrepFile: proposal.examPrepFile, date: proposal.date }), assistantMessage: saved.coachChat?.at(-1) ?? proposal.assistantMessage, ...(proposal.assistantMessage.appliedChange ? { appliedChange: proposal.assistantMessage.appliedChange } : {}) };
 }
 
-export function discardPlannerCoachProposal(id: string): void { coachProposals().delete(id); }
+function pruneCoachProposalAttachments(dataDir: string, proposals = coachProposals()): void {
+	const keepIds = new Set<string>();
+	for (const item of proposals.values()) {
+		if (path.dirname(item.plannerFile) !== dataDir) continue;
+		for (const attachment of item.userMessage.attachments ?? []) keepIds.add(attachment.id);
+	}
+	pruneUnreferencedCoachAttachments(dataDir, keepIds);
+}
+
+export function discardPlannerCoachProposal(id: string): void {
+	const proposals = coachProposals();
+	const removed = proposals.get(id);
+	proposals.delete(id);
+	if (removed) pruneCoachProposalAttachments(path.dirname(removed.plannerFile), proposals);
+}
 
 export function undoPlannerCoachChangeServer(
 	opts?: PlannerReadOptions & { messageId?: string; chatsDir?: string; date?: string },
@@ -4365,5 +4389,6 @@ export function clearPlannerCoachChatServer(
 		},
 		filePath,
 	);
+	pruneCoachProposalAttachments(path.dirname(filePath));
 	return readPlannerSnapshot({ ...opts, now });
 }

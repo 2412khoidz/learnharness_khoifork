@@ -23,7 +23,7 @@ export function saveRecallGroups(subject: string, groups: RecallGroup[], sources
 	const previous = readRecallGroups(dir);
 	fs.mkdirSync(dir, { recursive: true });
 	const old = previous.find((row) => row.subject === subject);
-	writeFileAtomicSync(path.join(dir, "recall-groups.json"), JSON.stringify({ version: 1, subjects: [...previous.filter((row) => row.subject !== subject), { subject, groups, history: old?.history ?? [], ...(old?.draft ? { draft: old.draft } : {}) }] }), { allowInPlaceFallback: true });
+	writeFileAtomicSync(path.join(dir, "recall-groups.json"), JSON.stringify({ version: 1, subjects: [...previous.filter((row) => row.subject !== subject), { subject, groups, history: old?.history ?? [] }] }), { allowInPlaceFallback: true });
 }
 
 /** Drafts stay local and are never included in the report or sent to Coach. */

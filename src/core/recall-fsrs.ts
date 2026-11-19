@@ -25,7 +25,7 @@ export function projectRecallFsrs(events: readonly RecallFsrsEvent[], settings?:
 		if (event.revertedAt || seen.has(event.answerId) || !event.nodeId || !Number.isFinite(event.answeredAt) || event.answeredAt <= 0 || ![1, 2, 3, 4].includes(event.rating)) continue;
 		seen.add(event.answerId);
 		const previous = schedules[event.nodeId] ?? createSchedule(event.answeredAt);
-		schedules[event.nodeId] = rate(previous, event.rating, event.answeredAt, { ...settings, fuzz: false });
+		schedules[event.nodeId] = rate(previous, event.rating, event.answeredAt, { ...settings, learningSteps: [], relearningSteps: [], fuzz: false });
 		reviews.push({ requestId: `recall:${event.answerId}`, propositionId: event.nodeId, rating: event.rating, at: event.answeredAt, source: "recall" });
 	}
 	return { schedules, reviews };

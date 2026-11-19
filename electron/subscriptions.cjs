@@ -289,6 +289,36 @@ const SUPPLEMENTAL_COPILOT_MODELS = [
 		compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false },
 		inputLimits: COPILOT_IMAGE_LIMITS,
 	},
+	{
+		id: "gemini-4-neon",
+		name: "Gemini 4 Neon",
+		api: "openai-completions",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 65536,
+		headers: { ...COPILOT_HEADERS },
+		compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false },
+		inputLimits: COPILOT_IMAGE_LIMITS,
+	},
+	{
+		id: "gemini-4-argon",
+		name: "Gemini 4 Argon",
+		api: "openai-completions",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 2.0, output: 10.0, cacheRead: 0.1, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 65536,
+		headers: { ...COPILOT_HEADERS },
+		compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false },
+		inputLimits: COPILOT_IMAGE_LIMITS,
+	},
 ];
 function isCopilotNonChatId(id) {
 	return /(embedding|decision|rerank|whisper|tts|dall-e|imagen|moderation)/i.test(id);
@@ -296,33 +326,44 @@ function isCopilotNonChatId(id) {
 function formatDisplayName(id) {
 	return id.split(/[-_]+/).filter(Boolean).map((p) => (/^\d+(?:\.\d+)?$/.test(p) ? p : p.charAt(0).toUpperCase() + p.slice(1))).join(" ");
 }
-function synthesizeCopilotModel(id) {
+function synthesizeCopilotModel(id, cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }) {
 	const isClaude = id.startsWith("claude-");
 	const isResponses = /^(gpt-5|gpt-6|gpt-7|o1|o3|o4|grok-|mai-)/i.test(id);
 	const api = isClaude ? "anthropic-messages" : isResponses ? "openai-responses" : "openai-completions";
 	return {
 		id,
-		name: formatDisplayName(id),
+		name: formatDisplayName(id).replace(/^Gpt /, "GPT-"),
 		api,
 		provider: "github-copilot",
 		baseUrl: "https://api.individual.githubcopilot.com",
 		reasoning: true,
 		input: ["text", "image"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: isClaude || /^gemini-/i.test(id) ? 1048576 : 400000,
-		maxTokens: 65536,
+		cost,
+		contextWindow: isClaude || /^gemini-/i.test(id) ? 1048576 : 1050000,
+		maxTokens: isClaude || /^gemini-/i.test(id) ? 65536 : 128000,
 		headers: { ...COPILOT_HEADERS },
 		...(api === "openai-completions" ? { compat: { supportsStrictMode: true, supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false } } : {}),
 		inputLimits: COPILOT_IMAGE_LIMITS,
 	};
 }
+const EXTRA_COPILOT_MODELS = [
+	...SUPPLEMENTAL_COPILOT_MODELS,
+	synthesizeCopilotModel("gpt-6.2-astra", { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }),
+	synthesizeCopilotModel("gpt-6.2-astra-pro", { input: 20, output: 100, cacheRead: 2, cacheWrite: 25 }),
+	synthesizeCopilotModel("gpt-6.2-sol", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }),
+	synthesizeCopilotModel("gpt-6.2-sol-pro", { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }),
+	synthesizeCopilotModel("gpt-6.2-terra", { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 }),
+	synthesizeCopilotModel("gpt-6.2-luna", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }),
+	synthesizeCopilotModel("gpt-6.1-terra", { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 }),
+	synthesizeCopilotModel("gpt-6.1-sol", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }),
+];
 function augmentCopilotProvider(native, getCredential) {
 	return {
 		...native,
 		getModels() {
 			const models = [...native.getModels()];
 			const seen = new Set(models.map((m) => m.id));
-			for (const extra of SUPPLEMENTAL_COPILOT_MODELS) {
+			for (const extra of EXTRA_COPILOT_MODELS) {
 				if (!seen.has(extra.id)) { models.push(extra); seen.add(extra.id); }
 			}
 			const cred = getCredential?.();

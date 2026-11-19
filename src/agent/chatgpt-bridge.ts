@@ -122,9 +122,11 @@ export async function refreshChatGPTModels(supported: Model<"openai-responses">[
   acceptStatus(state, value);
   if (value.epoch !== state.stamp.epoch || value.authorityRevision !== state.stamp.authorityRevision || value.accountId !== state.status.activeId || !chatGPTConnected()) return;
   state.catalogAccount = value.accountId;
+  const template = supported.find((m) => m.id.startsWith("gpt-6.2") || m.id.startsWith("gpt-6.1") || m.id.startsWith("gpt-6")) ?? supported[0];
   state.models = value.models.flatMap((entry) => {
    const known = supported.find((m) => m.id === entry.id && m.api === "openai-responses");
-   return known ? [{ ...known, provider: "chatgpt", name: entry.name, headers: undefined, samplingParams: undefined, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] : [];
+   const base = known ?? (template && /^(gpt-[5-9]|o[1-9])/i.test(entry.id) ? template : undefined);
+   return base ? [{ ...base, id: entry.id, provider: "chatgpt", name: entry.name, headers: undefined, samplingParams: undefined, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] : [];
   });
  } catch { if (sequence === state.catalogRequest) clearCatalog(state); }
 }

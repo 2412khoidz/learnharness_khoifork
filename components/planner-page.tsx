@@ -3212,11 +3212,13 @@ function LifestyleTab({
 	const [countName, setCountName] = useState("");
 	const [countValue, setCountValue] = useState("1");
 	useEffect(() => {
+		setShowPrivate(false);
+	}, [historyDate]);
+	useEffect(() => {
 		const log = snap.config.logs[historyDate];
 		setHistoryNote(log?.note ?? "");
 		setHistoryBedtime(journalBedtimeForNight(snap.config.logs, historyDate)?.time ?? "");
 		setHistoryWake(journalWakeForDate(snap.config.logs, historyDate)?.time ?? "");
-		setShowPrivate(false);
 	}, [historyDate, snap.config.logs]);
 	const [suggesting, setSuggesting] = useState(false);
 	const [suggestionInfo, setSuggestionInfo] = useState<{ rationale: string; tips: string[]; modelLabel: string } | null>(null);
@@ -4362,7 +4364,7 @@ export function JournalAuditTab({
 						<div className="mt-2 flex flex-wrap gap-1">
 							{manualEntries.map((m) => (
 								<span key={m.id} className="inline-flex items-center gap-1 rounded border bg-card px-2 py-0.5 text-[11px]">
-									<span>{m.startTime}-{m.endTime} {m.category}: {m.title}</span>
+									<span>{m.startTime}-{m.endTime} {m.category}: {discreetMode ? redactSensitiveJournalText(m.title) : m.title}</span>
 									<button type="button" onClick={() => removeManualEntry(m.id)} className="text-muted-foreground hover:text-error">
 										<XIcon className="size-3" />
 									</button>
@@ -4408,7 +4410,7 @@ export function JournalAuditTab({
 								Actual {(compliance.actualStudyMin / 60).toFixed(1)}h / Planned {(compliance.plannedStudyMin / 60).toFixed(1)}h{auditHasScore ? ` · Realism ×${compliance.realismRatio}` : ""}
 							</span>
 						</div>
-						<p className="mt-1.5 text-foreground">{compliance.evaluatedBy === "llm" || auditHasScore ? compliance.summary : "There is not enough scheduled study to evaluate this plan."}</p>
+						<p className="mt-1.5 text-foreground">{compliance.evaluatedBy === "llm" || auditHasScore ? (discreetMode ? redactSensitiveJournalText(compliance.summary) : compliance.summary) : "There is not enough scheduled study to evaluate this plan."}</p>
 						{compliance.numericMismatch && <p role="status" className="mt-1 text-warning">The AI narrative may contain different numbers. Use the recorded timeline and totals above for the actual values.</p>}
 						<div className="mt-2 grid gap-2 sm:grid-cols-2">
 							{compliance.strengths.length > 0 && (
@@ -4416,7 +4418,7 @@ export function JournalAuditTab({
 									<div className="mb-1 text-[11px] font-medium text-success">Strengths</div>
 									<ul className="space-y-0.5 text-[11px] text-muted-foreground">
 										{compliance.strengths.map((s, i) => (
-											<li key={i}>• {s}</li>
+											<li key={i}>• {discreetMode ? redactSensitiveJournalText(s) : s}</li>
 										))}
 									</ul>
 								</div>
@@ -4426,7 +4428,7 @@ export function JournalAuditTab({
 									<div className="mb-1 text-[11px] font-medium text-warning">Friction & Distractions</div>
 									<ul className="space-y-0.5 text-[11px] text-muted-foreground">
 										{compliance.frictionPoints.map((f, i) => (
-											<li key={i}>• {f}</li>
+											<li key={i}>• {discreetMode ? redactSensitiveJournalText(f) : f}</li>
 										))}
 									</ul>
 								</div>
@@ -4434,10 +4436,10 @@ export function JournalAuditTab({
 						</div>
 						{(auditHasScore || compliance.evaluatedBy === "llm") && compliance.nextDayAdvice && (
 							<div className="mt-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-[11px] text-foreground">
-								<strong>Next-day calibration:</strong> {compliance.nextDayAdvice}
+								<strong>Next-day calibration:</strong> {discreetMode ? redactSensitiveJournalText(compliance.nextDayAdvice) : compliance.nextDayAdvice}
 							</div>
 						)}
-						{!auditHasScore && <details className="mt-2 rounded border p-2"><summary className="cursor-pointer">View original audit text</summary><p className="mt-1 text-muted-foreground">This older text may contain an unreliable score. It is kept as originally saved.</p><p className="mt-1 whitespace-pre-wrap">{compliance.summary}</p>{compliance.nextDayAdvice && <p className="mt-1 whitespace-pre-wrap">{compliance.nextDayAdvice}</p>}</details>}
+						{!auditHasScore && <details className="mt-2 rounded border p-2"><summary className="cursor-pointer">View original audit text</summary><p className="mt-1 text-muted-foreground">This older text may contain an unreliable score. It is kept as originally saved.</p><p className="mt-1 whitespace-pre-wrap">{discreetMode ? redactSensitiveJournalText(compliance.summary) : compliance.summary}</p>{compliance.nextDayAdvice && <p className="mt-1 whitespace-pre-wrap">{discreetMode ? redactSensitiveJournalText(compliance.nextDayAdvice) : compliance.nextDayAdvice}</p>}</details>}
 					</div>
 				)}
 

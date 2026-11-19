@@ -5,6 +5,7 @@ import { PATHS } from "../../config.ts";
 import { runSubmitAgent } from "../agent/subagents/submit-agent.ts";
 import type { PiEngine } from "../agent/models.ts";
 import { collectRecallCandidates, mergeMistakes, ERROR_TYPES, type MistakeDraft, type RecallScanResult, type RecallScanState } from "../core/mistakes.ts";
+import { isIncompleteProviderResponse } from "../core/recall-mapping.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
 import { readMistakeDismissals, writeMistakeDismissals, isDismissedMistake } from "../store/mistake-dismissals.ts";
 import { readMistakes, updateMistakes } from "../store/mistakes.ts";
@@ -95,8 +96,8 @@ export function startRecallScan(): RecallScanState {
 	state.total = new Set([...state.results.map((r) => r.id), ...pending.map((c) => c.draft.id)]).size;
 	if (!work.length) { state.status = "complete"; state.error = undefined; saveState(state); return state; }
 	const controller = new AbortController();
-	active().controller = controller;
 	state.status = "running"; state.error = undefined; saveState(state);
+	active().controller = controller;
 	void (async () => {
 		try {
 			const engine = recallScanEngineOverride.current ?? analystEngine();
@@ -115,7 +116,7 @@ export function startRecallScan(): RecallScanState {
 					// A model may fail to submit a valid result for a large batch.
 					// Split only that failure, not provider/auth/network errors, and
 					// stop at one answer so a bad response cannot retry forever.
-					if (controller.signal.aborted || !(error instanceof Error) || ![NO_ASSESSMENT, INCOMPLETE_JSON].includes(error.message) || batch.length <= 1) throw error;
+					if (controller.signal.aborted || !(error instanceof Error) || (error.message !== NO_ASSESSMENT && !isIncompleteProviderResponse(error)) || batch.length <= 1) throw error;
 					const midpoint = Math.floor(batch.length / 2);
 					await assessAndSave(batch.slice(0, midpoint));
 					await assessAndSave(batch.slice(midpoint));

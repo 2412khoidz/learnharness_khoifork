@@ -38,14 +38,15 @@ const RENAME_RETRY_MS = 100;
 /** Replace `file` with `text` (UTF-8). Throws on failure, with the old file
  *  untouched, except when the in-place fallback fails midway: then the temp
  *  file beside it keeps the complete new bytes. */
-export function writeFileAtomicSync(file: string, text: string, options?: { mode?: number; allowInPlaceFallback?: boolean }): void {
+export function writeFileAtomicSync(file: string, text: string | Buffer, options?: { mode?: number; allowInPlaceFallback?: boolean }): void {
 	const tmp = `${file}${TEMP_MARKER}${randomUUID()}`;
 	let target: number;
 	try {
 		const fd = fs.openSync(tmp, "wx", options?.mode ?? 0o666);
 		try {
 			if (options?.mode !== undefined) fs.fchmodSync(fd, options.mode); // umask may have cleared bits of the create mode
-			fs.writeFileSync(fd, text, "utf-8");
+			if (typeof text === "string") fs.writeFileSync(fd, text, "utf-8");
+			else fs.writeFileSync(fd, text);
 			fs.fsyncSync(fd);
 		} finally {
 			fs.closeSync(fd);
@@ -58,7 +59,8 @@ export function writeFileAtomicSync(file: string, text: string, options?: { mode
 		throw error;
 	}
 	try {
-		fs.writeFileSync(target, text, "utf-8"); // if this fails, the temp is kept: it is the only complete copy
+		if (typeof text === "string") fs.writeFileSync(target, text, "utf-8"); // if this fails, the temp is kept: it is the only complete copy
+		else fs.writeFileSync(target, text);
 	} finally {
 		fs.closeSync(target);
 	}

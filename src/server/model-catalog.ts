@@ -46,7 +46,12 @@ export {
 
 export async function refreshConnectionCatalog(provider?: string): Promise<void> {
 	await Promise.all([
-		!provider || provider === "chatgpt" ? refreshChatGPTModels(piModels().getModels("openai").filter((m): m is Model<"openai-responses"> => m.api === "openai-responses")) : Promise.resolve(),
+		!provider || provider === "chatgpt"
+			? refreshChatGPTModels(
+				[...piModels().getModels("openai"), ...getDynamicProviderModels("chatgpt")]
+					.filter((m): m is Model<"openai-responses"> => m.api === "openai-responses"),
+			)
+			: Promise.resolve(),
 		!provider || nativeSubscriptionId(provider) ? refreshSubscriptionModels() : Promise.resolve(),
 		(!provider || provider === "google") && !isProviderPaused("google") ? probeLiveProviderModels("google", keyValue("GEMINI_API_KEY")).catch(() => []) : Promise.resolve(),
 		(!provider || provider === "openrouter") && !isProviderPaused("openrouter") ? probeLiveProviderModels("openrouter", keyValue("OPENROUTER_API_KEY")).catch(() => []) : Promise.resolve(),

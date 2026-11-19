@@ -199,9 +199,18 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
 	useEffect(() => { if (visible && showGroups) void refreshGroupJobs().catch(() => {}); }, [refreshGroupJobs, visible, showGroups]);
 	const groupJob = groupJobs.find((job) => job.id === groupJobId);
 	useEffect(() => {
-		if (!groupJob) return;
-		setGroups((old) => { const seen = new Set(old.map((item) => item.id)); const fresh = groupJob.groups.filter((item) => !seen.has(item.id) && !removedGroups[item.id]); return fresh.length ? [...old, ...fresh] : old; });
-	}, [groupJob, removedGroups]);
+		if (!groupJob || groupJob.subject !== activeSubject) return;
+		const deduped = groupJob.groups.filter((item, index, list) => {
+			const ids = new Set(item.members.map((member) => member.id));
+			const normName = item.name.trim().toLocaleLowerCase();
+			return !list.some((other, otherIndex) => {
+				if (otherIndex <= index || other.name.trim().toLocaleLowerCase() !== normName) return false;
+				const otherIds = new Set(other.members.map((member) => member.id));
+				return ids.size <= otherIds.size && [...ids].every((id) => otherIds.has(id));
+			});
+		});
+		setGroups((old) => { const seen = new Set(old.map((item) => item.id)); const fresh = deduped.filter((item) => !seen.has(item.id) && !removedGroups[item.id]); return fresh.length ? [...old, ...fresh] : old; });
+	}, [activeSubject, groupJob, removedGroups]);
 	useEffect(() => {
 		if (!visible || !showGroups || groupJob?.status !== "running") return;
 		const timer = setInterval(() => { void refreshGroupJobs().catch(() => {}); }, 4000);
@@ -250,7 +259,9 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
 		const id = crypto.randomUUID();
 		setGroups((old) => [...old.flatMap((item) => item.id === group.id ? rest.length >= 2 ? [{ ...item, members: rest }] : [] : [item]), ...(chosen.length >= 2 ? [{ ...group, id, name: `${group.name} (split)`, members: chosen }] : [])]);
 		if (chosen.length < 2 || rest.length < 2) setNotice("A single answer is left ungrouped; all original answers remain available.");
-		setApproved((old) => ({ ...old, [group.id]: false, [id]: false })); setSplitSelection((old) => { const next = { ...old }; for (const member of group.members) delete next[splitKey(group.id, member.id)]; return next; }); setError("");
+		setApproved((old) => ({ ...old, [group.id]: false, [id]: false }));
+		if (rest.length < 2) setRemovedGroups((old) => ({ ...old, [group.id]: true }));
+		setSplitSelection((old) => { const next = { ...old }; for (const member of group.members) delete next[splitKey(group.id, member.id)]; return next; }); setError("");
 	};
 	return <section aria-label="Recall Analysis" className="space-y-3 rounded-xl border bg-background/70 p-4">
 		<h3 className="text-sm font-semibold">{section === "groups" ? "Topic Groups" : "Recall Analysis"}</h3>
@@ -274,7 +285,7 @@ export function RecallAnalysis({ report, onRefresh, section = "all", visible = t
 		{(report.dataCoverage.recallUnassignedExamples?.length ?? 0) > 0 && <details><summary className="cursor-pointer">View unassigned answers</summary>{report.dataCoverage.recallUnassignedExamples?.map((item, index) => <a key={`${item.chatId}:${item.toolCallId ?? index}`} className="mr-2 underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>Answer {index + 1}</a>)}</details>}
 		</>}
 		{!row || !window ? <p>No subject-linked recall answers yet.</p> : <>
-			<div className="flex flex-wrap items-center gap-2"><label>Subject <select aria-label="Recall subject" value={activeSubject} onChange={(event) => { setSubject(event.target.value); setPreview(null); setGroupPage(0); setPreviewPage(0); setError(""); setNotice(""); }} className="rounded border bg-background p-1">{subjects.map((item) => <option key={item.subject} value={item.subject}>{item.subject}</option>)}</select></label><span>Period:</span><button type="button" aria-pressed={range === "last30"} onClick={() => setRange("last30")} className="rounded border px-2 py-1 aria-pressed:bg-accent">Last 30 days</button><button type="button" aria-pressed={range === "allTime"} onClick={() => setRange("allTime")} className="rounded border px-2 py-1 aria-pressed:bg-accent">All time</button></div>
+			<div className="flex flex-wrap items-center gap-2"><label>Subject <select aria-label="Recall subject" value={activeSubject} onChange={(event) => { setSubject(event.target.value); setPreview(null); setGroupJobs([]); setGroupJobId(""); setGroups([]); setRemovedGroups({}); setApproved({}); setSplitSelection({}); setGroupPage(0); setPreviewPage(0); setError(""); setNotice(""); }} className="rounded border bg-background p-1">{subjects.map((item) => <option key={item.subject} value={item.subject}>{item.subject}</option>)}</select></label><span>Period:</span><button type="button" aria-pressed={range === "last30"} onClick={() => setRange("last30")} className="rounded border px-2 py-1 aria-pressed:bg-accent">Last 30 days</button><button type="button" aria-pressed={range === "allTime"} onClick={() => setRange("allTime")} className="rounded border px-2 py-1 aria-pressed:bg-accent">All time</button></div>
 			{showSummary && <div className="rounded border p-3 space-y-1"><p><strong>{window.responses}</strong> answers · <strong>{window.assessed}</strong> assessed · {window.days} days · {window.responses - window.assessed} not assessed{window.needsReview ? ` (${window.needsReview} changed; needs review)` : ""}</p><p>{window.correct} correct · {window.partial} partial · {window.wrong} incorrect · {window.dontKnow} did not know · {window.uncertain} uncertain</p><p>{window.ai} provisional AI · {window.confirmed} learner-confirmed or corrected</p><p>Help: {window.independent} independent · {window.assisted} assisted · {window.helpUnknown} unknown</p><p>Recorded timer: {window.medianTimerMin === null ? "not enough data" : `median ${window.medianTimerMin} min (${window.timerCount} answers)`}. Elapsed question-to-answer: {window.medianElapsedMin === null ? "not enough data" : `median ${window.medianElapsedMin} min (${window.elapsedCount} answers; includes breaks)`}.</p>{range === "last30" && <p>{row.recallInsights.trend ? `Compared with the prior 30 days: correct ${row.recallInsights.trend.correctRateDelta >= 0 ? "+" : ""}${row.recallInsights.trend.correctRateDelta} pp, partial ${row.recallInsights.trend.partialRateDelta >= 0 ? "+" : ""}${row.recallInsights.trend.partialRateDelta} pp. Question difficulty may differ.` : "Not enough assessed answers across both periods to compare trends."}</p>}{window.staleExamples.map((item, index) => <a key={`${item.chatId}:${index}`} className="mr-2 underline" href={recallAnswerHref(item.chatId, item.sourceMessageId, item.toolCallId)}>Review changed answer {index + 1}</a>)}</div>
 			}
 			{showSummary && range === "last30" && row.recallCapacity && <RecallCapacityEvidence evidence={row.recallCapacity} />}

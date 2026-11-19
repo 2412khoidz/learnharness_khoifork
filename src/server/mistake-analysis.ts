@@ -63,7 +63,7 @@ function promptFor(r: MistakeRecord): string {
 	if (r.thinking) lines.push("", "The learner's own thinking while answering:", r.thinking);
 	if (typeof r.confidence === "number") lines.push("", `The learner's stated confidence that their pick was right: ${r.confidence}%`);
 	if (r.kind === "problem") {
-		lines.push("", `How it ended: ${r.yourAnswer}`);
+		lines.push("", `How it ended: ${r.outcome ?? "not solved cleanly"}`);
 		if (r.verdict) lines.push(`The tutor's verdict: ${r.verdict}`);
 		if (r.missClass) lines.push(`The tutor's miss class: ${r.missClass}`);
 	}

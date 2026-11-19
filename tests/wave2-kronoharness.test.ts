@@ -368,4 +368,72 @@ describe("Wave 2: 1-Click Snapshot Backup & Restore", () => {
 		);
 		assert.equal(badPost.status, 400);
 	});
+
+	it("exports and imports binary coach-attachments files without corruption and keeps raw flashcards clean", async () => {
+		const uuid = "12345678-1234-4123-8123-1234567890ab";
+		const srcDir = await makeTempDir("lh-backup-attach-src-");
+		const dstDir = await makeTempDir("lh-backup-attach-dst-");
+		const attachDir = path.join(srcDir, "coach-attachments");
+		await fs.mkdir(attachDir, { recursive: true });
+		const binaryBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+		await fs.writeFile(path.join(attachDir, uuid), binaryBytes);
+
+		const exported = exportLearningBackup(srcDir);
+		assert.match(exported.files[`coach-attachments/${uuid}`] ?? "", /^base64:/);
+		importLearningBackup(exported, dstDir);
+
+		const restored = await fs.readFile(path.join(dstDir, "coach-attachments", uuid));
+		assert.equal(Buffer.compare(restored, binaryBytes), 0);
+
+		// Mobile companion rating only reads/writes raw flashcards.json without injecting recallOnly entries
+		const now = Date.UTC(2026, 10, 15, 12, 0, 0);
+		const fcDir = await makeTempDir("lh-raw-fc-");
+		const fcFile = path.join(fcDir, "flashcards.json");
+		const examFile = path.join(fcDir, "exam-prep.json");
+		const chatsDir = path.join(fcDir, "chats");
+		await fs.mkdir(chatsDir, { recursive: true });
+		await fs.writeFile(
+			fcFile,
+			JSON.stringify({
+				version: 1,
+				revision: 1,
+				settings: { retention: 0.9, learningSteps: [1, 10], relearningSteps: [10], dayStart: 4, fuzz: false },
+				decks: [{ id: "d1", name: "Deck", propositionIds: ["prop_1"] }],
+				propositions: {
+					prop_1: {
+						id: "prop_1",
+						origin: "graph",
+						name: "Prop 1",
+						statement: "Statement 1",
+						cues: [{ id: "cue_1", question: "Q1?", answer: "A1", deleted: false, latestRating: null }],
+						schedule: { state: 0, stability: 0, difficulty: 0, reps: 0, lapses: 0, elapsed_days: 0, scheduled_days: 0, learning_steps: 0, last_review: null, due: now },
+						firstReviewedAt: null,
+						learningCueId: null,
+						version: 1,
+					},
+				},
+				reviews: [],
+			}),
+			"utf8",
+		);
+		await fs.writeFile(
+			path.join(fcDir, "recall-fsrs.json"),
+			JSON.stringify({
+				version: 1,
+				answers: {
+					"answer:only_recall": {
+						answerId: "answer:only_recall",
+						subject: "Algebra",
+						schedule: { state: 2, stability: 3, difficulty: 5, reps: 1, lapses: 0, elapsed_days: 0, scheduled_days: 3, learning_steps: 0, last_review: now - 86_400_000, due: now },
+					},
+				},
+				reviews: [],
+			}),
+			"utf8",
+		);
+		rateMobileCompanionCard({ propositionId: "prop_1", cueId: "cue_1", rating: 3, flashcardsFile: fcFile, examPrepFile: examFile, chatsDir, now });
+		const rawSaved = JSON.parse(await fs.readFile(fcFile, "utf8")) as { propositions: Record<string, { cues?: unknown[] }> };
+		assert.deepEqual(Object.keys(rawSaved.propositions), ["prop_1"]);
+		assert.equal(Array.isArray(rawSaved.propositions.prop_1?.cues), true);
+	});
 });

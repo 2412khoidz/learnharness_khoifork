@@ -84,13 +84,17 @@ export function resumeRecallAudit(id: string, role?: ModelRole, retrySkipped = f
  launch(run, engine); return run;
 }
 function launch(run: AuditRun, engine: import("../agent/models.ts").PiEngine) {
- const controller = new AbortController(); active().set(run.id, controller); run.status = "running"; run.error = undefined; saveRun(run);
+ const controller = new AbortController();
+ run.status = "running"; run.error = undefined;
+ saveRun(run);
+ active().set(run.id, controller);
  void (async () => {
   try {
    const all = new Map(sources().map((item) => [item.draft.id, item]));
    const done = new Set([...run.results.map((item) => item.id), ...(run.skipped ?? []).map((item) => item.id)]);
    const work = run.items.filter((item) => !done.has(item.id));
    const batches = batchRecallBySize(work, (entry) => { const item = all.get(entry.id); return item ? JSON.stringify({ question: item.draft.question, answer: item.draft.yourAnswer, committed: item.draft.correctAnswer, thinking: item.draft.thinking, feedback: item.feedback }).length + 500 : 500; });
+   let consecutiveFailedBatches = 0;
    for (const part of batches) {
     if (controller.signal.aborted) break;
     const batch = part.flatMap((entry) => {
@@ -100,6 +104,7 @@ function launch(run: AuditRun, engine: import("../agent/models.ts").PiEngine) {
     });
     if (batch.length !== part.length) saveRun(run);
     if (!batch.length) continue;
+    const beforeResults = run.results.length;
     const assessPart = async (subset: NonNullable<typeof batch[number]>[], depth: number, transientRetried = false): Promise<void> => {
      if (controller.signal.aborted) return;
      try {
@@ -126,9 +131,18 @@ function launch(run: AuditRun, engine: import("../agent/models.ts").PiEngine) {
      }
     };
     await assessPart(batch as NonNullable<typeof batch[number]>[], 0);
+    if (run.results.length === beforeResults && !controller.signal.aborted) {
+     consecutiveFailedBatches++;
+     if (consecutiveFailedBatches >= 2) throw new Error("Stopped after repeated batch failures; check the selected model or retry later.");
+    } else if (run.results.length > beforeResults) {
+     consecutiveFailedBatches = 0;
+    }
    }
    run.status = controller.signal.aborted ? "paused" : "complete";
-  } catch (error) { run.status = controller.signal.aborted ? "paused" : "error"; run.error = `${mappingErrorMessage(error, controller.signal)} (Category: ${recallFailureKind(error)}.)`; }
+  } catch (error) {
+   run.status = controller.signal.aborted ? "paused" : "error";
+   run.error = controller.signal.aborted ? undefined : `${mappingErrorMessage(error, controller.signal)} (Category: ${recallFailureKind(error)}.)`;
+  }
   finally { active().delete(run.id); saveRun(run); }
  })();
 }

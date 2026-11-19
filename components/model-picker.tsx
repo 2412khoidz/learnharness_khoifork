@@ -418,7 +418,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 									type="text"
 									value={customModelId}
 									onChange={(e) => setCustomModelId(e.target.value)}
-									placeholder="e.g. gemini-4-carbon"
+									placeholder="e.g. gpt-6.2-astra, gemini-4-neon"
 									className="h-7 min-w-0 flex-1 rounded border bg-background px-2 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-ring"
 								/>
 								<button

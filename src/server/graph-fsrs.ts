@@ -45,39 +45,52 @@ export function defaultFlashcardsStorePath(): string {
 	return path.join(/* turbopackIgnore: true */ PATHS.data, "core-plugin-data", "flashcards", "flashcards.json");
 }
 
-/** Read and parse the Flashcards FSRS-6 JSON snapshot safely (`null` when unreadable/corrupt). */
-export function readFlashcardsSnapshot(
+/** Read and parse the raw Flashcards JSON store without overlaying Recall-FSRS projections. */
+export function readRawFlashcardsFile(
 	flashcardsFile = defaultFlashcardsStorePath(),
 ): FlashcardsStoreSnapshot | null {
 	let raw: string;
 	try {
 		raw = fs.readFileSync(/* turbopackIgnore: true */ flashcardsFile, "utf8");
-	} catch {
-		raw = JSON.stringify({ propositions: {} });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			raw = JSON.stringify({ propositions: {} });
+		} else {
+			return null;
+		}
 	}
 	try {
 		const parsed = JSON.parse(raw) as FlashcardsStoreSnapshot;
 		if (!parsed || typeof parsed !== "object") return null;
-		// Recall histories are projected in memory only. They never add cards to
-		// the Flashcards store or overwrite a separately reviewed card schedule.
-		if (flashcardsFile === defaultFlashcardsStorePath()) {
-			try {
-				const projection = projectRecallFsrs(readRecallFsrsEvents(), parsed.settings);
-				parsed.propositions ??= {};
-				const used = new Set<string>();
-				for (const [id, schedule] of Object.entries(projection.schedules)) {
-					const current = parsed.propositions[id];
-					if ((current?.schedule?.reps ?? 0) > 0) continue;
-					parsed.propositions[id] = { ...current, id, schedule, recallOnly: true };
-					used.add(id);
-				}
-				parsed.reviews = [...(Array.isArray(parsed.reviews) ? parsed.reviews : []), ...projection.reviews.filter((review) => used.has(review.propositionId))];
-			} catch { /* keep genuine Flashcards data if the separate ledger is unreadable */ }
-		}
 		return parsed;
 	} catch {
 		return null;
 	}
+}
+
+/** Read and parse the Flashcards FSRS-6 JSON snapshot safely (`null` when unreadable/corrupt). */
+export function readFlashcardsSnapshot(
+	flashcardsFile = defaultFlashcardsStorePath(),
+): FlashcardsStoreSnapshot | null {
+	const parsed = readRawFlashcardsFile(flashcardsFile);
+	if (!parsed) return null;
+	// Recall histories are projected in memory only. They never add cards to
+	// the Flashcards store or overwrite a separately reviewed card schedule.
+	if (flashcardsFile === defaultFlashcardsStorePath()) {
+		try {
+			const projection = projectRecallFsrs(readRecallFsrsEvents(), parsed.settings);
+			parsed.propositions ??= {};
+			const used = new Set<string>();
+			for (const [id, schedule] of Object.entries(projection.schedules)) {
+				const current = parsed.propositions[id];
+				if ((current?.schedule?.reps ?? 0) > 0) continue;
+				parsed.propositions[id] = { ...current, id, schedule, recallOnly: true };
+				used.add(id);
+			}
+			parsed.reviews = [...(Array.isArray(parsed.reviews) ? parsed.reviews : []), ...projection.reviews.filter((review) => used.has(review.propositionId))];
+		} catch { /* keep genuine Flashcards data if the separate ledger is unreadable */ }
+	}
+	return parsed;
 }
 
 /** Read Flashcards FSRS-6 state and project it onto the current Knowledge Graph. */

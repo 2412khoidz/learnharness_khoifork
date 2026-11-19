@@ -19,6 +19,12 @@ function atomicWrite(file, content) {
 function migrate(state) {
   let changed = false;
   for (const p of Object.values(state.propositions)) {
+    if (!Array.isArray(p.cues)) {
+      delete state.propositions[p.id];
+      for (const d of state.decks || []) d.propositionIds = (d.propositionIds || []).filter(id => id !== p.id);
+      changed = true;
+      continue;
+    }
     for (const cue of p.cues) if (cue.creation) {
       state.creationReceipts ??= [];
       if (!state.creationReceipts.some(r => r.requestId === cue.creation.requestId)) state.creationReceipts.push({ ...cue.creation, propositionId: p.id, cueId: cue.id });

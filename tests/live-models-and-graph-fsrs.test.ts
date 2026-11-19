@@ -16,13 +16,22 @@ import type { GraphSnapshot } from "../src/core/contracts.ts";
 const require = createRequire(import.meta.url);
 const { createSubscriptions } = require("../electron/subscriptions.cjs");
 
-test("piModels exposes gemini-4-hydrogen across google, google-vertex, and github-copilot", () => {
+test("piModels exposes gemini-4-hydrogen, gemini-4-neon, and gemini-4-argon across google, google-vertex, and github-copilot, plus gpt-6.2 models", () => {
 	const models = piModels();
-	for (const providerId of ["google", "google-vertex", "github-copilot"] as const) {
-		const model = models.getModel(providerId, "gemini-4-hydrogen");
-		assert.ok(model, `expected ${providerId}/gemini-4-hydrogen to exist`);
-		assert.equal(model.reasoning, true);
-		assert.equal(model.contextWindow, 1_048_576);
+	for (const modelId of ["gemini-4-hydrogen", "gemini-4-neon", "gemini-4-argon"] as const) {
+		for (const providerId of ["google", "google-vertex", "github-copilot"] as const) {
+			const model = models.getModel(providerId, modelId);
+			assert.ok(model, `expected ${providerId}/${modelId} to exist`);
+			assert.equal(model.reasoning, true);
+			assert.equal(model.contextWindow, 1_048_576);
+		}
+	}
+	for (const modelId of ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.2-terra", "gpt-6.2-luna"] as const) {
+		for (const providerId of ["openai", "github-copilot"] as const) {
+			const model = models.getModel(providerId, modelId);
+			assert.ok(model, `expected ${providerId}/${modelId} to exist`);
+			assert.equal(model.reasoning, true);
+		}
 	}
 });
 

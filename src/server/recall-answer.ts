@@ -18,6 +18,9 @@ export function readRecallAnswer(id: string) {
  const override = readRecallOverrides().find((entry) => entry.id === id && entry.fingerprint === fingerprint);
  const fallback: RecallScanResult = { id, draft: candidate.draft, sessionTitle: chat.title, verdict: "uncertain", strengths: "", missing: "", correction: "", evidence: "", errorType: "knowledge-gap", topic: "", rule: "" };
  const answer = { ...(current ?? fallback), draft: candidate.draft, effectiveVerdict: override?.verdict ?? current?.verdict, assessmentSource: override?.verdict ? "user" as const : current ? "ai" as const : "unassessed" as const, assessmentStale: Boolean(prior && !current), tutorFeedback: candidate.feedback };
- const mistake = readMistakes().find((item) => item.id === id);
- return { answer, source: { chatId, toolCallId: id.slice(separator + 1) }, mistake: mistake ? { status: mistake.status } : null };
+	const mistake = readMistakes().find((item) => item.id === id);
+	const toolCallId = id.slice(separator + 1);
+	const sourceMessageId = (chat.messages as Array<{ id?: string; role?: string; content?: unknown }>)
+		.find((m) => m.role === "assistant" && Array.isArray(m.content) && m.content.some((b: { type?: string; id?: string }) => b?.type === "toolCall" && b?.id === toolCallId))?.id;
+	return { answer, source: { chatId, ...(sourceMessageId ? { sourceMessageId } : {}), toolCallId }, mistake: mistake ? { status: mistake.status } : null };
 }

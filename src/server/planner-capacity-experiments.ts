@@ -31,6 +31,8 @@ export function evaluateFsrsForecast(input: readonly unknown[], now: number) {
 	const trainLong = transitions.filter((row) => row.at < cutoff).length;
 	const testLong = transitions.length - trainLong;
 	if (train.length < 30 || trainLong < 10 || testLong < 20) return insufficient;
+	const testRows = transitions.filter((row) => row.at >= cutoff);
+	if (!testRows.some((row) => row.rating > 1) || !testRows.some((row) => row.rating === 1)) return insufficient;
 	const fitted = optimizeParameters(train);
 	if (!fitted.ok) return insufficient;
 	const replay = (weights: readonly number[]) => {
@@ -41,7 +43,7 @@ export function evaluateFsrsForecast(input: readonly unknown[], now: number) {
 			if (before?.last_review != null && row.at >= cutoff && row.at - before.last_review >= HALF_DAY) {
 				predictions.push({ y: row.rating > 1 ? 1 : 0, p: retrievability(before, row.at, { weights: [...weights] }) });
 			}
-			histories.set(row.propositionId, rate(before ?? createSchedule(row.at), row.rating, row.at, { weights: [...weights], fuzz: false }));
+			histories.set(row.propositionId, rate(before ?? createSchedule(row.at), row.rating, row.at, { weights: [...weights], learningSteps: [], relearningSteps: [], fuzz: false }));
 		}
 		return probabilityLoss(predictions);
 	};

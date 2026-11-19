@@ -3,7 +3,6 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { PATHS } from "../../config.ts";
-import { extractPlannerMaterialFile } from "./planner.ts";
 
 export type CoachAttachment = { id: string; name: string; mimeType: string; size: number };
 const MAX_TOTAL = 25 * 1024 * 1024;
@@ -27,6 +26,7 @@ export async function prepareCoachAttachments(files: File[], dataDir = PATHS.dat
 		const bytes = Buffer.from(await file.arrayBuffer());
 		if (imageType) images.push({ type: "image", mimeType, data: bytes.toString("base64") });
 		else {
+			const { extractPlannerMaterialFile } = await import("./planner.ts");
 			const extracted = await extractPlannerMaterialFile(name, bytes);
 			texts.push(`File: ${name}\n${extracted.notice ?? ""}\n${extracted.text}`);
 		}
@@ -69,5 +69,45 @@ export async function loadCoachAttachments(attachments: readonly CoachAttachment
 		return { images: prepared.images, attachmentText: prepared.attachmentText };
 	} catch (error) {
 		throw new Error(`Không thể đọc tệp đã gửi trước đó. Vui lòng đính kèm lại. ${error instanceof Error ? error.message : ""}`.trim());
+	}
+}
+
+/** Delete orphaned UUID files in `coach-attachments/` not referenced by chat history or active proposals. */
+export function pruneUnreferencedCoachAttachments(
+	dataDir = PATHS.data,
+	extraKeepIds: Iterable<string> = [],
+): void {
+	const dir = directory(dataDir);
+	let entries: string[];
+	try {
+		if (!fs.existsSync(dir)) return;
+		entries = fs.readdirSync(dir);
+	} catch {
+		return;
+	}
+	const keep = new Set<string>(extraKeepIds);
+	try {
+		const plannerPath = path.join(dataDir, "planner.json");
+		if (fs.existsSync(plannerPath)) {
+			const config = JSON.parse(fs.readFileSync(plannerPath, "utf8")) as {
+				coachChat?: Array<{ attachments?: Array<{ id?: string }> }>;
+			};
+			for (const message of config.coachChat ?? []) {
+				for (const item of message.attachments ?? []) {
+					if (typeof item.id === "string" && idPattern.test(item.id)) keep.add(item.id);
+				}
+			}
+		}
+	} catch {
+		// If planner.json cannot be parsed, avoid deleting potentially live attachments.
+		return;
+	}
+	for (const entry of entries) {
+		if (!idPattern.test(entry) || keep.has(entry)) continue;
+		try {
+			fs.unlinkSync(path.join(dir, entry));
+		} catch {
+			/* best effort */
+		}
 	}
 }

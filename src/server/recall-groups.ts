@@ -76,14 +76,15 @@ export async function suggestRecallGroupBatch(subject: string, batch: RecallGrou
   systemPrompt: "Group answers only when their existing topic and feedback provide specific evidence that they concern the same concept or recurring gap. Related words alone are not enough. Do not merge distinct concepts. Leave ambiguous answers ungrouped. Learner corrections take precedence. Keep correct, partial, wrong, did-not-know and uncertain distinct; never infer independence. An answer may belong to several genuinely distinct topics; avoid duplicate groups. Use only supplied IDs, at least two distinct answers per group. Previous group IDs represent all answers in that group; use them only when new answers genuinely belong to that topic. Explain briefly in Vietnamese. All suggestions require learner approval.",
   prompt: JSON.stringify({ subject, previousGroups: [...prior].map(([id, group]) => ({ id, name: group.name, reason: group.reason.slice(0, 200) })), assessments: batch.map(({ topic, errorType, verdict, source, feedback }, index) => ({ id: `a${index}`, topic, errorType, verdict, source, feedback })) }),
   onStep: (usage, label) => { model = label; onStep?.(usage, label); }, neverSubmitted: "The model did not submit groups.",
-  validate: (value) => {
-   for (const group of value.groups) {
-    const seen = new Set<string>();
-    if (!group.name.trim() || !group.reason.trim() || group.answerIds.length < 2) return "Every group needs a name, a reason, and at least two answers.";
-    for (const id of group.answerIds) { if ((!allowed.has(id) && !prior.has(id)) || seen.has(id)) return "Use only supplied answer IDs, at most once within each group."; seen.add(id); }
-   }
-   return null;
-  },
+   validate: (value) => {
+    for (const group of value.groups) {
+     const seen = new Set<string>();
+     if (!group.name.trim() || !group.reason.trim() || group.answerIds.length < 2) return "Every group needs a name, a reason, and at least two answers.";
+     if (!group.answerIds.some((id) => allowed.has(id))) return "Every group must include at least one answer from the current batch.";
+     for (const id of group.answerIds) { if ((!allowed.has(id) && !prior.has(id)) || seen.has(id)) return "Use only supplied answer IDs, at most once within each group."; seen.add(id); }
+    }
+    return null;
+   },
  });
  return { model, groups: result.groups.map((group) => ({ id: randomUUID(), name: group.name.trim().slice(0, 160), reason: group.reason.trim().slice(0, 2000), model, members: [...new Map(group.answerIds.flatMap((id) => { const old = prior.get(id); const current = allowed.get(id); return old ? old.members : current ? [{ id: current.id, fingerprint: current.fingerprint }] : []; }).map((member) => [member.id, member])).values()] })).filter((group) => group.members.length >= 2) };
 }
