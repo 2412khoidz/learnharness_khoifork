@@ -6,6 +6,7 @@
  *  model call. */
 
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import { wrapBareMathForDisplay } from "./bare-math.ts";
 import type { LhMessage } from "./native-messages.ts";
 import { PRACTICE_CONCLUDE_TOOL, practiceProblemForCall, problemInputForConclude } from "./native-messages.ts";
 import type { QuestionAnswerData } from "./question-core.ts";
@@ -524,9 +525,24 @@ export function patternLine(records: readonly MistakeRecord[], field: "errorType
 	return n >= 2 ? `${n} of ${total}: ${top}` : null;
 }
 
+function recordTimestampMs(r: Pick<MistakeRecord, "answeredAt" | "createdAt">): number {
+	const answered = Date.parse(r.answeredAt);
+	if (Number.isFinite(answered)) return answered;
+	const created = Date.parse(r.createdAt);
+	return Number.isFinite(created) ? created : 0;
+}
+
+/** Order mistakes newest-first (answeredAt desc, then createdAt desc), keeping relative order on ties. */
+export function sortMistakesNewestFirst(records: readonly MistakeRecord[]): MistakeRecord[] {
+	return records
+		.map((record, index) => ({ record, index, ts: recordTimestampMs(record) }))
+		.sort((a, b) => b.ts - a.ts || a.index - b.index)
+		.map((entry) => entry.record);
+}
+
 export function groupMistakes(records: readonly MistakeRecord[], by: MistakeGroupBy): MistakeGroup[] {
 	const groups = new Map<string, MistakeGroup>();
-	for (const r of records) {
+	for (const r of sortMistakesNewestFirst(records)) {
 		const [key, label] =
 			by === "type"
 				? [r.analysis?.errorType ?? "none", r.analysis ? ERROR_TYPE_LABELS[r.analysis.errorType] : UNANALYZED]
@@ -572,30 +588,29 @@ export function filterMistakes(records: readonly MistakeRecord[], f: MistakeFilt
  * (`$[1,4,9,16]$`, `$\alpha_0$`) passes through untouched.
  */
 export function presentMistakeAnalysis(text: string): string {
-	return (
-		text
-			// $\backslash$d -> `\d`
-			.replace(/\$\\backslash\$([A-Za-z])/g, "`\\$1`")
-			// $\backslash d$ -> `\d`
-			.replace(/\$\\backslash\s+([A-Za-z])\$/g, "`\\$1`")
-			// $\{3\}$ -> `{3}`
-			.replace(/\$\\\{([^{}$]+)\\\}\$/g, "`{$1}`")
-			// $[.-]$ / $[a-z]$ -> regex character class, not an interval list
-			.replace(/\$\[([^\],$]*[.-][^\],$]*)\]\$/g, "`[$1]`")
-			// $-$ / $.$
-			.replace(/\$([.-])\$/g, "`$1`")
-			// Phone-number samples are data, not a subtraction: 123-456-7890.
-			.replace(/\$(\d{3}[-.]\d{3}[-.]\d{4})\$/g, "`$1`")
-			// A whole math segment holding \backslash is regex/code, not math.
-			.replace(/\$([^$]*\\backslash[^$]*)\$/g, (_match, inner: string) => {
-				const code = inner
-					.replace(/\\backslash\s*/g, "\\")
-					.replace(/\\\{/g, "{")
-					.replace(/\\\}/g, "}")
-					.trim();
-				return code ? `\`${code}\`` : _match;
-			})
-	);
+	const cleaned = text
+		// $\backslash$d -> `\d`
+		.replace(/\$\\backslash\$([A-Za-z])/g, "`\\$1`")
+		// $\backslash d$ -> `\d`
+		.replace(/\$\\backslash\s+([A-Za-z])\$/g, "`\\$1`")
+		// $\{3\}$ -> `{3}`
+		.replace(/\$\\\{([^{}$]+)\\\}\$/g, "`{$1}`")
+		// $[.-]$ / $[a-z]$ -> regex character class, not an interval list
+		.replace(/\$\[([^\],$]*[.-][^\],$]*)\]\$/g, "`[$1]`")
+		// $-$ / $.$
+		.replace(/\$([.-])\$/g, "`$1`")
+		// Phone-number samples are data, not a subtraction: 123-456-7890.
+		.replace(/\$(\d{3}[-.]\d{3}[-.]\d{4})\$/g, "`$1`")
+		// A whole math segment holding \backslash is regex/code, not math.
+		.replace(/\$([^$]*\\backslash[^$]*)\$/g, (_match, inner: string) => {
+			const code = inner
+				.replace(/\\backslash\s*/g, "\\")
+				.replace(/\\\{/g, "{")
+				.replace(/\\\}/g, "}")
+				.trim();
+			return code ? `\`${code}\`` : _match;
+		});
+	return wrapBareMathForDisplay(cleaned);
 }
 
 export interface MistakeSummary {

@@ -13,8 +13,8 @@ import { readThemeBoot } from "@/src/server";
 
 // Chrome = JetBrains Mono, teaching prose = Source Sans 3, titles = CMU
 // Serif (the bundled lh-cmu @font-face in globals.css — no CDN).
-const ui = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jetbrains" });
-const prose = Source_Sans_3({ subsets: ["latin"], variable: "--font-sans3" });
+const ui = JetBrains_Mono({ subsets: ["latin", "latin-ext", "vietnamese"], variable: "--font-jetbrains" });
+const prose = Source_Sans_3({ subsets: ["latin", "latin-ext", "vietnamese"], variable: "--font-sans3" });
 
 export const metadata: Metadata = {
 	title: "ChronoHarness",

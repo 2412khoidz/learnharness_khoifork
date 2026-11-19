@@ -20,6 +20,122 @@ import { Button } from "@/components/ui/button";
 import { Hint } from "@/components/ui/hint";
 
 const POLL_INTERVAL_MS = 700;
+const CURSOR_STORAGE_PREFIX = "lh:phone-cursor:";
+const ACTIVE_SESSION_STORAGE_KEY = "lh:phone-active-session";
+
+interface PhoneCoordinator {
+	activeSessionId: string | null;
+	consumedBySession: Map<string, number>;
+	historyBySession: Map<string, PhoneUploadEntry[]>;
+	inFlightSessions: Set<string>;
+	backfilledSessions: Set<string>;
+	listeners: Set<() => void>;
+}
+
+const coordinator: PhoneCoordinator = {
+	activeSessionId: null,
+	consumedBySession: new Map(),
+	historyBySession: new Map(),
+	inFlightSessions: new Set(),
+	backfilledSessions: new Set(),
+	listeners: new Set(),
+};
+
+function notifyCoordinator(): void {
+	for (const listener of coordinator.listeners) listener();
+}
+
+function readStorage(key: string): string | null {
+	try {
+		return typeof sessionStorage !== "undefined" ? sessionStorage.getItem(key) : null;
+	} catch {
+		return null;
+	}
+}
+
+function writeStorage(key: string, value: string | null): void {
+	try {
+		if (typeof sessionStorage === "undefined") return;
+		if (value === null) sessionStorage.removeItem(key);
+		else sessionStorage.setItem(key, value);
+	} catch {
+		// Ignore unavailable sessionStorage in tests or restricted contexts.
+	}
+}
+
+function getActiveCoordinatorSession(): string | null {
+	if (coordinator.activeSessionId) return coordinator.activeSessionId;
+	const stored = readStorage(ACTIVE_SESSION_STORAGE_KEY);
+	if (stored) coordinator.activeSessionId = stored;
+	return coordinator.activeSessionId;
+}
+
+function setActiveCoordinatorSession(sessionId: string | null): void {
+	if (coordinator.activeSessionId === sessionId) return;
+	coordinator.activeSessionId = sessionId;
+	writeStorage(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+	notifyCoordinator();
+}
+
+function getConsumedCursor(sessionId: string): number {
+	const cached = coordinator.consumedBySession.get(sessionId);
+	if (cached !== undefined) return cached;
+	const raw = readStorage(`${CURSOR_STORAGE_PREFIX}${sessionId}`);
+	const parsed = raw ? Number.parseInt(raw, 10) : 0;
+	const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+	coordinator.consumedBySession.set(sessionId, value);
+	return value;
+}
+
+function setConsumedCursor(sessionId: string, nextIndex: number): void {
+	const normalized = Number.isFinite(nextIndex) && nextIndex > 0 ? Math.floor(nextIndex) : 0;
+	coordinator.consumedBySession.set(sessionId, normalized);
+	writeStorage(`${CURSOR_STORAGE_PREFIX}${sessionId}`, String(normalized));
+}
+
+function recordSessionUploads(sessionId: string, entries: readonly PhoneUploadEntry[]): PhoneUploadEntry[] {
+	if (entries.length === 0) return coordinator.historyBySession.get(sessionId) ?? [];
+	const existing = coordinator.historyBySession.get(sessionId) ?? [];
+	const byIndex = new Map<number, PhoneUploadEntry>();
+	for (const entry of existing) byIndex.set(entry.index, entry);
+	for (const entry of entries) byIndex.set(entry.index, entry);
+	const merged = [...byIndex.values()].sort((a, b) => a.index - b.index);
+	coordinator.historyBySession.set(sessionId, merged);
+	notifyCoordinator();
+	return merged;
+}
+
+function clearCoordinatorSession(sessionId: string | null | undefined): void {
+	if (!sessionId) return;
+	coordinator.consumedBySession.delete(sessionId);
+	coordinator.historyBySession.delete(sessionId);
+	coordinator.inFlightSessions.delete(sessionId);
+	coordinator.backfilledSessions.delete(sessionId);
+	writeStorage(`${CURSOR_STORAGE_PREFIX}${sessionId}`, null);
+	if (getActiveCoordinatorSession() === sessionId) setActiveCoordinatorSession(null);
+	else notifyCoordinator();
+}
+
+/** Test-only reset for isolated unit runs in Node. */
+export function resetPhoneUploadCoordinatorForTests(): void {
+	for (const sessionId of [...coordinator.consumedBySession.keys()]) {
+		writeStorage(`${CURSOR_STORAGE_PREFIX}${sessionId}`, null);
+	}
+	coordinator.activeSessionId = null;
+	coordinator.consumedBySession.clear();
+	coordinator.historyBySession.clear();
+	coordinator.inFlightSessions.clear();
+	coordinator.backfilledSessions.clear();
+	writeStorage(ACTIVE_SESSION_STORAGE_KEY, null);
+	notifyCoordinator();
+}
+
+function insertPathsIntoEditor(editorRef: RefObject<HTMLDivElement | null>, paths: string[]): void {
+	if (paths.length === 0) return;
+	editorRef.current?.dispatchEvent(
+		new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: { paths, focus: false } }),
+	);
+}
 
 function formatBytes(size: number): string {
 	if (size < 1024) return `${size} B`;
@@ -45,10 +161,19 @@ export function PhoneUploadButton({
 	disabled?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
-	const [bgSessionId, setBgSessionId] = useState<string | null>(null);
+	const [bgSessionId, setBgSessionId] = useState<string | null>(() => getActiveCoordinatorSession());
 	const prewarmRequestedRef = useRef(false);
-	const sharedSinceRef = useRef(0);
-	const prevSessionIdRef = useRef<string | null>(null);
+
+	useEffect(() => {
+		const sync = () => {
+			setBgSessionId(getActiveCoordinatorSession());
+		};
+		sync();
+		coordinator.listeners.add(sync);
+		return () => {
+			coordinator.listeners.delete(sync);
+		};
+	}, []);
 
 	useEffect(() => {
 		if (disabled || prewarmRequestedRef.current || typeof fetch !== "function") return;
@@ -61,32 +186,38 @@ export function PhoneUploadButton({
 		}).catch(() => {});
 	}, [disabled]);
 
-	// Keep polling received camera uploads quietly in the background after the QR modal closes.
+	// Keep polling received camera uploads quietly in the background across dock transitions.
 	useEffect(() => {
 		if (open || !bgSessionId || disabled || typeof fetch !== "function") return;
 		let cancelled = false;
+		const sessionId = bgSessionId;
 		const pollBackground = async () => {
-			if (cancelled) return;
+			if (cancelled || coordinator.inFlightSessions.has(sessionId)) return;
+			coordinator.inFlightSessions.add(sessionId);
 			try {
+				const cursor = getConsumedCursor(sessionId);
 				const res = await fetch(
-					`/api/attachments/phone?sessionId=${encodeURIComponent(bgSessionId)}&since=${sharedSinceRef.current}`,
+					`/api/attachments/phone?sessionId=${encodeURIComponent(sessionId)}&since=${cursor}`,
 				);
 				if (!res.ok || cancelled) return;
 				const data = (await res.json()) as PhoneUploadPollResponse;
 				if (cancelled) return;
 				if (!data.active) {
-					setBgSessionId(null);
+					clearCoordinatorSession(sessionId);
 					return;
 				}
-				if (data.uploads.length > 0) {
-					sharedSinceRef.current = data.nextIndex;
-					const paths = data.uploads.map((item: AttachmentUploadResult) => item.path);
-					editorRef.current?.dispatchEvent(
-						new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: { paths, focus: false } }),
-					);
+				const latestCursor = getConsumedCursor(sessionId);
+				const freshUploads = data.uploads.filter((item) => item.index >= latestCursor);
+				if (data.uploads.length > 0) recordSessionUploads(sessionId, data.uploads);
+				const nextCursor = Math.max(latestCursor, data.nextIndex, ...freshUploads.map((item) => item.index + 1));
+				if (nextCursor > latestCursor) setConsumedCursor(sessionId, nextCursor);
+				if (freshUploads.length > 0) {
+					insertPathsIntoEditor(editorRef, freshUploads.map((item: AttachmentUploadResult) => item.path));
 				}
 			} catch {
 				// Ignore transient polling hiccups while companion server runs.
+			} finally {
+				coordinator.inFlightSessions.delete(sessionId);
 			}
 		};
 		const timer = setInterval(() => { void pollBackground(); }, 1200);
@@ -142,9 +273,6 @@ export function PhoneUploadButton({
 				{open && (
 					<PhoneUploadDialogBody
 						editorRef={editorRef}
-						sinceRef={sharedSinceRef}
-						prevSessionIdRef={prevSessionIdRef}
-						onSessionActive={setBgSessionId}
 						onClose={() => setOpen(false)}
 					/>
 				)}
@@ -155,15 +283,9 @@ export function PhoneUploadButton({
 
 function PhoneUploadDialogBody({
 	editorRef,
-	sinceRef,
-	prevSessionIdRef,
-	onSessionActive,
 	onClose,
 }: {
 	editorRef: RefObject<HTMLDivElement | null>;
-	sinceRef: MutableRefObject<number>;
-	prevSessionIdRef: MutableRefObject<string | null>;
-	onSessionActive: (sessionId: string | null) => void;
 	onClose: () => void;
 }) {
 	const [session, setSession] = useState<PhoneUploadSessionInfo | null>(null);
@@ -175,6 +297,9 @@ function PhoneUploadDialogBody({
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
 	const [received, setReceived] = useState<PhoneUploadEntry[]>([]);
+	const [sessionHistory, setSessionHistory] = useState<PhoneUploadEntry[]>([]);
+	const [selectedEarlier, setSelectedEarlier] = useState<Set<number>>(new Set());
+	const [manuallyInserted, setManuallyInserted] = useState<Set<number>>(new Set());
 	const [copied, setCopied] = useState(false);
 	const [reloadNonce, setReloadNonce] = useState(0);
 
@@ -182,6 +307,17 @@ function PhoneUploadDialogBody({
 	const receivedCountRef = useRef(0);
 	const refreshTunnelRef = useRef(false);
 	const forceNewRef = useRef(false);
+
+	useEffect(() => {
+		const syncHistory = () => {
+			if (!sessionIdRef.current) return;
+			setSessionHistory(coordinator.historyBySession.get(sessionIdRef.current) ?? []);
+		};
+		coordinator.listeners.add(syncHistory);
+		return () => {
+			coordinator.listeners.delete(syncHistory);
+		};
+	}, []);
 
 	const startSession = useCallback(async (signal: AbortSignal) => {
 		const refreshTunnel = refreshTunnelRef.current;
@@ -191,10 +327,13 @@ function PhoneUploadDialogBody({
 		setLoading(true);
 		setError("");
 		setReceived([]);
+		setSelectedEarlier(new Set());
+		setManuallyInserted(new Set());
 		setTunnelStatus("off");
 		setTunnelUrl(null);
 		setTunnelError(null);
 		receivedCountRef.current = 0;
+		const priorSessionId = sessionIdRef.current ?? getActiveCoordinatorSession();
 
 		try {
 			const bodyPayload: { refreshTunnel?: boolean; forceNew?: boolean } = {};
@@ -218,13 +357,27 @@ function PhoneUploadDialogBody({
 			}
 			if (signal.aborted) return;
 			const info = payload as PhoneUploadSessionInfo;
-			if (forceNew || prevSessionIdRef.current !== info.sessionId) {
-				sinceRef.current = 0;
-				prevSessionIdRef.current = info.sessionId;
+			if (forceNew) {
+				clearCoordinatorSession(priorSessionId);
+				clearCoordinatorSession(info.sessionId);
 			}
 			const nextLan = info.defaultAddress ?? info.addresses[0]?.address ?? "";
 			sessionIdRef.current = info.sessionId;
-			onSessionActive(info.sessionId);
+			setActiveCoordinatorSession(info.sessionId);
+			const existingHistory = coordinator.historyBySession.get(info.sessionId) ?? [];
+			setSessionHistory(existingHistory);
+			// If resuming a long-lived session after a page reload, populate earlier-session list silently without auto-inserting old photos.
+			const cursor = getConsumedCursor(info.sessionId);
+			if (cursor > 0 && existingHistory.length < cursor && !coordinator.backfilledSessions.has(info.sessionId)) {
+				coordinator.backfilledSessions.add(info.sessionId);
+				void fetch(`/api/attachments/phone?sessionId=${encodeURIComponent(info.sessionId)}&since=0`, { signal })
+					.then(async (res) => (res.ok ? (await res.json() as PhoneUploadPollResponse) : null))
+					.then((backfill) => {
+						if (!backfill?.active || !backfill.uploads.length) return;
+						recordSessionUploads(info.sessionId, backfill.uploads);
+					})
+					.catch(() => {});
+			}
 			setSession(info);
 			setSelectedAddress(nextLan);
 			setTunnelStatus(info.tunnelStatus ?? "off");
@@ -239,7 +392,7 @@ function PhoneUploadDialogBody({
 		} finally {
 			if (!signal.aborted) setLoading(false);
 		}
-	}, [onSessionActive, prevSessionIdRef, sinceRef]);
+	}, []);
 
 	useEffect(() => {
 		const abort = new AbortController();
@@ -251,12 +404,10 @@ function PhoneUploadDialogBody({
 	}, [startSession, reloadNonce]);
 
 	const disconnectSession = () => {
-		const activeId = sessionIdRef.current ?? prevSessionIdRef.current;
+		const activeId = sessionIdRef.current ?? getActiveCoordinatorSession();
 		sessionIdRef.current = null;
-		prevSessionIdRef.current = null;
-		sinceRef.current = 0;
+		clearCoordinatorSession(activeId);
 		if (activeId) stopSessionRequest(activeId);
-		onSessionActive(null);
 		onClose();
 	};
 
@@ -264,42 +415,55 @@ function PhoneUploadDialogBody({
 		if (receivedCountRef.current > 0) {
 			// Reclaim focus back to the input after HostDialog's unmount focus restoration.
 			setTimeout(() => {
-				if (editorRef.current?.isConnected) editorRef.current.focus();
+				try {
+					if (editorRef.current?.isConnected) editorRef.current.focus();
+				} catch {
+					// Ignore focus restoration failures during host teardown.
+				}
 			}, 10);
 		}
 	}, [editorRef]);
 
 	useEffect(() => {
 		if (!session?.sessionId) return;
+		const sessionId = session.sessionId;
 		let cancelled = false;
 		const poll = async () => {
-			if (cancelled || sessionIdRef.current !== session.sessionId) return;
+			if (cancelled || sessionIdRef.current !== sessionId || coordinator.inFlightSessions.has(sessionId)) return;
+			coordinator.inFlightSessions.add(sessionId);
 			try {
+				const cursor = getConsumedCursor(sessionId);
 				const res = await fetch(
-					`/api/attachments/phone?sessionId=${encodeURIComponent(session.sessionId)}&since=${sinceRef.current}`,
+					`/api/attachments/phone?sessionId=${encodeURIComponent(sessionId)}&since=${cursor}`,
 				);
 				if (!res.ok || cancelled) return;
 				const data = await res.json() as PhoneUploadPollResponse;
 				if (cancelled) return;
 				if (!data.active) {
-					onSessionActive(null);
+					clearCoordinatorSession(sessionId);
 					setError("Phone upload session expired. Click New code to start a new one.");
 					return;
 				}
 				if (data.tunnelStatus !== undefined) setTunnelStatus(data.tunnelStatus);
 				if (data.tunnelUrl !== undefined) setTunnelUrl(data.tunnelUrl);
 				if (data.tunnelError !== undefined) setTunnelError(data.tunnelError);
-				if (data.uploads.length > 0) {
-					sinceRef.current = data.nextIndex;
-					receivedCountRef.current += data.uploads.length;
-					setReceived((prev) => [...prev, ...data.uploads]);
-					const paths = data.uploads.map((item: AttachmentUploadResult) => item.path);
-					editorRef.current?.dispatchEvent(
-						new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: { paths, focus: false } }),
-					);
+				const latestCursor = getConsumedCursor(sessionId);
+				const freshUploads = data.uploads.filter((item) => item.index >= latestCursor);
+				if (data.uploads.length > 0) recordSessionUploads(sessionId, data.uploads);
+				const nextCursor = Math.max(latestCursor, data.nextIndex, ...freshUploads.map((item) => item.index + 1));
+				if (nextCursor > latestCursor) setConsumedCursor(sessionId, nextCursor);
+				if (freshUploads.length > 0) {
+					receivedCountRef.current += freshUploads.length;
+					setReceived((prev) => {
+						const known = new Set(prev.map((item) => item.index));
+						return [...prev, ...freshUploads.filter((item) => !known.has(item.index))];
+					});
+					insertPathsIntoEditor(editorRef, freshUploads.map((item: AttachmentUploadResult) => item.path));
 				}
 			} catch {
 				// Ignore transient polling hiccups while local server stays active.
+			} finally {
+				coordinator.inFlightSessions.delete(sessionId);
 			}
 		};
 		const timer = setInterval(() => { void poll(); }, POLL_INTERVAL_MS);
@@ -329,6 +493,37 @@ function PhoneUploadDialogBody({
 		const matrix = encodeQrMatrix(activeUrl);
 		return { size: matrix.size, path: qrSvgPath(matrix) };
 	}, [activeUrl]);
+
+	const newIndices = useMemo(() => new Set(received.map((item) => item.index)), [received]);
+	const earlierUploads = useMemo(
+		() => [...sessionHistory.filter((item) => !newIndices.has(item.index))].reverse(),
+		[sessionHistory, newIndices],
+	);
+	const insertSingleEarlier = (entry: PhoneUploadEntry) => {
+		insertPathsIntoEditor(editorRef, [entry.path]);
+		receivedCountRef.current += 1;
+		setManuallyInserted((prev) => new Set(prev).add(entry.index));
+		setSelectedEarlier((prev) => {
+			if (!prev.has(entry.index)) return prev;
+			const next = new Set(prev);
+			next.delete(entry.index);
+			return next;
+		});
+	};
+	const insertSelectedEarlier = () => {
+		const chosen = earlierUploads
+			.filter((item) => selectedEarlier.has(item.index))
+			.sort((a, b) => a.index - b.index);
+		if (chosen.length === 0) return;
+		insertPathsIntoEditor(editorRef, chosen.map((item) => item.path));
+		receivedCountRef.current += chosen.length;
+		setManuallyInserted((prev) => {
+			const next = new Set(prev);
+			for (const item of chosen) next.add(item.index);
+			return next;
+		});
+		setSelectedEarlier(new Set());
+	};
 
 	const firstWarning = received.find((item) => item.warning)?.warning ?? null;
 
@@ -529,17 +724,90 @@ function PhoneUploadDialogBody({
 				</div>
 			)}
 
-			{received.length > 0 && (
-				<div data-testid="phone-upload-received" className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-border/70 bg-muted/20 p-2.5">
-					<div className="text-xs font-medium text-foreground">
-						Inserted into draft ({received.length})
-					</div>
-					{received.map((entry) => (
-						<div key={entry.index} className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-							<span className="truncate font-mono">{entry.filename}</span>
-							<span className="shrink-0">{formatBytes(entry.size)}</span>
+			{(received.length > 0 || earlierUploads.length > 0) && (
+				<div className="space-y-2">
+					{received.length > 0 && (
+						<div data-testid="phone-upload-received" className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-border/70 bg-muted/20 p-2.5">
+							<div className="text-xs font-medium text-foreground">
+								Inserted into draft ({received.length})
+							</div>
+							{received.map((entry) => (
+								<div key={entry.index} className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+									<span className="truncate font-mono">{entry.filename}</span>
+									<span className="shrink-0">{formatBytes(entry.size)}</span>
+								</div>
+							))}
 						</div>
-					))}
+					)}
+					{earlierUploads.length > 0 && (
+						<div data-testid="phone-upload-earlier" className="max-h-40 space-y-1.5 overflow-y-auto rounded-lg border border-border/70 bg-background/60 p-2.5">
+							<div className="flex flex-wrap items-center justify-between gap-2">
+								<span className="text-xs font-medium text-foreground">
+									Earlier in this session ({earlierUploads.length})
+								</span>
+								<div className="flex items-center gap-1.5">
+									{earlierUploads.length > 1 && (
+										<button
+											type="button"
+											onClick={() => {
+												if (selectedEarlier.size === earlierUploads.length) {
+													setSelectedEarlier(new Set());
+												} else {
+													setSelectedEarlier(new Set(earlierUploads.map((item) => item.index)));
+												}
+											}}
+											className="text-[11px] text-muted-foreground hover:text-foreground"
+										>
+											{selectedEarlier.size === earlierUploads.length ? "Clear" : "Select all"}
+										</button>
+									)}
+									{selectedEarlier.size > 0 && (
+										<Button
+											type="button"
+											size="sm"
+											variant="outline"
+											data-testid="phone-insert-selected"
+											onClick={insertSelectedEarlier}
+											className="h-6 px-2 text-[11px]"
+										>
+											Insert selected ({selectedEarlier.size})
+										</Button>
+									)}
+								</div>
+							</div>
+							{earlierUploads.map((entry) => (
+								<div key={entry.index} className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+									<label className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5">
+										<input
+											type="checkbox"
+											aria-label={`Select ${entry.filename}`}
+											checked={selectedEarlier.has(entry.index)}
+											onChange={(e) => {
+												setSelectedEarlier((prev) => {
+													const next = new Set(prev);
+													if (e.target.checked) next.add(entry.index);
+													else next.delete(entry.index);
+													return next;
+												});
+											}}
+										/>
+										<span className="truncate font-mono">{entry.filename}</span>
+									</label>
+									<span className="shrink-0 text-[11px]">{formatBytes(entry.size)}</span>
+									<Button
+										type="button"
+										size="sm"
+										variant="outline"
+										data-testid={`phone-insert-${entry.index}`}
+										onClick={() => insertSingleEarlier(entry)}
+										className="h-6 shrink-0 px-2 text-[11px]"
+									>
+										{manuallyInserted.has(entry.index) ? "Inserted ✓" : "+ Insert"}
+									</Button>
+								</div>
+							))}
+						</div>
+					)}
 				</div>
 			)}
 

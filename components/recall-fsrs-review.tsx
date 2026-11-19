@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RecallScanResult } from "@/src/core";
+import { normalizeConceptSearch, presentMistakeAnalysis, type RecallScanResult } from "@/src/core";
 import { ToolContentResponse } from "@/components/ai-elements/message";
+import { PageControls } from "@/components/page-controls";
 import { RecallAssessmentEditor } from "@/components/recall-assessment-editor";
-import { normalizeConceptSearch } from "@/src/core";
 
 type Node = { id: string; name: string; statement: string; reviewedFlashcard: boolean; revision: string };
 type Suggestion = { answerId: string; nodeId: string; reason: string; model: string };
@@ -38,7 +38,7 @@ function MappingCard({ item, nodes, selection, onSelect, onRemove, refresh, pref
 	};
 	return <details className="rounded border bg-background p-2.5"><summary className="cursor-pointer"><strong>{verdictLabels[item.verdict]}</strong> · {item.sessionTitle}{selection?.nodeId && <span> · Selected: {chosen?.name}</span>}<ToolContentResponse className="mt-1">{item.draft.question}</ToolContentResponse></summary>
 		<div className="mt-2 space-y-2"><div><strong>Your answer:</strong><ToolContentResponse>{item.draft.yourAnswer}</ToolContentResponse></div>
-			{item.strengths && <div><strong>What was right:</strong><ToolContentResponse>{item.strengths}</ToolContentResponse></div>}{item.missing && <div><strong>What was missing:</strong><ToolContentResponse>{item.missing}</ToolContentResponse></div>}
+			{item.strengths && <div><strong>What was right:</strong><ToolContentResponse>{presentMistakeAnalysis(item.strengths)}</ToolContentResponse></div>}{item.missing && <div><strong>What was missing:</strong><ToolContentResponse>{presentMistakeAnalysis(item.missing)}</ToolContentResponse></div>}
 			{item.assessmentSource === "user" && <p>Your saved assessment: {verdictLabels[item.effectiveVerdict ?? item.verdict]}</p>}
 			<RecallAssessmentEditor id={item.id} verdict={item.verdict} onSaved={() => { onRemove(); void refresh(); }} />
 			{item.aiSuggestionIssue && <p role="note">{item.aiSuggestionIssue}</p>}
@@ -73,7 +73,14 @@ export function RecallFsrsReview() {
 		setData({ nodes: value.nodes, results: value.results, lastBatch: value.lastBatch ?? null, availableRoles: value.availableRoles ?? [] });
 	}, []);
 	useEffect(() => { void refresh().catch((err: unknown) => setError(err instanceof Error ? err.message : "Could not load recall reviews.")); }, [refresh]);
-	const available = useMemo(() => (data?.results ?? []).filter((item) => !item.applied), [data]);
+	const available = useMemo(
+		() => (data?.results ?? [])
+			.filter((item) => !item.applied)
+			.map((item, index) => ({ item, index, ts: item.draft?.answeredAt ? Date.parse(item.draft.answeredAt) || 0 : 0 }))
+			.sort((a, b) => b.ts - a.ts || a.index - b.index)
+			.map((entry) => entry.item),
+		[data],
+	);
 	const nodes = useMemo(() => new Map((data?.nodes ?? []).map((node) => [node.id, node])), [data]);
 	const chosen = Object.entries(selected);
 	const ready = chosen.length > 0 && chosen.length <= 100 && chosen.every(([, selection]) => selection.nodeId && nodes.has(selection.nodeId) && !nodes.get(selection.nodeId)?.reviewedFlashcard && selection.rating >= 1 && selection.rating <= 4);
@@ -133,11 +140,11 @@ export function RecallFsrsReview() {
 			{reviewing ? <div className="space-y-2 rounded border p-3"><p className="font-medium">Confirm these {chosen.length} reviews</p><p className="text-muted-foreground">Each rating changes the separate recall-based FSRS estimate from the original date.</p><div className="max-h-72 space-y-1 overflow-auto">{chosen.map(([id, selection]) => { const result = data.results.find((item) => item.id === id); return <div key={id} className="rounded border p-2"><strong>{nodes.get(selection.nodeId)?.name}</strong> · rating {selection.rating} · {result?.draft.answeredAt ? new Date(result.draft.answeredAt).toLocaleString() : "unknown date"}<ToolContentResponse>{result?.draft.question ?? ""}</ToolContentResponse>{result?.aiSuggestion?.nodeId === selection.nodeId && <ToolContentResponse>{result.aiSuggestion.reason}</ToolContentResponse>}</div>; })}</div><div className="flex gap-2"><button type="button" disabled={busy} onClick={() => void save()} className="rounded bg-primary px-3 py-1.5 text-primary-foreground disabled:opacity-40">Confirm and save</button><button type="button" disabled={busy} onClick={() => setReviewing(false)} className="rounded border px-3 py-1.5">Back</button></div></div> : <>
 				<div className="flex flex-wrap items-center gap-2"><label>Model for this request <select value={preferredRole} onChange={(event) => setPreferredRole(event.target.value)} disabled={suggesting} className="rounded border bg-background p-1"><option value="">Analyst (default)</option>{data.availableRoles.map((role) => <option key={role.role} value={role.role}>{role.label} · {role.modelLabel}</option>)}</select></label><span>{modelLabel}</span></div>
 				<button type="button" disabled={suggesting || busy || available.length === 0} onClick={() => void suggestPage()} className="rounded border px-3 py-1.5 disabled:opacity-40">{suggesting ? "Suggesting…" : "Suggest concepts with AI for this page"}</button>{suggesting && <button type="button" onClick={() => controller.current?.abort()} className="ml-2 rounded border px-2 py-1">Cancel</button>}
-				<div className="space-y-2">{available.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((item) => {
+				<div className="space-y-2">{available.slice(Math.min(page, Math.max(1, Math.ceil(available.length / PAGE_SIZE)) - 1) * PAGE_SIZE, (Math.min(page, Math.max(1, Math.ceil(available.length / PAGE_SIZE)) - 1) + 1) * PAGE_SIZE).map((item) => {
 					const selection = selected[item.id];
 					const setSelection = (part: Partial<Selection>) => setSelected((previous) => ({ ...previous, [item.id]: { nodeId: previous[item.id]?.nodeId ?? "", rating: previous[item.id]?.rating ?? defaultRating(item.effectiveVerdict ?? item.verdict), ...part } }));
 					return <MappingCard key={item.id} item={item} nodes={data.nodes} selection={selection} onSelect={setSelection} onRemove={() => setSelected((previous) => { const next = { ...previous }; delete next[item.id]; return next; })} refresh={refresh} preferredRole={preferredRole} modelLabel={modelLabel} />;
-				})}</div><div className="flex items-center gap-3"><button type="button" disabled={page === 0} onClick={() => setPage((value) => value - 1)} className="disabled:opacity-40">Previous</button><span>{page + 1} / {Math.max(1, Math.ceil(available.length / PAGE_SIZE))}</span><button type="button" disabled={(page + 1) * PAGE_SIZE >= available.length} onClick={() => setPage((value) => value + 1)} className="disabled:opacity-40">Next</button></div><button type="button" disabled={!ready || busy} onClick={() => setReviewing(true)} className="rounded border px-3 py-1.5 disabled:opacity-40">Review batch ({chosen.length})</button>
+				})}</div><PageControls page={page} totalPages={Math.max(1, Math.ceil(available.length / PAGE_SIZE))} onPageChange={setPage} /><button type="button" disabled={!ready || busy} onClick={() => setReviewing(true)} className="rounded border px-3 py-1.5 disabled:opacity-40">Review batch ({chosen.length})</button>
 			</>}
 		</>}
 	</section>;

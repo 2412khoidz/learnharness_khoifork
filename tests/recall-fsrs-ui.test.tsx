@@ -61,3 +61,31 @@ it("shows analyst suggestions and discussion without saving FSRS", async () => {
 		assert.match(document.body.textContent ?? "", /Matrix rank original description/);
 	} finally { await act(async () => root.unmount()); globalThis.fetch = previousFetch; }
 });
+
+it("supports direct page jump when recall FSRS candidates span multiple pages", async () => {
+	const dom = parseHTML("<html><head></head><body><main></main></body></html>");
+	Object.assign(globalThis, { React, window: dom.window, document: dom.document, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
+	Object.defineProperty(dom.document, "oninput", { value: null, configurable: true });
+	const previousFetch = globalThis.fetch;
+	const results = Array.from({ length: 25 }, (_, i) => ({
+		id: `chat:a${i + 1}`, verdict: "partial", sessionTitle: "Algebra", suggestedNodeIds: [], applied: false, revision: `r${i}`,
+		draft: { question: `FSRS Question #${i + 1}`, yourAnswer: "Part", answeredAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString() },
+	}));
+	globalThis.fetch = async () => new Response(JSON.stringify({ nodes: [], results, lastBatch: null, availableRoles: [] }));
+	const root = createRoot(document.querySelector("main")!);
+	try {
+		await act(async () => root.render(<RecallFsrsReview />));
+		assert.match(document.body.textContent ?? "", /FSRS Question #25(?!\d)/, "newest item on page 1");
+		assert.ok(document.body.textContent?.includes("1 / 2"));
+		const jumpInput = document.querySelector<HTMLInputElement>('input[aria-label="Jump to page"]')!;
+		await act(async () => {
+			jumpInput.value = "2";
+			(jumpInput as HTMLInputElement & { _valueTracker?: { setValue: (v: string) => void } })._valueTracker?.setValue("1");
+			jumpInput.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+			jumpInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+		});
+		await act(async () => { [...document.querySelectorAll("button")].find((b) => b.textContent === "Go")?.click(); });
+		assert.ok(document.body.textContent?.includes("2 / 2"));
+		assert.match(document.body.textContent ?? "", /FSRS Question #1(?!\d)/);
+	} finally { await act(async () => root.unmount()); globalThis.fetch = previousFetch; }
+});

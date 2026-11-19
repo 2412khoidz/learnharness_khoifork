@@ -20,6 +20,7 @@ import {
 	mergeMistakes,
 	parseAnalysis,
 	patternLine,
+	sortMistakesNewestFirst,
 	summarizeMistakes,
 	type MistakeRecord,
 } from "../src/core/mistakes.ts";
@@ -271,6 +272,16 @@ describe("review tab helpers", () => {
 		assert.deepEqual(bySession.map((g) => [g.label, g.records.length]), [["Friction", 3], ["Energy notes", 1]]);
 		assert.equal(bySession[0]!.pattern, "2 of 2: Confusable pair");
 		assert.deepEqual(groupMistakes(records, "topic").map((g) => g.label), ["Friction", "Energy", "Not analyzed yet"]);
+	});
+	it("orders mistakes newest first while keeping tie order", () => {
+		const dated = [
+			{ ...ready("old", "setup-error", "Limits"), answeredAt: "2026-11-10T10:00:00.000Z" },
+			{ ...ready("mid-1", "setup-error", "Limits"), answeredAt: "2026-11-15T10:00:00.000Z" },
+			{ ...ready("mid-2", "setup-error", "Limits"), answeredAt: "2026-11-15T10:00:00.000Z" },
+			{ ...ready("new", "setup-error", "Limits"), answeredAt: "2026-11-19T10:00:00.000Z" },
+		];
+		assert.deepEqual(sortMistakesNewestFirst(dated).map((r) => r.id), ["new", "mid-1", "mid-2", "old"]);
+		assert.deepEqual(groupMistakes(dated, "type")[0]!.records.map((r) => r.id), ["new", "mid-1", "mid-2", "old"]);
 	});
 	it("only states a pattern when two share a trap", () => {
 		assert.equal(patternLine([records[2]!], "errorType"), null);

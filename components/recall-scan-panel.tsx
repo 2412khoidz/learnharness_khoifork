@@ -1,13 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { MistakeRecord, RecallScanState } from "@/src/core";
+import { presentMistakeAnalysis, type MistakeRecord, type RecallScanState } from "@/src/core";
 import { ToolContentResponse } from "@/components/ai-elements/message";
+import { PageControls } from "@/components/page-controls";
 import { RecallAssessmentEditor } from "@/components/recall-assessment-editor";
 import { RecallFsrsReview } from "@/components/recall-fsrs-review";
 
 const labels: Record<string, string> = { correct: "Correct", partial: "Partly correct", wrong: "Incorrect", dont_know: "Did not know", uncertain: "Needs review" };
 const PAGE_SIZE = 20;
+const answerTimeMs = (iso?: string) => {
+	const ms = iso ? Date.parse(iso) : NaN;
+	return Number.isFinite(ms) ? ms : 0;
+};
 
 /** Historical grading is separate from saving: the learner reviews every proposed entry. */
 export function RecallScanPanel({ records, onSaved }: { records: MistakeRecord[]; onSaved: () => void }) {
@@ -42,14 +47,33 @@ export function RecallScanPanel({ records, onSaved }: { records: MistakeRecord[]
 		finally { setBusy(false); }
 	};
 	const known = useMemo(() => new Set(records.map((r) => r.id)), [records]);
-	const filtered = useMemo(() => (scan?.results ?? []).filter((r) => filter === "all" || r.verdict === filter), [scan, filter]);
-	const visible = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+	const filtered = useMemo(
+		() => (scan?.results ?? [])
+			.filter((r) => filter === "all" || r.verdict === filter)
+			.map((item, index) => ({ item, index, ts: answerTimeMs(item.draft?.answeredAt) }))
+			.sort((a, b) => b.ts - a.ts || a.index - b.index)
+			.map((entry) => entry.item),
+		[scan, filter],
+	);
 	const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+	const safePage = Math.min(page, pages - 1);
+	const visible = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+	const scanComplete = Boolean(scan && scan.status === "complete" && scan.results.length >= scan.total);
 	return (
 		<section className="space-y-3 rounded-xl border bg-card p-4" aria-label="Free-recall review">
 			<div className="flex flex-wrap items-start justify-between gap-3">
 				<div><h2 className="font-medium">Review past free-recall answers</h2><p className="mt-1 text-xs text-muted-foreground">AI reviews saved answers and tutor feedback in batches. Review the results and select entries before saving them to Mistakes.</p></div>
-				{scan?.status === "running" ? <button disabled={busy} onClick={() => void action("pause")} className="rounded-md border px-3 py-1.5 text-xs">Pause</button> : <button disabled={busy || !scan} onClick={() => void action("start")} className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground">{scan && scan.results.length > 0 ? "Resume scan" : "Scan free recall with AI"}</button>}
+				{scan?.status === "running" ? (
+					<button disabled={busy} onClick={() => void action("pause")} className="rounded-md border px-3 py-1.5 text-xs">Pause</button>
+				) : (
+					<button
+						disabled={busy || !scan}
+						onClick={() => void action("start")}
+						className={scanComplete ? "rounded-md border px-3 py-1.5 text-xs hover:bg-accent" : "rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground"}
+					>
+						{scanComplete ? "Check for new answers" : scan && scan.results.length > 0 ? "Resume scan" : "Scan free recall with AI"}
+					</button>
+				)}
 			</div>
 			<p className="text-xs text-muted-foreground" role="status">{scan ? `${scan.status}: ${scan.results.length} / ${scan.total} answers assessed` : "Loading scan…"}. The configured analyst model receives the relevant saved answers; scanning can take time and use model quota.</p>
 			<button type="button" onClick={() => setShowFsrs((value) => !value)} className="rounded-md border px-3 py-1.5 text-xs">{showFsrs ? "Close FSRS review" : "Review recall for FSRS"}</button>
@@ -65,19 +89,19 @@ export function RecallScanPanel({ records, onSaved }: { records: MistakeRecord[]
 				<div className="space-y-2">{visible.map((result) => {
 					const eligible = result.verdict === "partial" || result.verdict === "wrong" || result.verdict === "dont_know";
 					return <details key={result.id} className="rounded-lg border bg-background p-2.5 text-xs">
-						<summary className="cursor-pointer"><strong>{labels[result.verdict]}</strong> · {result.sessionTitle}<ToolContentResponse className="mt-1">{result.draft.question}</ToolContentResponse></summary>
+						<summary className="cursor-pointer"><strong>{labels[result.verdict]}</strong> · {result.sessionTitle}<ToolContentResponse className="mt-1">{presentMistakeAnalysis(result.draft.question)}</ToolContentResponse></summary>
 						<div className="mt-2 space-y-2">
-							<div><strong>Your answer:</strong><ToolContentResponse>{result.draft.yourAnswer}</ToolContentResponse></div>
-							{result.strengths && <div><strong>What was right:</strong><ToolContentResponse>{result.strengths}</ToolContentResponse></div>}
-							{result.missing && <div><strong>What was missing:</strong><ToolContentResponse>{result.missing}</ToolContentResponse></div>}
-							{result.correction && <div><strong>Correction:</strong><ToolContentResponse>{result.correction}</ToolContentResponse></div>}
-							<div><strong>Evidence:</strong><ToolContentResponse>{result.evidence}</ToolContentResponse></div>
+							<div><strong>Your answer:</strong><ToolContentResponse>{presentMistakeAnalysis(result.draft.yourAnswer)}</ToolContentResponse></div>
+							{result.strengths && <div><strong>What was right:</strong><ToolContentResponse>{presentMistakeAnalysis(result.strengths)}</ToolContentResponse></div>}
+							{result.missing && <div><strong>What was missing:</strong><ToolContentResponse>{presentMistakeAnalysis(result.missing)}</ToolContentResponse></div>}
+							{result.correction && <div><strong>Correction:</strong><ToolContentResponse>{presentMistakeAnalysis(result.correction)}</ToolContentResponse></div>}
+							<div><strong>Evidence:</strong><ToolContentResponse>{presentMistakeAnalysis(result.evidence)}</ToolContentResponse></div>
 							<RecallAssessmentEditor id={result.id} verdict={result.verdict} />
 							{known.has(result.id) ? <p>Already saved to Mistakes.</p> : eligible ? <label className="inline-flex items-center gap-2"><input type="checkbox" checked={selected.has(result.id)} onChange={(e) => setSelected((prev) => { const next = new Set(prev); if (e.target.checked) next.add(result.id); else next.delete(result.id); return next; })} /> Save this assessment</label> : <p className="text-muted-foreground">This assessment is not a confirmed mistake.</p>}
 						</div>
 					</details>;
 				})}</div>
-				<div className="flex items-center gap-3 text-xs"><button disabled={page === 0} onClick={() => setPage((p) => p - 1)} className="disabled:opacity-40">Previous</button><span>{Math.min(page + 1, pages)} / {pages}</span><button disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)} className="disabled:opacity-40">Next</button></div>
+				<PageControls page={safePage} totalPages={pages} onPageChange={setPage} />
 			</>}
 		</section>
 	);

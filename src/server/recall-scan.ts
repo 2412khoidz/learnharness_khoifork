@@ -54,9 +54,13 @@ const assessmentSchema = Type.Object({
 	items: Type.Array(Type.Object({
 		id: Type.String(),
 		verdict: Type.Union(["correct", "partial", "wrong", "dont_know", "uncertain"].map((s) => Type.Literal(s)) as never),
-		strengths: Type.String(), missing: Type.String(), correction: Type.String(), evidence: Type.String(),
+		strengths: Type.String({ description: "What the learner got right (put all math in $...$)." }),
+		missing: Type.String({ description: "What was missing or flawed in the learner's response (put all math in $...$)." }),
+		correction: Type.String({ description: "Clear mathematical/conceptual correction (put all math in $...$)." }),
+		evidence: Type.String({ description: "Specific quote/evidence from the learner's answer (put all math in $...$)." }),
 		errorType: Type.Union(ERROR_TYPES.map((s) => Type.Literal(s)) as never),
-		topic: Type.String(), rule: Type.String(),
+		topic: Type.String({ description: "Short topic label (2-5 words)." }),
+		rule: Type.String({ description: "One concrete, reusable study takeaway written for the learner next time (never a grading rubric). Put all math in $...$." }),
 	})),
 });
 
@@ -72,7 +76,7 @@ export async function assessRecallBatch(batch: ReturnType<typeof candidates>, en
 	const response = await runSubmitAgent<{ items: Assessment[] }>({
 		role: "analyst", toolName: "submit_recall_assessments", toolDescription: "Return one grounded assessment for every supplied answer.",
 		parameters: assessmentSchema, fill: (v) => v as { items: Assessment[] }, engine, signal, ...(auditContext ? { maxTurns: 2 } : {}),
-		systemPrompt: "Assess each free-recall answer carefully using the question, committed answer, learner response and subsequent tutor feedback. Distinguish correct, partial, wrong, dont_know and uncertain. Give what was correct, what was missing, a correction, and specific evidence from the learner's answer; never invent reasoning or assume all answers are wrong. If the evidence or answer key is insufficient, use uncertain. Judge only what the original question explicitly asks. Do not infer that a learner stated a step they did not state, and do not treat a subsequent lesson as a missing requirement. Tutor feedback and previous assessments are evidence, not infallible; review them independently. Return every exact id once. Use the learner's language. For correct or uncertain answers, errorType may be knowledge-gap but do not label them mistakes.",
+		systemPrompt: "Assess each free-recall answer carefully using the question, committed answer, learner response and subsequent tutor feedback. Distinguish correct, partial, wrong, dont_know and uncertain. Give what was correct, what was missing, a correction, and specific evidence from the learner's answer; never invent reasoning or assume all answers are wrong. If the evidence or answer key is insufficient, use uncertain. Judge only what the original question explicitly asks. Do not infer that a learner stated a step they did not state, and do not treat a subsequent lesson as a missing requirement. Tutor feedback and previous assessments are evidence, not infallible; review them independently. Return every exact id once. Use the learner's language. Put all mathematical notation in LaTeX ($...$). Write rule as one concrete, reusable study note for the learner to remember next time (never write grading instructions or meta-rubrics). For correct or uncertain answers, errorType may be knowledge-gap but do not label them mistakes.",
 		prompt: JSON.stringify(batch.map(({ draft, feedback }) => ({ id: draft.id, question: draft.question, answer: draft.yourAnswer, committed: draft.correctAnswer, thinking: draft.thinking, tutorFeedback: feedback, ...(auditContext?.has(draft.id) ? { previousAssessment: auditContext.get(draft.id) } : {}) }))),
 		onStep: (usage) => onUsage?.(usage), neverSubmitted: NO_ASSESSMENT,
 		validate: (value) => {

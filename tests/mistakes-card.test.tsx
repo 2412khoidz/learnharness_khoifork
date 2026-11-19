@@ -148,4 +148,25 @@ describe("AnsweredCard mistake analysis", () => {
 			assert.match(host.innerHTML, /mu N is the ceiling\./);
 		} finally { await act(async () => root.unmount()); host.remove(); }
 	});
+
+	it("renders bare LaTeX commands in Why and Assessment details via KaTeX", async () => {
+		const bareRecord = record({
+			id: "c1:e-bare",
+			origin: "explain",
+			analysis: {
+				errorType: "incomplete-reasoning",
+				topic: "Độc lập tuyến tính vectơ riêng",
+				whatYouDid: "Nhân với \\alpha chưa khử ẩn.",
+				correct: "Do \\alpha \\neq \\beta và v \\neq 0 nên x = y = 0.",
+				rule: "Khử ẩn bằng hai hệ số \\alpha \\neq \\beta.",
+			},
+		});
+		const html = await render(new Map([["c1:e-bare", bareRecord]]), "c1:e-bare", true, explainAnswer);
+		const parsed = parseHTML(`<html><body>${html}</body></html>`).document;
+		const texAnnotations = [...parsed.querySelectorAll('annotation[encoding="application/x-tex"]')].map((n) => n.textContent);
+		assert.ok(parsed.querySelectorAll(".katex").length >= 3, "bare LaTeX must render as KaTeX spans");
+		assert.ok(texAnnotations.some((t) => t?.includes("\\alpha \\neq \\beta")));
+		assert.ok(texAnnotations.some((t) => t?.includes("v \\neq 0")));
+		assert.equal(parsed.querySelectorAll(".katex-error").length, 0);
+	});
 });

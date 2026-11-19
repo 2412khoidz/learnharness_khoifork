@@ -2,7 +2,8 @@
 
 import { useContext, useState } from "react";
 import { MistakesContext, RecallGradesContext } from "@/components/mistakes-context";
-import { ERROR_TYPE_LABELS } from "@/src/core";
+import { ERROR_TYPE_LABELS, answerForPresentation, parseAskInput, parseQuizInput, presentMistakeAnalysis } from "@/src/core";
+import type { QuestionAnswerData } from "@/src/core";
 import { useTranscriptState } from "./transcript-row-state";
 import { ConfidenceRail } from "@/components/confidence-rail";
 import { GlyphMark } from "@/components/ui/glyph-mark";
@@ -12,8 +13,6 @@ import { ThinkingBlock } from "@/components/thinking-block";
 import { PathText } from "@/components/file-path-chip";
 import { cn } from "@/lib/utils";
 import { ToolContentResponse } from "@/components/ai-elements/message";
-import type { QuestionAnswerData } from "@/src/core";
-import { answerForPresentation, parseAskInput, parseQuizInput } from "@/src/core";
 
 /**
  * Static rendering of an answered question (tool part in `output-available`).
@@ -229,15 +228,15 @@ export function AnsweredCard({
 			{isExplain && answer.committed && (
 				<div className="mt-3 rounded-lg bg-muted py-2 text-sm text-muted-foreground">
 					<span className="font-medium text-foreground">The answer: </span>
-					<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{answer.committed}</ToolContentResponse>
+					<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{presentMistakeAnalysis(answer.committed)}</ToolContentResponse>
 				</div>
 			)}
 			{isExplain && recallGrade && (recallGrade.strengths || recallGrade.missing || recallGrade.correction) && (
 				<details className="mt-3 rounded-lg border px-3 py-2 text-sm" data-testid="recall-assessment">
 					<summary className="cursor-pointer font-medium">Assessment details</summary>
-					{recallGrade.strengths && <div className="mt-2"><strong>What you got right: </strong><ToolContentResponse>{recallGrade.strengths}</ToolContentResponse></div>}
-					{recallGrade.missing && <div className="mt-2"><strong>What was missing: </strong><ToolContentResponse>{recallGrade.missing}</ToolContentResponse></div>}
-					{recallGrade.correction && <div className="mt-2"><strong>Correction: </strong><ToolContentResponse>{recallGrade.correction}</ToolContentResponse></div>}
+					{recallGrade.strengths && <div className="mt-2"><strong>What you got right: </strong><ToolContentResponse>{presentMistakeAnalysis(recallGrade.strengths)}</ToolContentResponse></div>}
+					{recallGrade.missing && <div className="mt-2"><strong>What was missing: </strong><ToolContentResponse>{presentMistakeAnalysis(recallGrade.missing)}</ToolContentResponse></div>}
+					{recallGrade.correction && <div className="mt-2"><strong>Correction: </strong><ToolContentResponse>{presentMistakeAnalysis(recallGrade.correction)}</ToolContentResponse></div>}
 				</details>
 			)}
 
@@ -292,10 +291,10 @@ export function AnsweredCard({
 					{whyOpen && analysis && mistake?.kind === "unanswered" && (
 						<div className="mt-1.5 rounded-lg border border-border/60 px-3 py-2.5 text-sm" data-testid="mistake-why">
 							<div className="text-xs text-muted-foreground">{analysis.topic}</div>
-							<ToolContentResponse className="mt-1.5 text-foreground">{analysis.correct}</ToolContentResponse>
+							<ToolContentResponse className="mt-1.5 text-foreground">{presentMistakeAnalysis(analysis.correct)}</ToolContentResponse>
 							<div className="mt-1.5 text-foreground">
 								<span className="font-medium text-muted-foreground">Next time: </span>
-								<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{analysis.rule}</ToolContentResponse>
+								<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{presentMistakeAnalysis(analysis.rule)}</ToolContentResponse>
 							</div>
 						</div>
 					)}
@@ -307,11 +306,11 @@ export function AnsweredCard({
 								</span>
 								<span className="text-muted-foreground">{analysis.topic}</span>
 							</div>
-							<ToolContentResponse className="mt-1.5 text-foreground">{analysis.whatYouDid}</ToolContentResponse>
-							<ToolContentResponse className="mt-1 text-foreground">{analysis.correct}</ToolContentResponse>
+							<ToolContentResponse className="mt-1.5 text-foreground">{presentMistakeAnalysis(analysis.whatYouDid)}</ToolContentResponse>
+							<ToolContentResponse className="mt-1 text-foreground">{presentMistakeAnalysis(analysis.correct)}</ToolContentResponse>
 							<div className="mt-1.5 text-foreground">
 								<span className="font-medium text-muted-foreground">Next time: </span>
-								<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{analysis.rule}</ToolContentResponse>
+								<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{presentMistakeAnalysis(analysis.rule)}</ToolContentResponse>
 							</div>
 						</div>
 					)}
@@ -320,7 +319,7 @@ export function AnsweredCard({
 							<span className="font-medium text-muted-foreground">Why: </span>
 							{/* Keep the first paragraph beside the label, not every paragraph:
 							   later paragraphs must retain their recovered document structure. */}
-							<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{answer.explanation}</ToolContentResponse>
+							<ToolContentResponse className="inline [&>p:first-child]:inline [&>p:first-child]:m-0">{presentMistakeAnalysis(answer.explanation)}</ToolContentResponse>
 						</div>
 					)}
 					{whyOpen && !analysis && !answer.explanation && mistake?.status === "pending" && (

@@ -9,7 +9,7 @@ import { createRoot } from "react-dom/client";
 import { InteractionLayersProvider } from "../components/interaction-layers.tsx";
 import { PathInput } from "../components/path-input.tsx";
 import { readPathInput, restorePathSelection } from "../components/path-input-dom.ts";
-import { PhoneUploadButton } from "../components/phone-upload-button.tsx";
+import { PhoneUploadButton, resetPhoneUploadCoordinatorForTests } from "../components/phone-upload-button.tsx";
 import { Composer } from "../components/composer.tsx";
 import { QuestionDock } from "../components/question-dock.tsx";
 import { PracticeDock } from "../components/practice-dock.tsx";
@@ -74,6 +74,7 @@ async function mount(element: React.ReactElement) {
 
 afterEach(async () => {
 	globalThis.fetch = originalFetch;
+	resetPhoneUploadCoordinatorForTests();
 	for (const fn of cleanups.splice(0).reverse()) await fn();
 });
 
@@ -424,5 +425,99 @@ describe("PhoneUploadButton QR modal and docks", () => {
 			await new Promise((r) => setTimeout(r, 30));
 		});
 		assert.equal(dom.document.body.querySelector('[data-testid="phone-upload-dialog"]'), null);
+	});
+
+	it("persistent QR session across remounted docks auto-inserts only new photos and allows explicit re-insert of earlier photos", async () => {
+		const uploads = [
+			{
+				index: 0,
+				path: "C:\\data\\attachments\\photo1.jpg",
+				filename: "photo1.jpg",
+				mimeType: "image/jpeg",
+				size: 3100,
+				receivedAt: Date.now(),
+			},
+		];
+		const sinceCalls: number[] = [];
+		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url === "/api/attachments/phone" && init?.method === "POST") {
+				return new Response(JSON.stringify({
+					sessionId: "sess-persist",
+					token: "tok-persist",
+					port: 49999,
+					defaultAddress: "192.168.1.42",
+					addresses: [{ address: "192.168.1.42", interfaceName: "Wi-Fi", recommended: true }],
+					expiresAt: Date.now() + 60_000,
+				}), { status: 200 });
+			}
+			if (url.startsWith("/api/attachments/phone?sessionId=sess-persist") && (!init?.method || init.method === "GET")) {
+				const since = Number(new URL(`http://localhost${url}`).searchParams.get("since") ?? "0");
+				sinceCalls.push(since);
+				return new Response(JSON.stringify({
+					active: true,
+					expiresAt: Date.now() + 60_000,
+					uploads: uploads.slice(since),
+					nextIndex: uploads.length,
+				}), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		}) as typeof fetch;
+
+		// Turn 1: take photo1 inside dock 1, then close via Done and unmount dock 1.
+		const dock1 = await mount(<InputHarness />);
+		await act(async () => {
+			dock1.host.querySelector<HTMLButtonElement>('[data-testid="phone-upload"]')!.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 800));
+		});
+		const editor1 = dock1.host.querySelector<HTMLDivElement>("[data-file-path-input]")!;
+		assert.equal(readPathInput(editor1), "`C:\\data\\attachments\\photo1.jpg`");
+		const done1 = Array.from(dock1.dom.document.body.querySelectorAll("button")).find((b) => b.textContent?.includes("Done"))!;
+		await act(async () => { done1.click(); });
+		await dock1.dispose();
+
+		// Phone captures photo2 during turn 2.
+		uploads.push({
+			index: 1,
+			path: "C:\\data\\attachments\\photo2.jpg",
+			filename: "photo2.jpg",
+			mimeType: "image/jpeg",
+			size: 4200,
+			receivedAt: Date.now(),
+		});
+
+		// Turn 2: fresh dock mounts with persistent session indicator already lit.
+		const dock2 = await mount(<InputHarness />);
+		assert.ok(dock2.host.querySelector('[data-testid="phone-connected-dot"]'));
+		await act(async () => {
+			dock2.host.querySelector<HTMLButtonElement>('[data-testid="phone-upload"]')!.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
+		await act(async () => {
+			await new Promise((r) => setTimeout(r, 800));
+		});
+
+		const editor2 = dock2.host.querySelector<HTMLDivElement>("[data-file-path-input]")!;
+		assert.ok(sinceCalls.every((s, idx) => idx === 0 || s >= 1), `turn 2 poll must advance since cursor (${sinceCalls.join(",")})`);
+		assert.equal(readPathInput(editor2), "`C:\\data\\attachments\\photo2.jpg`", "earlier photo1 must NOT be auto-inserted into turn 2");
+
+		// User explicitly picks earlier photo1 with 1 click -> inserts alongside photo2.
+		const dialog2 = dock2.dom.document.body.querySelector('[data-testid="phone-upload-dialog"]')!;
+		const earlierBox = dialog2.querySelector('[data-testid="phone-upload-earlier"]')!;
+		assert.match(earlierBox.textContent ?? "", /photo1\.jpg/);
+		const reinsertBtn = dialog2.querySelector<HTMLButtonElement>('[data-testid="phone-insert-0"]')!;
+		await act(async () => { reinsertBtn.click(); });
+		assert.equal(
+			readPathInput(editor2),
+			"`C:\\data\\attachments\\photo2.jpg` `C:\\data\\attachments\\photo1.jpg`",
+		);
+		const done2 = Array.from(dialog2.querySelectorAll("button")).find((b) => b.textContent?.includes("Done"))!;
+		await act(async () => {
+			done2.click();
+			await new Promise((r) => setTimeout(r, 30));
+		});
 	});
 });

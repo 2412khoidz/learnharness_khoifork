@@ -17,14 +17,17 @@ import {
 	filterMistakes,
 	groupMistakes,
 	presentMistakeAnalysis,
+	sortMistakesNewestFirst,
 	summarizeMistakes,
 	type ErrorType,
+	type MistakeGroup,
 	type MistakeGroupBy,
 	type MistakeKind,
 	type MistakeRecord,
 } from "@/src/core";
 import { ToolContentResponse } from "@/components/ai-elements/message";
 import { BrailleSpinner } from "@/components/braille-spinner";
+import { PageControls } from "@/components/page-controls";
 import { TopBar } from "@/components/top-bar";
 import { useServerEvent } from "@/components/server-events";
 import { cn } from "@/lib/utils";
@@ -54,16 +57,42 @@ const KIND_ACCENT: Record<MistakeKind, string> = {
 	unanswered: "border-l-warning/60",
 	problem: "border-l-primary/60",
 };
-const GROUPS: { by: MistakeGroupBy; label: string }[] = [
+type MistakeTab = "mistakes" | "recall";
+type ViewBy = "recent" | MistakeGroupBy;
+
+const PAGE_SIZE = 20;
+const GROUPS: { by: ViewBy; label: string }[] = [
+	{ by: "recent", label: "Recent" },
 	{ by: "type", label: "Error type" },
 	{ by: "session", label: "Session" },
 	{ by: "topic", label: "Topic" },
 ];
 
-export function MistakesPage() {
+function paginateGroups(groups: readonly MistakeGroup[], page: number, pageSize: number): MistakeGroup[] {
+	let remainingSkip = page * pageSize;
+	let remainingTake = pageSize;
+	const sliced: MistakeGroup[] = [];
+	for (const group of groups) {
+		if (remainingTake <= 0) break;
+		if (remainingSkip >= group.records.length) {
+			remainingSkip -= group.records.length;
+			continue;
+		}
+		const start = remainingSkip;
+		const end = Math.min(group.records.length, start + remainingTake);
+		sliced.push({ ...group, records: group.records.slice(start, end) });
+		remainingSkip = 0;
+		remainingTake -= end - start;
+	}
+	return sliced;
+}
+
+export function MistakesPage({ showTopBar = true }: { showTopBar?: boolean } = {}) {
 	const [records, setRecords] = useState<MistakeRecord[] | null>(null);
 	const [progress, setProgress] = useState<Progress>({ active: 0, done: 0, total: 0 });
-	const [by, setBy] = useState<MistakeGroupBy>("type");
+	const [tab, setTab] = useState<MistakeTab>("mistakes");
+	const [by, setBy] = useState<ViewBy>("recent");
+	const [page, setPage] = useState(0);
 	const [query, setQuery] = useState("");
 	const [errorType, setErrorType] = useState<ErrorType | "">("");
 	const [kind, setKind] = useState<MistakeKind | "">("");
@@ -106,8 +135,18 @@ export function MistakesPage() {
 		if (changeTimer.current) clearTimeout(changeTimer.current);
 	}, []);
 
-	const filtered = useMemo(() => filterMistakes(records ?? [], { query, errorType, kind, chatId }), [records, query, errorType, kind, chatId]);
-	const groups = useMemo(() => groupMistakes(filtered, by), [filtered, by]);
+	const filtered = useMemo(() => sortMistakesNewestFirst(filterMistakes(records ?? [], { query, errorType, kind, chatId })), [records, query, errorType, kind, chatId]);
+	const groups = useMemo(() => (by === "recent" ? [] : groupMistakes(filtered, by)), [filtered, by]);
+	const totalItems = by === "recent" ? filtered.length : groups.reduce((sum, group) => sum + group.records.length, 0);
+	const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+	const safePage = Math.min(page, totalPages - 1);
+	const pageRecords = useMemo(() => (by === "recent" ? filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE) : []), [by, filtered, safePage]);
+	const pageGroups = useMemo(() => (by === "recent" ? [] : paginateGroups(groups, safePage, PAGE_SIZE)), [by, groups, safePage]);
+	const visiblePageIds = useMemo(
+		() => (by === "recent" ? pageRecords.map((r) => r.id) : pageGroups.flatMap((g) => g.records.map((r) => r.id))),
+		[by, pageRecords, pageGroups],
+	);
+	const groupTotalsByKey = useMemo(() => new Map(groups.map((g) => [g.key, g.records.length])), [groups]);
 	const summary = useMemo(() => summarizeMistakes(records ?? []), [records]);
 	const sessions = useMemo(() => {
 		const seen = new Map<string, string>();
@@ -163,58 +202,100 @@ export function MistakesPage() {
 	};
 
 	const analyzing = progress.active > 0;
-	const allVisibleOpen = filtered.length > 0 && filtered.every((r) => open.has(r.id));
+	const allVisibleOpen = visiblePageIds.length > 0 && visiblePageIds.every((id) => open.has(id));
 
 	return (
 		<div className="flex h-dvh flex-col" data-testid="mistakes-page">
-			<TopBar>
-				<span className="flex items-center gap-1.5 font-ui text-sm font-medium">
-					<CircleAlertIcon className="size-4 text-primary" /> Mistakes
-				</span>
-			</TopBar>
+			{showTopBar && (
+				<TopBar>
+					<span className="flex items-center gap-1.5 font-ui text-sm font-medium">
+						<CircleAlertIcon className="size-4 text-primary" /> Mistakes
+					</span>
+				</TopBar>
+			)}
 
 			<div className="min-h-0 flex-1 overflow-y-auto">
 				<div className="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6">
-					<div className="flex flex-wrap items-start justify-between gap-3">
-						<p className="max-w-xl text-sm text-muted-foreground">
-							Every miss, with why. Read the pattern, then the rule that prevents it next time.
-						</p>
-						<div className="flex items-center gap-2">
-							{analyzing && (
-								<>
-									<span data-testid="mistakes-progress" className="font-ui text-xs text-muted-foreground">
-										Analyzing {Math.min(progress.done + 1, progress.total)} of {progress.total}…
-									</span>
+					<div className="flex flex-wrap items-center gap-2 border-b border-border/70 pb-3" role="tablist" aria-label="Mistakes sections">
+						<button
+							type="button"
+							role="tab"
+							aria-selected={tab === "mistakes"}
+							onClick={() => setTab("mistakes")}
+							data-testid="mistakes-tab-list"
+							className={cn(
+								"rounded-md px-3 py-1.5 font-ui text-xs transition-colors",
+								tab === "mistakes" ? "bg-primary text-primary-foreground" : "border bg-card text-muted-foreground hover:text-foreground",
+							)}
+						>
+							Mistakes{records !== null ? ` (${summary.total})` : ""}
+						</button>
+						<button
+							type="button"
+							role="tab"
+							aria-selected={tab === "recall"}
+							onClick={() => setTab("recall")}
+							data-testid="mistakes-tab-recall"
+							className={cn(
+								"rounded-md px-3 py-1.5 font-ui text-xs transition-colors",
+								tab === "recall" ? "bg-primary text-primary-foreground" : "border bg-card text-muted-foreground hover:text-foreground",
+							)}
+						>
+							Recall Review & FSRS
+						</button>
+					</div>
+
+					{tab === "recall" ? (
+						<div className="flex flex-col gap-3" role="tabpanel" aria-label="Recall Review & FSRS">
+							<RecallScanPanel records={records ?? []} onSaved={() => void load()} />
+							<p className="text-xs text-muted-foreground">
+								Need to re-audit AI grades, group weak topics, or calibrate your study plan? Open{" "}
+								<Link href="/planner" className="underline underline-offset-2 hover:text-foreground">
+									Study Planner → Learning Capacity
+								</Link>
+								.
+							</p>
+						</div>
+					) : (
+						<>
+							<div className="flex flex-wrap items-start justify-between gap-3">
+								<p className="max-w-xl text-sm text-muted-foreground">
+									Every miss, with why (newest first). Read the pattern, then the rule that prevents it next time.
+								</p>
+								<div className="flex items-center gap-2">
+									{analyzing && (
+										<>
+											<span data-testid="mistakes-progress" className="font-ui text-xs text-muted-foreground">
+												Analyzing {Math.min(progress.done + 1, progress.total)} of {progress.total}…
+											</span>
+											<button
+												type="button"
+												onClick={() => void fetch("/api/mistakes/cancel", { method: "POST" })}
+												className="rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+											>
+												Cancel
+											</button>
+										</>
+									)}
 									<button
 										type="button"
-										onClick={() => void fetch("/api/mistakes/cancel", { method: "POST" })}
-										className="rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+										data-testid="mistakes-scan"
+										disabled={busy}
+										onClick={() => void scan(false)}
+										className="flex items-center gap-1.5 rounded-md border bg-card px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-accent disabled:opacity-40"
 									>
-										Cancel
+										<SearchIcon className="size-3.5 text-muted-foreground" />
+										Scan past sessions
 									</button>
-								</>
-							)}
-							<button
-								type="button"
-								data-testid="mistakes-scan"
-								disabled={busy}
-								onClick={() => void scan(false)}
-								className="flex items-center gap-1.5 rounded-md border bg-card px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-accent disabled:opacity-40"
-							>
-								<SearchIcon className="size-3.5 text-muted-foreground" />
-								Scan past sessions
-							</button>
-						</div>
-					</div>
+								</div>
+							</div>
 
-					<div className="grid grid-cols-2 gap-2 sm:grid-cols-4" data-testid="mistakes-summary">
-						<StatTile label="Total" value={summary.total} />
-						<StatTile label="Missed" value={summary.missed} />
-						<StatTile label="Unanswered" value={summary.unanswered} />
-						<StatTile label="Problems" value={summary.problems} />
-					</div>
-
-					<RecallScanPanel records={records ?? []} onSaved={() => void load()} />
+							<div className="grid grid-cols-2 gap-2 sm:grid-cols-4" data-testid="mistakes-summary">
+								<StatTile label="Total" value={summary.total} />
+								<StatTile label="Missed" value={summary.missed} />
+								<StatTile label="Unanswered" value={summary.unanswered} />
+								<StatTile label="Problems" value={summary.problems} />
+							</div>
 
 					{scanNote && (
 						<div data-testid="mistakes-scan-note" className="flex flex-wrap items-center gap-3 rounded-xl border bg-card px-4 py-3 text-sm">
@@ -258,7 +339,7 @@ export function MistakesPage() {
 								<input
 									data-testid="mistakes-search"
 									value={query}
-									onChange={(e) => setQuery(e.target.value)}
+									onChange={(e) => { setQuery(e.target.value); setPage(0); }}
 									placeholder="Search questions, topics, rules…"
 									aria-label="Search mistakes"
 									className="lh-input h-8 w-full rounded-md border bg-background pl-8 pr-2 text-xs outline-none placeholder:text-muted-foreground/60 focus:border-ring"
@@ -275,7 +356,7 @@ export function MistakesPage() {
 										key={g.by}
 										type="button"
 										aria-pressed={by === g.by}
-										onClick={() => setBy(g.by)}
+										onClick={() => { setBy(g.by); setPage(0); }}
 										className={cn(
 											"rounded-sm px-2 py-1 font-ui text-[11px] uppercase tracking-wider transition-colors",
 											by === g.by ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
@@ -288,7 +369,7 @@ export function MistakesPage() {
 							<select
 								aria-label="Filter by kind"
 								value={kind}
-								onChange={(e) => setKind(e.target.value as MistakeKind | "")}
+								onChange={(e) => { setKind(e.target.value as MistakeKind | ""); setPage(0); }}
 								className="h-8 rounded-md border bg-background px-2 text-xs"
 							>
 								<option value="">All kinds</option>
@@ -301,7 +382,7 @@ export function MistakesPage() {
 							<select
 								aria-label="Filter by error type"
 								value={errorType}
-								onChange={(e) => setErrorType(e.target.value as ErrorType | "")}
+								onChange={(e) => { setErrorType(e.target.value as ErrorType | ""); setPage(0); }}
 								className="h-8 rounded-md border bg-background px-2 text-xs"
 							>
 								<option value="">All error types</option>
@@ -314,7 +395,7 @@ export function MistakesPage() {
 							<select
 								aria-label="Filter by session"
 								value={chatId}
-								onChange={(e) => setChatId(e.target.value)}
+								onChange={(e) => { setChatId(e.target.value); setPage(0); }}
 								className="h-8 max-w-44 rounded-md border bg-background px-2 text-xs"
 							>
 								<option value="">All sessions</option>
@@ -327,7 +408,7 @@ export function MistakesPage() {
 							<button
 								type="button"
 								data-testid="mistakes-expand-all"
-								onClick={() => setOpen(allVisibleOpen ? new Set() : new Set(filtered.map((r) => r.id)))}
+								onClick={() => setOpen(allVisibleOpen ? new Set() : new Set(visiblePageIds))}
 								className="ml-auto rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 							>
 								{allVisibleOpen ? "Collapse all" : "Expand all"}
@@ -341,7 +422,7 @@ export function MistakesPage() {
 										key={type}
 										type="button"
 										aria-pressed={errorType === type}
-										onClick={() => setErrorType((cur) => (cur === type ? "" : type))}
+										onClick={() => { setErrorType((cur) => (cur === type ? "" : type)); setPage(0); }}
 										className={cn(
 											"rounded-full border px-2 py-0.5 text-[11px] transition-colors hover:bg-accent",
 											errorType === type ? "border-primary bg-accent text-foreground" : "border-border/70 text-muted-foreground",
@@ -389,15 +470,25 @@ export function MistakesPage() {
 										setErrorType("");
 										setKind("");
 										setChatId("");
+										setPage(0);
 									}}
 									className="ml-2 text-foreground underline-offset-2 hover:underline"
 								>
 									Clear filters
 								</button>
 							</div>
+						) : by === "recent" ? (
+							<div className="flex flex-col gap-3">
+								<div className="flex flex-col gap-2">
+									{pageRecords.map((r) => (
+										<MistakeCard key={r.id} record={r} open={open.has(r.id)} onToggle={() => toggle(r.id)} onDelete={() => void remove(r.id)} onRetry={() => void retry(r.id)} />
+									))}
+								</div>
+								<PageControls page={safePage} totalPages={totalPages} onPageChange={setPage} />
+							</div>
 						) : (
 							<div className="flex flex-col gap-5">
-								{groups.map((g) => {
+								{pageGroups.map((g) => {
 									const collapsed = closedGroups.has(g.key);
 									return (
 										<section key={g.key} data-testid="mistakes-group" className="flex flex-col gap-2">
@@ -410,7 +501,7 @@ export function MistakesPage() {
 												>
 													{collapsed ? <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" /> : <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground" />}
 													<span className="font-title text-lg tracking-tight text-foreground">{g.label}</span>
-													<span className="rounded-full border border-border/60 px-1.5 py-0.5 font-ui text-[10px] tabular-nums text-muted-foreground">{g.records.length}</span>
+													<span className="rounded-full border border-border/60 px-1.5 py-0.5 font-ui text-[10px] tabular-nums text-muted-foreground">{groupTotalsByKey.get(g.key) ?? g.records.length}</span>
 													{g.pattern && <span className="ml-1 hidden min-w-0 truncate font-ui text-[11px] text-muted-foreground/80 sm:block" data-testid="mistakes-pattern">{g.pattern}</span>}
 												</button>
 											</div>
@@ -424,9 +515,12 @@ export function MistakesPage() {
 										</section>
 									);
 								})}
+								<PageControls page={safePage} totalPages={totalPages} onPageChange={setPage} />
 							</div>
 						)}
 					</div>
+						</>
+					)}
 				</div>
 			</div>
 		</div>
@@ -563,7 +657,7 @@ function AnswerPanel({ label, text }: { label: string; text: string }) {
 	return (
 		<div className="min-w-0 rounded-lg border border-border/60 bg-background/50 px-3 py-2">
 			<div className="font-ui text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
-			<ToolContentResponse className="mt-1 text-sm">{text}</ToolContentResponse>
+			<ToolContentResponse className="mt-1 text-sm">{presentMistakeAnalysis(text)}</ToolContentResponse>
 		</div>
 	);
 }
