@@ -1052,20 +1052,35 @@ function syncExamPrepProfilesIntoConfig(
 	date: string,
 ): { config: PlannerConfig; changed: boolean } {
 	const exams = signals.examPrep.config.exams ?? [];
-	if (exams.length === 0) return { config, changed: false };
-	const dismissed = new Set(config.dismissedExamProfileIds ?? []);
-	let changed = false;
-	const milestones = config.milestones.map((m) => ({
-		...m,
-		clusterIds: [...m.clusterIds],
-		syllabusTopics: m.syllabusTopics.map((t) => ({ ...t })),
-	}));
+	const activeExamIds = new Set(exams.map((ex) => ex.id));
+	const dismissedList = (config.dismissedExamProfileIds ?? []).filter((id) => activeExamIds.has(id));
+	const dismissed = new Set(dismissedList);
+	let changed = dismissedList.length !== (config.dismissedExamProfileIds ?? []).length;
+
+	const milestones = config.milestones
+		.filter((m) => !m.examProfileId || activeExamIds.has(m.examProfileId))
+		.map((m) => ({
+			...m,
+			clusterIds: [...m.clusterIds],
+			syllabusTopics: m.syllabusTopics.map((t) => ({ ...t })),
+		}));
+	if (milestones.length !== config.milestones.length) {
+		changed = true;
+	}
 
 	for (const ex of exams) {
 		if (dismissed.has(ex.id)) continue;
 		const scopeLabels = signals.examPrep.availableScopes
 			.filter((s) => ex.clusterIds.includes(s.id))
 			.map((s) => s.label);
+		const joinedScopes = scopeLabels.join(" + ");
+		const syncedSubject = (
+			scopeLabels.length === 0
+				? ex.title
+				: joinedScopes.length <= 80
+					? joinedScopes
+					: `${scopeLabels[0]} +${scopeLabels.length - 1}`
+		).slice(0, 80);
 		const dueDate = ex.date && isValidDateString(ex.date) ? ex.date : addDaysToDate(date, 21);
 		const existing = milestones.find((m) => m.examProfileId === ex.id || m.id === `ep_${ex.id}`);
 		if (!existing) {
@@ -1073,7 +1088,7 @@ function syncExamPrepProfilesIntoConfig(
 				id: `ep_${ex.id}`,
 				kind: /olympic|olp|contest|competition|hsg/i.test(ex.title) ? "competition" : "exam",
 				title: ex.title,
-				subject: scopeLabels[0] || ex.title,
+				subject: syncedSubject,
 				dueDate,
 				priority: ex.pace === "crash-course" ? 3 : 2,
 				cognitiveLoad: "heavy",
@@ -1095,9 +1110,16 @@ function syncExamPrepProfilesIntoConfig(
 				existing.dueDate = ex.date;
 				changed = true;
 			}
-			const mergedClusters = [...new Set([...existing.clusterIds, ...ex.clusterIds])];
-			if (mergedClusters.length !== existing.clusterIds.length) {
-				existing.clusterIds = mergedClusters;
+			const clustersChanged =
+				existing.clusterIds.length !== ex.clusterIds.length ||
+				existing.clusterIds.some((id, idx) => id !== ex.clusterIds[idx]);
+			if (clustersChanged) {
+				existing.clusterIds = [...ex.clusterIds];
+				changed = true;
+			}
+			const isAutoSynced = existing.id === `ep_${ex.id}` || existing.sourceSummary === "Synced from Exam Prep profile";
+			if (scopeLabels.length > 0 && (clustersChanged || isAutoSynced) && existing.subject !== syncedSubject) {
+				existing.subject = syncedSubject;
 				changed = true;
 			}
 			if (!existing.examProfileId) {
@@ -1109,7 +1131,7 @@ function syncExamPrepProfilesIntoConfig(
 
 	if (!changed) return { config, changed: false };
 	return {
-		config: sanitizePlannerConfig({ ...config, milestones }),
+		config: sanitizePlannerConfig({ ...config, milestones, dismissedExamProfileIds: dismissedList }),
 		changed: true,
 	};
 }
@@ -1156,6 +1178,15 @@ export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: str
 		signals,
 		aiAvailability: getPlannerAiAvailability(),
 	};
+}
+
+export function syncExamPrepToPlanner(opts?: PlannerReadOptions & { chatsDir?: string; date?: string }): PlannerSnapshotResponse {
+	const snap = readPlannerSnapshot(opts);
+	const filePath = opts?.plannerFile ?? defaultPlannerPath();
+	if (path.resolve(filePath) === path.resolve(defaultPlannerPath())) {
+		emit("planner-changed", {});
+	}
+	return snap;
 }
 
 /** Update only saved days whose actual exam commitments changed. Do not
@@ -1257,9 +1288,7 @@ export function patchPlannerConfig(
 	});
 
 	const signals = buildPlannerPersonalSignals(next, { ...opts, date, now });
-	const synced = patch.dismissedExamProfileIds !== undefined
-		? syncExamPrepProfilesIntoConfig(next, signals, date)
-		: { config: next, changed: false };
+	const synced = syncExamPrepProfilesIntoConfig(next, signals, date);
 	const resolvedNext = synced.config;
 	const examChanges = patch.examTimetable !== undefined ? reconcileExamPlans(resolvedNext, current.examTimetable, now) : undefined;
 	if (examChanges) resolvedNext.plans = examChanges.plans;
@@ -3468,21 +3497,137 @@ function coachJournalContext(config: PlannerConfig, message: string, date: strin
 	return { availableDates: dates, includedDates: [...mentioned].filter((d) => Boolean(config.logs[d])), logs: Object.fromEntries([...mentioned].filter((d) => Boolean(config.logs[d])).map((d) => [d, config.logs[d]])) };
 }
 
-function hasExplicitDeleteRequest(text: string): boolean {
-	return /\b(delete|remove|erase)\b|x[oó]a|gỡ|loại bỏ|hủy bỏ/i.test(text);
+function normalizeDeleteString(value: string): string {
+	return value
+		.toLocaleLowerCase()
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/đ/g, "d")
+		.replace(/[^a-z0-9]+/g, " ")
+		.trim();
 }
 
-function isExplicitDeleteTarget(text: string, title: string, peerTitles: readonly string[] = []): boolean {
- const normalize = (value: string) => value.toLocaleLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/[^a-z0-9]+/g, " ").trim();
- const target = normalize(title);
- if (!target) return false;
- return text.split(/[,;\n.!?]/).some((clause) => {
-  const normalized = normalize(clause);
-  const match = /\b(?:xoa|go|loai bo|huy bo|delete|remove|erase)\b/.exec(normalized);
-  if (!match || /\b(?:khong|dung|cho|never|dont)\s*$/.test(normalized.slice(0, match.index))) return false;
-  const after = normalized.slice(match.index + match[0].length);
-  return (after === target || after.endsWith(` ${target}`)) && !peerTitles.some((peer) => { const other = normalize(peer); return other.length > target.length && (after === other || after.endsWith(` ${other}`)); }) && !/\b(?:giu|keep|except|tru)\b/.test(after.slice(0, after.lastIndexOf(target)));
- });
+function extractClauseDateMatches(clause: string, targetDate?: string): { hasDate: boolean; matchesTarget: boolean } {
+	if (!targetDate || !isValidDateString(targetDate)) return { hasDate: false, matchesTarget: true };
+	const [, yr, mo, dy] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(targetDate) ?? [];
+	if (!yr || !mo || !dy) return { hasDate: false, matchesTarget: true };
+	const targetMonth = Number(mo);
+	const targetDay = Number(dy);
+	const isoMatches = [...clause.matchAll(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g)];
+	const dmMatches = [...clause.matchAll(/(?:^|[\s,(])(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?(?=$|[\s,.)])/g)];
+	if (isoMatches.length === 0 && dmMatches.length === 0) return { hasDate: false, matchesTarget: true };
+	const matchesTarget =
+		isoMatches.some((m) => Number(m[1]) === Number(yr) && Number(m[2]) === targetMonth && Number(m[3]) === targetDay) ||
+		dmMatches.some((m) => Number(m[1]) === targetDay && Number(m[2]) === targetMonth && (!m[3] || Number(m[3]) === Number(yr) || Number(m[3]) === Number(yr.slice(-2))));
+	return { hasDate: true, matchesTarget };
+}
+
+function stripDeleteFiller(after: string): string {
+	let s = after.trim();
+	const keepCut = s.search(/\b(?:giu lai|giu|keep|except|tru)\b/);
+	if (keepCut > 0) s = s.slice(0, keepCut).trim();
+	let prev = "";
+	while (s !== prev) {
+		prev = s;
+		s = s
+			.replace(/^(?:het|toan bo|toan|tat ca|cai|muc|moc|lich thi|lich|ky thi|mon|ho so|the|this|that|entry|item|milestone|exam)\b\s*/, "")
+			.replace(/\s*\b(?:hom nay|ngay nay|bay gio|nua|nhe|nha|di|giup minh|giup toi|giup|ho minh|ho toi|ho|voi|nhe ban|ban oi|please|now)\b$/, "")
+			.replace(/\s*(?:hom|ngay)?\s*\b\d{4}\s+\d{1,2}\s+\d{1,2}\b$/, "")
+			.replace(/\s*(?:hom|ngay)?\s*\b\d{1,2}\s+\d{1,2}(?:\s+\d{2,4})?\b$/, "")
+			.trim();
+	}
+	return s;
+}
+
+function partialDeletePhraseMatches(query: string, candidateTitle: string): boolean {
+	if (!query || query.length < 8) return false;
+	const qTokens = query.split(" ").filter((t) => t.length >= 2);
+	const tTokens = candidateTitle.split(" ").filter(Boolean);
+	if (qTokens.length < 2 || tTokens.length === 0) return false;
+	if (candidateTitle.includes(query)) return true;
+	return qTokens.every((qt) => tTokens.includes(qt));
+}
+
+function hasExplicitDeleteRequest(text: string): boolean {
+	const normalized = normalizeDeleteString(text);
+	return /\b(?:delete|remove|erase|drop|xoa(?:\s+bo)?|go(?:\s+bo)?|loai\s+bo|huy\s+bo)\b|(?:^|\s)bo(?!\s+(?:qua|lo|bot|nghi))(?=\s|$)/.test(normalized);
+}
+
+function isExplicitDeleteTarget(
+	text: string,
+	title: string,
+	peerTitles: readonly string[] = [],
+	opts?: { targetDate?: string; peerItems?: ReadonlyArray<{ title: string; date?: string }> },
+): boolean {
+	const target = normalizeDeleteString(title);
+	if (!target) return false;
+	const peers = peerTitles.map((peer) => normalizeDeleteString(peer)).filter(Boolean);
+	return text.split(/[,;\n.!?]/).some((clause) => {
+		const normalized = normalizeDeleteString(clause);
+		const match = /\b(?:xoa bo|go bo|xoa|go|loai bo|huy bo|delete|remove|erase|drop)\b|(?:^|\s)bo(?!\s+(?:qua|lo|bot|nghi))(?=\s|$)/.exec(normalized);
+		if (!match || /\b(?:khong|dung|cho|never|dont|do not)\s*$/.test(normalized.slice(0, match.index))) return false;
+		const after = normalized.slice(match.index + match[0].length).trim();
+		const cleaned = stripDeleteFiller(after);
+		const dateCheck = extractClauseDateMatches(clause, opts?.targetDate);
+		if (!dateCheck.matchesTarget) return false;
+
+		const exactMatch =
+			(after === target || after.endsWith(` ${target}`) || cleaned === target || cleaned.endsWith(` ${target}`)) &&
+			!peers.some((other) => other.length > target.length && (after === other || after.endsWith(` ${other}`) || cleaned === other || cleaned.endsWith(` ${other}`))) &&
+			!/\b(?:giu|keep|except|tru)\b/.test(after.slice(0, Math.max(0, after.lastIndexOf(target))));
+		if (exactMatch) return true;
+
+		if (!partialDeletePhraseMatches(cleaned, target)) return false;
+		if (/\b(?:giu|keep|except|tru)\b/.test(after)) {
+			const idx = after.search(/\b(?:giu|keep|except|tru)\b/);
+			if (idx >= 0 && idx < after.indexOf(cleaned)) return false;
+		}
+		if (opts?.peerItems?.length) {
+			const ambiguousPeer = opts.peerItems.some((peer) => {
+				const other = normalizeDeleteString(peer.title);
+				if (!other) return false;
+				const peerMatches =
+					cleaned === other ||
+					cleaned.endsWith(` ${other}`) ||
+					partialDeletePhraseMatches(cleaned, other);
+				if (!peerMatches) return false;
+				if (!dateCheck.hasDate) return true;
+				return extractClauseDateMatches(clause, peer.date).matchesTarget;
+			});
+			if (ambiguousPeer) return false;
+		} else if (peers.some((other) => cleaned === other || cleaned.endsWith(` ${other}`) || partialDeletePhraseMatches(cleaned, other))) {
+			return false;
+		}
+		return true;
+	});
+}
+
+function canDeleteNamedDatedItem<T extends { id: string; title: string }>(
+	userText: string,
+	allowDelete: boolean,
+	existing: T | undefined,
+	items: readonly T[],
+	getDate: (item: T) => string | undefined,
+): existing is T {
+	if (!allowDelete || !existing) return false;
+	const targetDate = getDate(existing);
+	const peers = items.filter((entry) => entry.id !== existing.id);
+	const sameTitle = items.filter((entry) => normalizeSubjectKey(entry.title) === normalizeSubjectKey(existing.title));
+	const dateDisambiguates = Boolean(
+		targetDate &&
+			sameTitle.length > 1 &&
+			userText.split(/[,;\n.!?]/).some((clause) => {
+				const check = extractClauseDateMatches(clause, targetDate);
+				return check.hasDate && check.matchesTarget && sameTitle.filter((other) => other.id !== existing.id).every((other) => !extractClauseDateMatches(clause, getDate(other)).matchesTarget);
+			}),
+	);
+	if (sameTitle.length !== 1 && !dateDisambiguates) return false;
+	return isExplicitDeleteTarget(
+		userText,
+		existing.title,
+		peers.map((entry) => entry.title),
+		{ targetDate, peerItems: peers.map((entry) => ({ title: entry.title, date: getDate(entry) })) },
+	);
 }
 
 function buildCustomBlocksFromCoach(
@@ -3547,6 +3692,11 @@ export async function chatWithPlannerCoachServer(
 	const filePath = opts.plannerFile ?? defaultPlannerPath();
 
 	let current = readPlannerConfig(filePath);
+	const initialSignals = buildPlannerPersonalSignals(current, { ...opts, date, now });
+	const syncedInitial = syncExamPrepProfilesIntoConfig(current, initialSignals, date);
+	if (syncedInitial.changed) {
+		current = savePlannerConfig(syncedInitial.config, filePath);
+	}
 	const { report: capacity, signals } = readPlannerLearningCapacityServer({ ...opts, date, now });
 	const todayPlan = current.plans[date] ?? computeLocalPlannerPlan(current, signals, now);
 
@@ -3753,7 +3903,8 @@ OPERATING RULES:
 			...(current.pinnedSubjects ? { prevPinnedSubjects: [...current.pinnedSubjects] } : {}),
 		};
 
-		const allowDelete = hasExplicitDeleteRequest(userText) && !/(không|đừng|chớ)\s+(x[oó]a|gỡ|loại bỏ)|\b(do not|don't|never)\s+(delete|remove|erase)\b/i.test(userText);
+		const normalizedUserText = normalizeDeleteString(userText);
+		const allowDelete = hasExplicitDeleteRequest(userText) && !/\b(?:khong|dung|cho|do not|don't|dont|never)\s+(?:xoa|go|loai bo|huy bo|bo|delete|remove|erase|drop)\b/.test(normalizedUserText);
 		for (const op of payload.sessionOperations ?? []) {
 			if (!opts.requireConfirmation || !op.id || sessionChanges.some((item) => item.id === op.id)) { rejectedOperations.push("không thể xác định phiên học hoặc chưa có bước xác nhận"); continue; }
 			const before = sessionMetadata(op.id);
@@ -3793,7 +3944,7 @@ OPERATING RULES:
 		for (const [index, op] of (payload.examTimetableOperations ?? []).entries()) {
 			const existing = nextConfig.examTimetable.find((entry) => entry.id === op.id);
 			if (op.action === "delete") {
-				if (!existing || !allowDelete || (!isExplicitDeleteTarget(userText, existing.title, nextConfig.examTimetable.filter((entry) => entry.id !== existing.id).map((entry) => entry.title)) || nextConfig.examTimetable.filter((e) => normalizeSubjectKey(e.title) === normalizeSubjectKey(existing.title)).length !== 1)) { rejectedOperations.push("xóa lịch thi chưa được chỉ rõ"); continue; }
+				if (!canDeleteNamedDatedItem(userText, allowDelete, existing, nextConfig.examTimetable, (entry) => entry.date)) { rejectedOperations.push("xóa lịch thi chưa được chỉ rõ"); continue; }
 				const previousExams = nextConfig.examTimetable;
 				nextConfig = { ...nextConfig, examTimetable: previousExams.filter((entry) => entry.id !== existing.id) };
 				const examChanges = reconcileExamPlans(nextConfig, previousExams, now);
@@ -3839,17 +3990,17 @@ OPERATING RULES:
 		for (const [index, op] of (payload.milestoneOperations ?? []).entries()) {
 			const existing = nextConfig.milestones.find((m) => m.id === op.id);
 			if (op.action === "add" && nextConfig.milestones.length >= 40) { rejectedOperations.push("mốc học tập đã đạt giới hạn"); continue; }
-			if ((op.action !== "add" && !existing) || (op.action === "delete" && (!allowDelete || !existing || (!isExplicitDeleteTarget(userText, existing.title, nextConfig.milestones.filter((entry) => entry.id !== existing.id).map((entry) => entry.title)) || nextConfig.milestones.filter((m) => normalizeSubjectKey(m.title) === normalizeSubjectKey(existing.title)).length !== 1)))) { rejectedOperations.push("mốc học tập không hợp lệ hoặc chưa yêu cầu xóa"); continue; }
+			if ((op.action !== "add" && !existing) || (op.action === "delete" && !canDeleteNamedDatedItem(userText, allowDelete, existing, nextConfig.milestones, (entry) => entry.dueDate))) { rejectedOperations.push("mốc học tập không hợp lệ hoặc chưa yêu cầu xóa"); continue; }
 			if (existing?.examProfileId && !previousExam) { previousExam = readExamPrepConfig(opts.examPrepFile); pendingExam = structuredClone(previousExam); }
 			const linked = existing?.examProfileId ? pendingExam?.exams.find((exam) => exam.id === existing.examProfileId) : undefined;
-			if (existing?.examProfileId && !linked) { rejectedOperations.push(`không tìm thấy hồ sơ kỳ thi ${existing.title}`); continue; }
 			if (op.action === "delete" && existing) {
-				nextConfig = { ...nextConfig, milestones: nextConfig.milestones.filter((m) => m.id !== existing.id), dismissedExamProfileIds: existing.examProfileId ? [...new Set([...(nextConfig.dismissedExamProfileIds ?? []), existing.examProfileId])] : nextConfig.dismissedExamProfileIds };
+				nextConfig = { ...nextConfig, milestones: nextConfig.milestones.filter((m) => m.id !== existing.id), dismissedExamProfileIds: existing.examProfileId && linked ? [...new Set([...(nextConfig.dismissedExamProfileIds ?? []), existing.examProfileId])] : nextConfig.dismissedExamProfileIds };
 				patchLabels.push(`Đã xóa mốc ${existing.title}`); expandedScheduleChange = true; continue;
 			}
 			if (op.action === "add" && (!op.title || !op.subject || !op.dueDate || !op.kind || !op.priority || !op.cognitiveLoad || op.estimatedHours === undefined)) { rejectedOperations.push("mốc mới còn thiếu thông tin"); continue; }
 			if ((op.dueDate !== undefined && !isValidDateString(op.dueDate)) || (op.priority !== undefined && ![1, 2, 3].includes(op.priority))) { rejectedOperations.push("ngày hoặc mức ưu tiên của mốc không hợp lệ"); continue; }
-			const candidate = { ...(existing ?? { completedHours: 0, clusterIds: [], syllabusTopics: [], notes: "" }), ...Object.fromEntries(Object.entries(op).filter(([key, value]) => key !== "action" && key !== "id" && value !== undefined)), id: existing?.id ?? `ms_coach_${now.toString(36)}_${index}` };
+			const baseMilestone = existing && existing.examProfileId && !linked ? { ...existing, examProfileId: undefined } : existing;
+			const candidate = { ...(baseMilestone ?? { completedHours: 0, clusterIds: [], syllabusTopics: [], notes: "" }), ...Object.fromEntries(Object.entries(op).filter(([key, value]) => key !== "action" && key !== "id" && value !== undefined)), id: existing?.id ?? `ms_coach_${now.toString(36)}_${index}` };
 			const valid = sanitizePlannerConfig({ milestones: [candidate] }).milestones[0];
 			if (!valid) { rejectedOperations.push("mốc học tập chưa hợp lệ"); continue; }
 			nextConfig = { ...nextConfig, milestones: existing ? nextConfig.milestones.map((m) => m.id === valid.id ? valid : m) : [...nextConfig.milestones, valid] };
@@ -4139,8 +4290,12 @@ OPERATING RULES:
 		appliedChange.summary = patchLabels.join(" · ").slice(0, 320);
 		coachReply = `Đã áp dụng: ${patchLabels.join("; ")}.\n\nChưa áp dụng: ${rejectedOperations.join("; ")}. Bạn hãy cung cấp rõ mục hoặc thông tin còn thiếu.`;
 	} else if (rejectedOperations.length) coachReply += `\n\nChưa áp dụng: ${rejectedOperations.join("; ")}. Bạn hãy cung cấp rõ mục hoặc thông tin còn thiếu.`;
-	if (payload.shouldApplyChanges && !appliedChange) coachReply = `Mình chưa áp dụng thay đổi nào.${rejectedOperations.length ? ` ${rejectedOperations.join("; ")}.` : " Bạn hãy cho biết rõ mục cần sửa."}`;
-	if (!appliedChange && !payload.shouldApplyChanges && /(?:mình|tôi)\s+đã\s+(?:sửa|chỉnh|x[oó]a|lưu|cập nhật|áp dụng)|\bi(?:'ve| have)\s+(?:updated|saved|deleted|changed|applied)\b/i.test(coachReply)) {
+	const falseClaimPattern = /(?:mình|tôi)\s+đã\s+(?:sửa|chỉnh|x[oó]a|lưu|cập nhật|áp dụng|bỏ)|\bi(?:'ve| have)\s+(?:updated|saved|deleted|removed|changed|applied)\b/i;
+	if (payload.shouldApplyChanges && !appliedChange) {
+		const preserveReply = coachReply && !falseClaimPattern.test(coachReply);
+		coachReply = `Mình chưa áp dụng thay đổi nào.${rejectedOperations.length ? ` ${rejectedOperations.join("; ")}.` : " Bạn hãy cho biết rõ mục cần sửa."}${preserveReply ? `\n\n${coachReply}` : ""}`;
+	}
+	if (!appliedChange && !payload.shouldApplyChanges && falseClaimPattern.test(coachReply)) {
 		coachReply = "Mình chưa áp dụng thay đổi nào. Bạn hãy cho biết rõ mục cần sửa nếu muốn mình cập nhật.";
 	}
 

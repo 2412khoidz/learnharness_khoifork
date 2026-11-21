@@ -37,9 +37,11 @@ import {
 	redactSensitiveJournalText,
 	resolveActiveBlockStatus,
 	sanitizePlannerConfig,
+	subscribe,
 	type PlannerConfig,
 	type PlannerPersonalSignals,
 } from "../src/core/index.ts";
+import { PUT as putExamPrepRoute } from "../app/api/exam-prep/route.ts";
 import type { PiEngine } from "../src/agent/models.ts";
 import { buildMobileHtml } from "../src/server/phone-mobile-ui.ts";
 import {
@@ -59,10 +61,12 @@ import {
 	getMobileCompanionState,
 	patchPlannerConfig,
 	parseWeeklyScheduleInput,
+	readPlannerConfig,
 	readPlannerLearningCapacityServer,
 	readPlannerSnapshot,
 	researchExamSyllabus,
 	suggestLifestyleBalanceServer,
+	syncExamPrepToPlanner,
 	undoPlannerCoachChangeServer,
 	writeExamPrepConfig,
 } from "../src/server/index.ts";
@@ -2000,5 +2004,108 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 		assert.match(capturedPrompt, /thủ\s*dâm/i, "The auditor needs the user's original journal for context");
 		assert.equal(aiEval.snapshot.config.realismFactor, 1.0, "Mid-day partial log must NOT drop EWMA realism below 1.0 while evening blocks are still ahead");
 		assert.equal(aiEval.report.realismRatio, 1);
+	});
+
+	it("auto-removes deleted Exam Prep profiles, shrinks removed clusterIds, keeps manual milestones, and emits planner-changed on PUT /api/exam-prep", async () => {
+		const plannerFile = path.join(TMP_DATA, "ep-sync-planner.json");
+		const examPrepFile = path.join(TMP_DATA, "ep-sync-exams.json");
+		const chatsDir = path.join(TMP_DATA, "ep-sync-chats");
+		fs.mkdirSync(chatsDir, { recursive: true });
+		for (const [id, title] of [["c1", "Giải tích"], ["c2", "Đại số"]] as const) {
+			fs.writeFileSync(
+				path.join(chatsDir, `${id}.json`),
+				JSON.stringify({ id, title, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [] }),
+			);
+		}
+		writeExamPrepConfig(
+			{
+				mode: "exam",
+				upsertExam: { id: "ex_1", title: "OLP Sinh viên", date: "2026-11-28", pace: "efficient", clusterIds: ["c1", "c2"] },
+			},
+			examPrepFile,
+		);
+		writeExamPrepConfig(
+			{
+				upsertExam: { id: "ex_2", title: "Olympic giải tích", date: "2026-12-05", pace: "crash-course", clusterIds: ["c1"] },
+			},
+			examPrepFile,
+		);
+		patchPlannerConfig(
+			{
+				milestones: [
+					{
+						id: "ms_manual",
+						kind: "project",
+						title: "Đồ án lab",
+						subject: "AI Lab",
+						dueDate: "2026-12-10",
+						priority: 2,
+						cognitiveLoad: "medium",
+						clusterIds: [],
+						estimatedHours: 8,
+						completedHours: 0,
+						syllabusTopics: [],
+						notes: "",
+					},
+				],
+			},
+			{ plannerFile, examPrepFile, chatsDir },
+		);
+
+		const initial = readPlannerSnapshot({ plannerFile, examPrepFile, chatsDir });
+		assert.ok(initial.config.milestones.some((m) => m.examProfileId === "ex_1" && m.clusterIds.length === 2));
+		assert.ok(initial.config.milestones.some((m) => m.examProfileId === "ex_2"));
+
+		// Delete ex_2 and shrink ex_1.clusterIds down to ["c2"]
+		writeExamPrepConfig({ deleteExamId: "ex_2" }, examPrepFile);
+		writeExamPrepConfig(
+			{ upsertExam: { id: "ex_1", title: "OLP ĐSTT", date: "2026-11-28", clusterIds: ["c2"] } },
+			examPrepFile,
+		);
+
+		const synced = readPlannerSnapshot({ plannerFile, examPrepFile, chatsDir });
+		assert.equal(synced.config.milestones.some((m) => m.examProfileId === "ex_2"), false);
+		const updated1 = synced.config.milestones.find((m) => m.examProfileId === "ex_1");
+		assert.ok(updated1);
+		assert.equal(updated1.title, "OLP ĐSTT");
+		assert.deepEqual(updated1.clusterIds, ["c2"]);
+		assert.ok(synced.config.milestones.some((m) => m.id === "ms_manual"));
+
+		// Deleting the last profile cleans up all ep_* milestones even when exams.length === 0
+		writeExamPrepConfig({ deleteExamId: "ex_1" }, examPrepFile);
+		const cleared = readPlannerSnapshot({ plannerFile, examPrepFile, chatsDir });
+		assert.deepEqual(cleared.config.milestones.map((m) => m.id), ["ms_manual"]);
+
+		// Verify PUT /api/exam-prep triggers live planner sync and SSE planner-changed notification
+		const events: string[] = [];
+		const unsub = subscribe((ev) => events.push(ev.type));
+		try {
+			const res = await putExamPrepRoute(
+				new Request("http://localhost/api/exam-prep", {
+					method: "PUT",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						mode: "exam",
+						upsertExam: { id: "ex_route", title: "Thi cuối kỳ", date: "2026-12-20", pace: "efficient", clusterIds: [] },
+					}),
+				}),
+			);
+			assert.equal(res.status, 200);
+			assert.ok(events.includes("planner-changed"));
+			assert.ok(readPlannerConfig().milestones.some((m) => m.examProfileId === "ex_route"));
+
+			const delRes = await putExamPrepRoute(
+				new Request("http://localhost/api/exam-prep", {
+					method: "PUT",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ deleteExamId: "ex_route" }),
+				}),
+			);
+			assert.equal(delRes.status, 200);
+			syncExamPrepToPlanner();
+			assert.equal(readPlannerConfig().milestones.some((m) => m.examProfileId === "ex_route"), false);
+		} finally {
+			unsub();
+		}
 	});
 });

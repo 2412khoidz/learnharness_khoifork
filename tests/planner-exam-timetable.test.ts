@@ -190,3 +190,48 @@ it("refuses ambiguous deletion of a substring or two identically named entries",
  const duplicated = await chatWithPlannerCoachServer({ ...f, message: "Xóa Vật lý", engineOverride: engine({ reply: "Đã xóa", shouldApplyChanges: true, examTimetableOperations: [{ action: "delete", id: "dup1" }] }) });
  assert.equal(duplicated.snapshot.config.examTimetable.length, 5);
 });
+it("accepts Vietnamese shorthand 'bỏ ... đi' with date on milestones, deletes orphaned exam milestones, and rejects negated 'không bỏ'", async () => {
+ const f = fixture("vn-delete-shorthand");
+ writeExamPrepConfig({ upsertExam: { id: "p1", title: "Olympic sinh viên giải tích Vòng 1", date: "2026-12-05", clusterIds: [] } }, f.examPrepFile);
+ writeExamPrepConfig({ upsertExam: { id: "p2", title: "OLP sinh viên vòng 1", date: "2026-11-28", clusterIds: [] } }, f.examPrepFile);
+ patchPlannerConfig({
+  milestones: [
+   { id: "ep_p1", examProfileId: "p1", title: "Olympic sinh viên giải tích Vòng 1", subject: "Giải tích", dueDate: "2026-12-05", kind: "competition", priority: 3, cognitiveLoad: "heavy", clusterIds: [], estimatedHours: 16, completedHours: 0, syllabusTopics: [], notes: "" },
+   { id: "ep_p2", examProfileId: "p2", title: "OLP sinh viên vòng 1", subject: "Đại số", dueDate: "2026-11-28", kind: "exam", priority: 2, cognitiveLoad: "heavy", clusterIds: [], estimatedHours: 16, completedHours: 0, syllabusTopics: [], notes: "" },
+  ],
+ }, f);
+ // Negated 'không bỏ' refuses deletion and preserves non-claim clarification in reply
+ const negated = await chatWithPlannerCoachServer({
+  ...f,
+  message: "không bỏ cái olympic sinh viên giải tích hôm 5/12 nhé",
+  engineOverride: engine({ reply: "Cần xác nhận rõ hơn nếu bạn muốn xóa.", shouldApplyChanges: true, milestoneOperations: [{ action: "delete", id: "ep_p1" }] }),
+ });
+ assert.equal(negated.snapshot.config.milestones.length, 2);
+ assert.match(negated.assistantMessage.text, /Cần xác nhận rõ hơn/);
+
+ // Vietnamese shorthand + date deletes ep_p1 and renames ep_p2
+ const applied = await chatWithPlannerCoachServer({
+  ...f,
+  message: "bỏ cái olympic sinh viên giải tích hôm 5/12 đi, đổi tên cái 28/11",
+  engineOverride: engine({
+   reply: "Đã xóa và đổi tên.",
+   shouldApplyChanges: true,
+   milestoneOperations: [
+    { action: "delete", id: "ep_p1" },
+    { action: "update", id: "ep_p2", title: "OLP sinh viên ĐSTT vòng 1" },
+   ],
+  }),
+ });
+ assert.deepEqual(applied.snapshot.config.milestones.map((m) => [m.id, m.title]), [["ep_p2", "OLP sinh viên ĐSTT vòng 1"]]);
+ assert.equal(readExamPrepConfig(f.examPrepFile).exams.find((e) => e.id === "p2")?.title, "OLP sinh viên ĐSTT vòng 1");
+
+ // Deleting an exam profile while Coach holds a concurrent stale reference to ep_p2 still deletes cleanly without 'không tìm thấy hồ sơ kỳ thi'
+ const orphanDeleted = await chatWithPlannerCoachServer({
+  ...f,
+  message: "bỏ cái OLP sinh viên ĐSTT vòng 1 hôm 28/11 đi",
+  engineOverride: engine({ reply: "Đã xóa mốc cũ.", shouldApplyChanges: true, milestoneOperations: [{ action: "delete", id: "ep_p2" }] }, () => {
+   writeExamPrepConfig({ deleteExamId: "p2" }, f.examPrepFile);
+  }),
+ });
+ assert.equal(orphanDeleted.snapshot.config.milestones.length, 0);
+});

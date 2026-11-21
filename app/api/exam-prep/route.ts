@@ -1,5 +1,5 @@
 import type { ExamPrepPatch } from "@/src/core";
-import { readExamPrepStatus, writeExamPrepConfig } from "@/src/server";
+import { readExamPrepStatus, syncExamPrepToPlanner, writeExamPrepConfig } from "@/src/server";
 
 export async function GET() {
 	return Response.json(readExamPrepStatus(), { headers: { "Cache-Control": "no-store" } });
@@ -16,5 +16,6 @@ export async function PUT(request: Request) {
 		return Response.json({ error: "Expected JSON object" }, { status: 400 });
 	}
 	writeExamPrepConfig(body as ExamPrepPatch);
+	syncExamPrepToPlanner();
 	return Response.json(readExamPrepStatus(), { headers: { "Cache-Control": "no-store" } });
 }

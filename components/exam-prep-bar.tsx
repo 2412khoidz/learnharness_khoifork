@@ -16,6 +16,7 @@ import {
 	XIcon,
 } from "lucide-react";
 import type { ExamPrepPatch, ExamPrepStatus, StudyMode, StudyPace } from "@/src/core";
+import { useServerEvent } from "@/components/server-events";
 
 const COLLAPSE_STORAGE_KEY = "chronoharness.examCardCollapsed";
 
@@ -81,6 +82,8 @@ export function ExamPrepSidebarCard() {
 		window.addEventListener("focus", onFocus);
 		return () => window.removeEventListener("focus", onFocus);
 	}, [load]);
+
+	useServerEvent("planner-changed", load);
 
 	const patchConfig = async (patch: ExamPrepPatch) => {
 		setSaving(true);

@@ -1109,7 +1109,7 @@ export function Chat({
 			if (sel && !sel.isCollapsed) return;
 			const katexEl = target.closest(".katex");
 			if (!katexEl) return;
-			const tex = katexEl.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
+			const tex = (katexEl.getAttribute("data-tex") ?? katexEl.querySelector('annotation[encoding="application/x-tex"]')?.textContent)?.trim();
 			if (!tex) return;
 			void navigator.clipboard?.writeText(tex).then(() => {
 				setCopiedLatexToast(tex.length > 42 ? `${tex.slice(0, 42)}...` : tex);

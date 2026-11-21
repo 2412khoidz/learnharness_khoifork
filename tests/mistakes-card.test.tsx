@@ -163,7 +163,7 @@ describe("AnsweredCard mistake analysis", () => {
 		});
 		const html = await render(new Map([["c1:e-bare", bareRecord]]), "c1:e-bare", true, explainAnswer);
 		const parsed = parseHTML(`<html><body>${html}</body></html>`).document;
-		const texAnnotations = [...parsed.querySelectorAll('annotation[encoding="application/x-tex"]')].map((n) => n.textContent);
+		const texAnnotations = [...parsed.querySelectorAll(".katex[data-tex]")].map((n) => n.getAttribute("data-tex"));
 		assert.ok(parsed.querySelectorAll(".katex").length >= 3, "bare LaTeX must render as KaTeX spans");
 		assert.ok(texAnnotations.some((t) => t?.includes("\\alpha \\neq \\beta")));
 		assert.ok(texAnnotations.some((t) => t?.includes("v \\neq 0")));
