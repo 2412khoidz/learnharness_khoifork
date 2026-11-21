@@ -2163,26 +2163,88 @@ function collectSubjectCandidates(
 
 	let chosen: SubjectCandidate[] = [];
 	if (hasExplicitFocus) {
-		const matchedFocus = [...sortedPrimary, ...sortedBackground].filter(
-			(c) => isSubjectInList(c.subject, focusSet) || (c.milestone && isSubjectInList(c.milestone.title, focusSet)),
-		);
-		const urgentOverflow = sortedPrimary.filter(
-			(c) => !matchedFocus.includes(c) && c.milestone && daysBetweenDates(targetDate, c.milestone.dueDate) <= 2,
-		);
-		chosen = [...matchedFocus, ...urgentOverflow].slice(0, effectiveCap);
-		// If user typed a brand-new focus subject not yet in milestones/graph, synthesize a clean block for it
-		if (chosen.length === 0) {
-			for (const f of focusSet.slice(0, 2)) {
-				chosen.push({
-					subject: f,
-					urgencyScore: 140,
-					paceMultiplier: resolveCombinedPaceMultiplier(f, config, signals, targetDate),
-					cognitiveLoad: "heavy",
-					neededMinToday: 120,
-					reason: "Focused study priority",
-					checklist: [{ id: `chk_focus_${normalizeSubjectKey(f)}`, text: `Deep work sprint on ${f}` }],
-				});
+		const singleCandidates = [...sortedPrimary, ...sortedBackground].filter((c) => !c.subject.includes(" + "));
+		const seenFocusKeys = new Set<string>();
+		const seenCandidateKeys = new Set<string>();
+		for (const rawFocus of focusSet) {
+			const f = rawFocus.trim();
+			const fKey = normalizeSubjectKey(f);
+			if (!f || !fKey || seenFocusKeys.has(fKey)) continue;
+			seenFocusKeys.add(fKey);
+			const orderUrgency = Math.max(120, 400 - chosen.length * 25);
+
+			const exactSingle = singleCandidates.find(
+				(c) => !seenCandidateKeys.has(normalizeSubjectKey(c.subject)) && isSubjectInList(c.subject, [f]),
+			);
+			if (exactSingle) {
+				seenCandidateKeys.add(normalizeSubjectKey(exactSingle.subject));
+				chosen.push({ ...exactSingle, urgencyScore: Math.max(exactSingle.urgencyScore, orderUrgency) });
+				continue;
 			}
+
+			const sig = signals.subjectSignals.find(
+				(s) => !seenCandidateKeys.has(normalizeSubjectKey(s.label)) && isSubjectInList(s.label, [f]),
+			);
+			if (sig) {
+				const linkedMs = milestones.find((m) => m.clusterIds.includes(sig.clusterId));
+				seenCandidateKeys.add(normalizeSubjectKey(sig.label));
+				chosen.push({
+					subject: sig.label,
+					...(linkedMs ? { milestone: linkedMs } : {}),
+					signal: sig,
+					urgencyScore: Math.max(240, orderUrgency),
+					paceMultiplier: resolveCombinedPaceMultiplier(sig.label, config, signals, targetDate),
+					cognitiveLoad: sig.weakCount > 2 || sig.untrackedCount > 5 ? "heavy" : "medium",
+					neededMinToday: clamp(Math.round(45 + sig.dueCount * 6 + sig.weakCount * 9), 30, 120),
+					reason: linkedMs ? `D-${Math.max(0, daysBetweenDates(targetDate, linkedMs.dueDate))} · ${sig.readinessPct}% ready` : `${sig.readinessPct}% ready · ${sig.dueCount} due`,
+					weaknessSummary: `${sig.readinessPct}% ready · ${sig.dueCount} FSRS due · ${sig.weakCount} weak`,
+					checklist: sig.activePlanTopics?.[0]
+						? [{ id: `chk_focus_${sig.clusterId}`, text: clipPreservingLatex(`Session path: ${sig.activePlanTopics[0]}`, 150) }]
+						: [{ id: `chk_focus_${sig.clusterId}`, text: `Focused study on ${sig.label}` }],
+				});
+				continue;
+			}
+
+			const matchedMilestone = sortedPrimary.find(
+				(c) =>
+					!seenCandidateKeys.has(fKey) &&
+					(isSubjectInList(c.subject, [f]) || (c.milestone && isSubjectInList(c.milestone.title, [f]))),
+			);
+			if (matchedMilestone) {
+				seenCandidateKeys.add(fKey);
+				chosen.push({
+					...matchedMilestone,
+					subject: f,
+					urgencyScore: Math.max(matchedMilestone.urgencyScore, orderUrgency),
+				});
+				continue;
+			}
+
+			seenCandidateKeys.add(fKey);
+			chosen.push({
+				subject: f,
+				urgencyScore: orderUrgency,
+				paceMultiplier: resolveCombinedPaceMultiplier(f, config, signals, targetDate),
+				cognitiveLoad: "heavy",
+				neededMinToday: 60,
+				reason: "Focused study priority",
+				checklist: [
+					{
+						id: `chk_focus_${fKey}`,
+						text: dayOverride?.note ? clipPreservingLatex(dayOverride.note, 150) : `Deep work sprint on ${f}`,
+					},
+				],
+			});
+		}
+		if (chosen.length < effectiveCap) {
+			const urgentOverflow = sortedPrimary.filter(
+				(c) =>
+					c.milestone &&
+					daysBetweenDates(targetDate, c.milestone.dueDate) <= 2 &&
+					!seenCandidateKeys.has(normalizeSubjectKey(c.subject)) &&
+					!chosen.some((item) => item.milestone?.id && item.milestone.id === c.milestone?.id),
+			);
+			chosen.push(...urgentOverflow.slice(0, effectiveCap - chosen.length));
 		}
 	} else if (sortedPrimary.length > 0) {
 		// Always include top urgent target + rotate secondary milestones across weekdays when > maxDailyCap
@@ -2228,7 +2290,9 @@ function collectSubjectCandidates(
 		});
 	}
 
-	return chosen.sort((a, b) => b.urgencyScore - a.urgencyScore).slice(0, effectiveCap);
+	return hasExplicitFocus
+		? chosen.slice(0, effectiveCap)
+		: chosen.sort((a, b) => b.urgencyScore - a.urgencyScore).slice(0, effectiveCap);
 }
 
 export interface SchedulableSlot {
@@ -2374,24 +2438,29 @@ function allocateDailyQuotasBySubject(
 	rawStudyBudget: number,
 	focusBudgetAvailable: number,
 	intensity: PlannerIntensity,
+	hasExplicitFocus = false,
 ): Map<string, number> {
 	const quotasBySubject = new Map<string, number>();
 	if (rawStudyBudget < 20 || candidates.length === 0) return quotasBySubject;
 
 	const urgencySum = Math.max(1, candidates.reduce((acc, c) => acc + c.urgencyScore, 0));
 	const capFraction = candidates.length >= 2 && intensity !== "intensive" ? 0.58 : candidates.length >= 2 ? 0.68 : 1;
+	const focusMinPerSubject = hasExplicitFocus && candidates.length > 1 && rawStudyBudget >= candidates.length * 25
+		? Math.min(30, Math.floor(rawStudyBudget / candidates.length))
+		: 0;
 	let allocatedSum = 0;
 	for (const c of candidates) {
 		const rawShare = Math.round((rawStudyBudget * c.urgencyScore) / urgencySum);
 		const capped = Math.min(rawShare, Math.round(rawStudyBudget * capFraction));
-		const rounded = Math.max(Math.min(25, rawStudyBudget), Math.round(capped / 15) * 15);
+		const rounded = Math.max(focusMinPerSubject, Math.min(25, rawStudyBudget), Math.round(capped / 15) * 15);
 		quotasBySubject.set(c.subject, rounded);
 		allocatedSum += rounded;
 	}
 	if (allocatedSum > focusBudgetAvailable) {
 		const ratio = (focusBudgetAvailable * 0.85) / allocatedSum;
+		const floorMin = hasExplicitFocus && focusBudgetAvailable >= candidates.length * 25 ? 25 : 20;
 		for (const c of candidates) {
-			quotasBySubject.set(c.subject, Math.max(20, Math.round(((quotasBySubject.get(c.subject) ?? 30) * ratio) / 5) * 5));
+			quotasBySubject.set(c.subject, Math.max(floorMin, Math.round(((quotasBySubject.get(c.subject) ?? 30) * ratio) / 5) * 5));
 		}
 	}
 	return quotasBySubject;
@@ -2520,7 +2589,7 @@ function computeRealisticStudyBudget(
 		targetCapMin,
 	);
 	const demandTarget = Math.round((totalUrgencyNeeded + amortizedCarryoverMin * 0.5) * realism);
-	const rawStudyBudget =
+	const computedStudyBudget =
 		dayOverride?.studyTargetHoursOverride !== undefined
 			? Math.min(focusBudgetAvailable, Math.round(dayOverride.studyTargetHoursOverride * 60))
 			: Math.min(
@@ -2530,6 +2599,14 @@ function computeRealisticStudyBudget(
 					Math.min(focusBudgetAvailable, band.minFloorMin),
 				),
 			);
+	const focusMinFloor =
+		dayOverride?.studyTargetHoursOverride === undefined &&
+		dayOverride?.focusSubjects &&
+		dayOverride.focusSubjects.length >= 2 &&
+		candidates.length >= 2
+			? Math.min(focusBudgetAvailable, maxBandMin, candidates.length * 30)
+			: 0;
+	const rawStudyBudget = Math.max(computedStudyBudget, focusMinFloor);
 
 	const minDailyMin =
 		dayOverride?.studyTargetHoursOverride !== undefined
@@ -2997,11 +3074,36 @@ export function computeLocalPlannerPlan(
 		};
 	}
 
-	const quotasBySubject = allocateDailyQuotasBySubject(candidates, rawStudyBudget, focusBudgetAvailable, config.intensity);
+	const hasExplicitFocus = Boolean(dayOverride?.focusSubjects && dayOverride.focusSubjects.length > 0);
+	const quotasBySubject = allocateDailyQuotasBySubject(candidates, rawStudyBudget, focusBudgetAvailable, config.intensity, hasExplicitFocus);
 
 	// Carve focus + break slots inside remaining awake intervals
-	const blockLen = config.lifestyle.blockDurationMin;
-	const breakLen = config.lifestyle.breakDurationMin;
+	let blockLen = config.lifestyle.blockDurationMin;
+	let breakLen = config.lifestyle.breakDurationMin;
+	const countRawSlots = (bl: number, br: number) => {
+		let total = 0;
+		for (const iv of awakeIntervals) {
+			let cur = iv.startMin;
+			while (cur + 25 <= iv.endMin) {
+				const dur = Math.min(bl, iv.endMin - cur);
+				if (dur < 25) break;
+				total++;
+				cur += dur + br;
+			}
+		}
+		return total;
+	};
+	if (hasExplicitFocus && candidates.length > 1 && focusBudgetAvailable >= candidates.length * 25) {
+		while (
+			(countRawSlots(blockLen, breakLen) < candidates.length || Math.floor(rawStudyBudget / blockLen) < candidates.length) &&
+			blockLen > 25
+		) {
+			blockLen = Math.max(25, blockLen - 5);
+		}
+		while (countRawSlots(blockLen, breakLen) < candidates.length && breakLen > 5) {
+			breakLen = Math.max(5, breakLen - 5);
+		}
+	}
 	const rawSlots: Array<{ startMin: number; endMin: number; isPeak: boolean; rank: number }> = [];
 
 	const resolvedPeak =
@@ -3039,45 +3141,71 @@ export function computeLocalPlannerPlan(
 	const remainingQuota = new Map(quotasBySubject);
 	const slotAssignments = new Array<SubjectCandidate | null>(rawSlots.length).fill(null);
 
-	const sortedSlotOrder = [...rawSlots.keys()].sort((a, b) => {
-		const sa = rawSlots[a]!;
-		const sb = rawSlots[b]!;
-		if (sa.isPeak !== sb.isPeak) return sa.isPeak ? -1 : 1;
-		return sa.startMin - sb.startMin;
-	});
-
-	let lastAssignedSubject: string | null = null;
-	for (const slotIdx of sortedSlotOrder) {
-		const slot = rawSlots[slotIdx]!;
-		const available = candidates.filter((c) => (remainingQuota.get(c.subject) ?? 0) >= 20);
-		if (available.length === 0) break;
-
-		const nonRepeating = available.filter((c) => c.subject !== lastAssignedSubject);
-		const pool = nonRepeating.length > 0 ? nonRepeating : available;
-		const inDip = Boolean(
-			dipInfo.dipWindow && slot.endMin > dipInfo.dipWindow.startMin && slot.startMin < dipInfo.dipWindow.endMin,
-		);
-		pool.sort((a, b) => {
-			if (inDip) {
-				const da = a.cognitiveLoad === "light" ? 2 : a.cognitiveLoad === "medium" ? 1 : 0;
-				const db = b.cognitiveLoad === "light" ? 2 : b.cognitiveLoad === "medium" ? 1 : 0;
-				if (da !== db) return db - da;
-			} else if (slot.isPeak) {
-				const la = a.cognitiveLoad === "heavy" ? 2 : a.cognitiveLoad === "medium" ? 1 : 0;
-				const lb = b.cognitiveLoad === "heavy" ? 2 : b.cognitiveLoad === "medium" ? 1 : 0;
-				if (la !== lb) return lb - la;
-			}
-			return (remainingQuota.get(b.subject) ?? 0) + b.urgencyScore - ((remainingQuota.get(a.subject) ?? 0) + a.urgencyScore);
+	if (hasExplicitFocus) {
+		const firstPassCount = Math.min(rawSlots.length, candidates.length);
+		for (let i = 0; i < firstPassCount; i++) {
+			const cand = candidates[i]!;
+			slotAssignments[i] = cand;
+			const slotDur = rawSlots[i]!.endMin - rawSlots[i]!.startMin;
+			remainingQuota.set(cand.subject, Math.max(0, (remainingQuota.get(cand.subject) ?? 0) - slotDur));
+		}
+		let lastAssignedSubject = firstPassCount > 0 ? candidates[firstPassCount - 1]!.subject : null;
+		for (let slotIdx = firstPassCount; slotIdx < rawSlots.length; slotIdx++) {
+			const slot = rawSlots[slotIdx]!;
+			const available = candidates.filter((c) => (remainingQuota.get(c.subject) ?? 0) >= 20);
+			if (available.length === 0) break;
+			const nonRepeating = available.filter((c) => c.subject !== lastAssignedSubject);
+			const pool = nonRepeating.length > 0 ? nonRepeating : available;
+			pool.sort((a, b) => (remainingQuota.get(b.subject) ?? 0) - (remainingQuota.get(a.subject) ?? 0));
+			const picked = pool[0]!;
+			slotAssignments[slotIdx] = picked;
+			lastAssignedSubject = picked.subject;
+			const slotDur = slot.endMin - slot.startMin;
+			remainingQuota.set(picked.subject, Math.max(0, (remainingQuota.get(picked.subject) ?? 0) - slotDur));
+		}
+	} else {
+		const sortedSlotOrder = [...rawSlots.keys()].sort((a, b) => {
+			const sa = rawSlots[a]!;
+			const sb = rawSlots[b]!;
+			if (sa.isPeak !== sb.isPeak) return sa.isPeak ? -1 : 1;
+			return sa.startMin - sb.startMin;
 		});
 
-		const picked = pool[0]!;
-		slotAssignments[slotIdx] = picked;
-		lastAssignedSubject = picked.subject;
-		const slotDur = slot.endMin - slot.startMin;
-		remainingQuota.set(picked.subject, Math.max(0, (remainingQuota.get(picked.subject) ?? 0) - slotDur));
+		let lastAssignedSubject: string | null = null;
+		for (const slotIdx of sortedSlotOrder) {
+			const slot = rawSlots[slotIdx]!;
+			const available = candidates.filter((c) => (remainingQuota.get(c.subject) ?? 0) >= 20);
+			if (available.length === 0) break;
+
+			const nonRepeating = available.filter((c) => c.subject !== lastAssignedSubject);
+			const pool = nonRepeating.length > 0 ? nonRepeating : available;
+			const inDip = Boolean(
+				dipInfo.dipWindow && slot.endMin > dipInfo.dipWindow.startMin && slot.startMin < dipInfo.dipWindow.endMin,
+			);
+			pool.sort((a, b) => {
+				if (inDip) {
+					const da = a.cognitiveLoad === "light" ? 2 : a.cognitiveLoad === "medium" ? 1 : 0;
+					const db = b.cognitiveLoad === "light" ? 2 : b.cognitiveLoad === "medium" ? 1 : 0;
+					if (da !== db) return db - da;
+				} else if (slot.isPeak) {
+					const la = a.cognitiveLoad === "heavy" ? 2 : a.cognitiveLoad === "medium" ? 1 : 0;
+					const lb = b.cognitiveLoad === "heavy" ? 2 : b.cognitiveLoad === "medium" ? 1 : 0;
+					if (la !== lb) return lb - la;
+				}
+				return (remainingQuota.get(b.subject) ?? 0) + b.urgencyScore - ((remainingQuota.get(a.subject) ?? 0) + a.urgencyScore);
+			});
+
+			const picked = pool[0]!;
+			slotAssignments[slotIdx] = picked;
+			lastAssignedSubject = picked.subject;
+			const slotDur = slot.endMin - slot.startMin;
+			remainingQuota.set(picked.subject, Math.max(0, (remainingQuota.get(picked.subject) ?? 0) - slotDur));
+		}
 	}
 
-	const optimizedAssignments = optimizeSlotAssignments(rawSlots, slotAssignments, sleepCalc.tonightBedMin, dipInfo.dipWindow);
+	const optimizedAssignments = hasExplicitFocus
+		? slotAssignments
+		: optimizeSlotAssignments(rawSlots, slotAssignments, sleepCalc.tonightBedMin, dipInfo.dipWindow);
 	const studyAndBreakBlocks: PlannedBlock[] = [];
 	const actualAssignedBySubject = new Map<string, number>();
 

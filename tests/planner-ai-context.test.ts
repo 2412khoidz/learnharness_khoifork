@@ -137,3 +137,58 @@ it("extracts clock points from a natural journal while rejecting unsupported tim
 	const changed = await evaluateDailyJournalServer({ date, plannerFile, now, mode: "local", journalText: "A different untimed entry." });
 	assert.equal(changed.parsedEntries.length, 0, "changed text must not retain stale extracted intervals");
 });
+
+it("preserves AI/Coach plans across snapshot reloads & metadata edits, and clears old customBlocks on fresh Plan with AI", async () => {
+	const plannerFile = path.join(dir, "preserve-ai-plan.json");
+	const examPrepFile = path.join(dir, "preserve-ai-exams.json");
+	const { writeExamPrepConfig } = await import("../src/server/exam-prep.ts");
+	writeExamPrepConfig({ mode: "exam", upsertExam: { id: "ex_1", title: "OLP 1", date: "2026-11-28", clusterIds: [] } }, examPrepFile);
+
+	// 1. Coach emits explicit blocks at 16:10..18:25
+	const coachRes = await chatWithPlannerCoachServer({
+		date, plannerFile, examPrepFile, now, message: "Chiều làm lab rồi học đại số và giải tích",
+		engineOverride: fakeEngine("submit_coach_response", {
+			reply: "Đã xếp đủ 3 phiên.", shouldApplyChanges: true, regenerateTodaySchedule: true, changesSummary: "3 phiên chiều",
+			todayOverridePatch: {
+				focusSubjects: ["Nghiên cứu lab", "Dạy đại số", "Dạy giải tích"],
+				blocks: [
+					{ startTime: "16:10", endTime: "17:00", type: "study", subject: "Nghiên cứu lab", title: "Nghiên cứu lab — Bài 2" },
+					{ startTime: "17:10", endTime: "17:45", type: "study", subject: "Dạy đại số", title: "Đại số Olympic" },
+				],
+			},
+		}, () => {}),
+	});
+	const savedCoachTitles = coachRes.snapshot.plan.blocks.filter((b) => b.type === "study").map((b) => b.title);
+	assert.deepEqual(savedCoachTitles, ["Nghiên cứu lab — Bài 2", "Đại số Olympic"]);
+
+	// 2. Background Exam Prep profile change + readPlannerSnapshot must NOT wipe the saved Coach plan
+	writeExamPrepConfig({ upsertExam: { id: "ex_2", title: "Cơ sở toán", date: "2026-12-03", clusterIds: [] } }, examPrepFile);
+	const afterReload = readPlannerSnapshot({ plannerFile, examPrepFile, date, now });
+	assert.deepEqual(
+		afterReload.plan.blocks.filter((b) => b.type === "study").map((b) => b.title),
+		savedCoachTitles,
+	);
+	assert.ok(afterReload.config.milestones.some((m) => m.examProfileId === "ex_2"));
+
+	// 3. Metadata patch (pinning a subject / editing milestones) preserves the Coach/AI plan
+	const afterMetaPatch = await import("../src/server/planner.ts").then((m) =>
+		m.patchPlannerConfig({ pinnedSubjects: ["Dạy đại số"] }, { plannerFile, examPrepFile, now }),
+	);
+	assert.deepEqual(
+		afterMetaPatch.plan.blocks.filter((b) => b.type === "study").map((b) => b.title),
+		savedCoachTitles,
+	);
+
+	// 4. Clicking Plan with AI replaces stale Coach customBlocks cleanly instead of keeping old blocks
+	const aiRes = await generatePlannerSchedule({
+		mode: "llm", date, plannerFile, examPrepFile, now,
+		engineOverride: fakeEngine("submit_daily_plan", {
+			coachSummary: "Kế hoạch AI mới.", minDailyStudyHours: 1,
+			quotas: [{ subject: "Giải tích", targetMin: 60, checklist: ["Ôn Rolle"] }],
+			blocks: [{ startTime: "20:00", endTime: "21:00", type: "study", subject: "Giải tích", title: "Phiên AI mới" }],
+		}, () => {}),
+	});
+	assert.equal(aiRes.snapshot.config.dayOverrides?.[date]?.customBlocks, undefined);
+	assert.deepEqual(aiRes.snapshot.plan.blocks.filter((b) => b.type === "study").map((b) => b.title), ["Phiên AI mới"]);
+	assert.deepEqual(readPlannerSnapshot({ plannerFile, examPrepFile, date, now }).plan.blocks.filter((b) => b.type === "study").map((b) => b.title), ["Phiên AI mới"]);
+});

@@ -1136,6 +1136,30 @@ function syncExamPrepProfilesIntoConfig(
 	};
 }
 
+function isPreservedTodayPlan(plan: DailyStudyPlan | undefined, config: PlannerConfig, date: string): boolean {
+	return Boolean(
+		plan &&
+			(plan.engineUsed === "llm" ||
+				plan.modelUsed ||
+				plan.isCustomEdited ||
+				config.dayOverrides?.[date]?.customBlocks !== undefined),
+	);
+}
+
+function clearCustomBlocksForDate(cfg: PlannerConfig, date: string): PlannerConfig {
+	const ov = cfg.dayOverrides?.[date];
+	if (!ov || ov.customBlocks === undefined) return cfg;
+	const { customBlocks: _dropped, ...rest } = ov;
+	const hasRemainingFields = Object.keys(rest).some((k) => k !== "date" && rest[k as keyof typeof rest] !== undefined);
+	const nextOverrides = { ...(cfg.dayOverrides ?? {}) };
+	if (hasRemainingFields) {
+		nextOverrides[date] = rest as DayOverride;
+	} else {
+		delete nextOverrides[date];
+	}
+	return { ...cfg, dayOverrides: nextOverrides };
+}
+
 export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: string; date?: string }): PlannerSnapshotResponse {
 	const now = opts?.now ?? Date.now();
 	const date = isValidDateString(opts?.date) ? opts!.date : localDateString(now);
@@ -1147,8 +1171,10 @@ export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: str
 		config = synced.config;
 	}
 
-	// Use saved LLM/local plan for `date` if already generated, else compute fast 0-token local plan
-	let plan = synced.changed ? undefined : config.plans[date];
+	// Preserve existing AI/Coach-tailored plan across background Exam Prep metadata syncs;
+	// only auto-rebuild when no plan exists or an unsaved local baseline was affected by Exam Prep sync.
+	const existingPlan = config.plans[date];
+	let plan = synced.changed && !isPreservedTodayPlan(existingPlan, config, date) ? undefined : existingPlan;
 	if (!plan) {
 		config = archivePlannerPlan(config, date, now);
 		plan = computeLocalPlannerPlan(config, signals, now);
@@ -1164,6 +1190,10 @@ export function readPlannerSnapshot(opts?: PlannerReadOptions & { chatsDir?: str
 			plan = {
 				...plan,
 				habitStrength: computeHabitStrengthSummary(config, date),
+			};
+			config = {
+				...config,
+				plans: { ...config.plans, [date]: plan },
 			};
 		}
 		if (synced.changed) {
@@ -1293,21 +1323,28 @@ export function patchPlannerConfig(
 	const examChanges = patch.examTimetable !== undefined ? reconcileExamPlans(resolvedNext, current.examTimetable, now) : undefined;
 	if (examChanges) resolvedNext.plans = examChanges.plans;
 
-	const scheduleInputsChanged =
+	const directSchedulePatch =
 		patch.intensity !== undefined ||
 		patch.fixedEvents !== undefined ||
-		patch.milestones !== undefined ||
 		patch.lifestyle !== undefined ||
 		patch.dayOverrides !== undefined ||
 		patch.mutedSubjects !== undefined ||
+		patch.dailyMaxSubjects !== undefined;
+	const metadataSchedulePatch =
+		patch.milestones !== undefined ||
 		patch.pinnedSubjects !== undefined ||
-		patch.dailyMaxSubjects !== undefined ||
 		patch.realismFactor !== undefined ||
 		synced.changed;
+	const existingTodayPlan = resolvedNext.plans[date];
+	const preserveExistingPlan = isPreservedTodayPlan(existingTodayPlan, resolvedNext, date) && !directSchedulePatch;
 
-	if (scheduleInputsChanged || !resolvedNext.plans[date]) {
+	if (!existingTodayPlan || directSchedulePatch || (metadataSchedulePatch && !preserveExistingPlan)) {
 		resolvedNext.planHistory = archivePlannerPlan(resolvedNext, date, now).planHistory;
-		const freshLocal = computeLocalPlannerPlan(resolvedNext, signals, now);
+		const useFromNow = Boolean(
+			patch.dayOverrides !== undefined &&
+			(current.plans[date]?.engineUsed === "llm" || current.plans[date]?.modelUsed),
+		);
+		const freshLocal = computeLocalPlannerPlan(resolvedNext, signals, now, useFromNow ? { fromNow: true } : undefined);
 		resolvedNext.plans = { ...resolvedNext.plans, [date]: freshLocal };
 	}
 
@@ -1486,16 +1523,17 @@ export async function generatePlannerSchedule(opts: {
 	const now = opts.now ?? Date.now();
 	const date = isValidDateString(opts.date) ? opts.date : localDateString(now);
 	const filePath = opts.plannerFile ?? defaultPlannerPath();
-	let config = readPlannerConfig(filePath);
+	let config = clearCustomBlocksForDate(readPlannerConfig(filePath), date);
 	const signals = buildPlannerPersonalSignals(config, { ...opts, date, now });
 	const effectiveMode = opts.mode ?? config.engineMode;
 	const baseline = computeLocalPlannerPlan(config, signals, now, { fromNow: effectiveMode === "llm" });
 	if (effectiveMode === "local") {
+		const latest = clearCustomBlocksForDate(readPlannerConfig(filePath), date);
 		config = savePlannerConfig(
 			{
-				...archivePlannerPlan(config, date, now),
-				engineMode: opts.mode ? "local" : config.engineMode,
-				plans: { ...config.plans, [date]: baseline },
+				...archivePlannerPlan(latest, date, now),
+				engineMode: opts.mode ? "local" : latest.engineMode,
+				plans: { ...latest.plans, [date]: baseline },
 				updatedAt: new Date(now).toISOString(),
 			},
 			filePath,
@@ -1594,7 +1632,7 @@ STRICT RULES:
 		: groundedScheduleAdvice(rawAdvice, aiPlan.blocks).slice(0, 260);
 	aiPlan.coachSummary = `${advice}${advice ? "\n\n" : ""}${actualScheduleText(aiPlan.blocks)}`.slice(0, 800);
 	const saveNow = opts.now ?? Date.now();
-	const latest = readPlannerConfig(filePath);
+	const latest = clearCustomBlocksForDate(readPlannerConfig(filePath), date);
 	config = savePlannerConfig(
 		{
 			...archivePlannerPlan(latest, date, saveNow),
@@ -3844,7 +3882,9 @@ OPERATING RULES:
 0f. settingsOperations can propose changes to the settings sections shown in editableAppSettings using a JSON object patch. Never fabricate settings, model choices or credentials; provider credentials and unsupported settings cannot be changed by this operation. All proposals require the student's review.
 0. Current-day scheduling: replanContext.currentLocalTime is the computer's real local clock. When regenerating today, use only time remaining until bedtime, after fixed commitments, meals and rest. Consider saved journal, today's energy (1–5, always say /5, never /10), sleep, completed work, and learning capacity. Never schedule elapsed time as upcoming or make up times for untimed journal lines. Reduce or omit study if time or energy is insufficient. If the student's stated time differs, state the computer time. Do not claim a schedule change unless submitting it.
 1. Direct Action When Requested: If the student describes their state today ("mệt", "dậy 4h sáng", "food coma", "buồn ngủ sau ăn tối", "lên cơn sau ngủ trưa", "bỏ bớt môn X hôm nay", "chỉnh giờ ăn", "đặt giờ ngủ 22:30", "thêm gym", "giảm game") OR asks you to tailor their routine/schedule/sleep/habits, set \`shouldApplyChanges: true\` and emit exact patches in \`todayOverridePatch\`, \`todayLogPatch\`, and/or \`lifestylePatch\`.
-   - For today's wake/sleep/meals/focus/blocks: put them in \`todayOverridePatch\` and set \`regenerateTodaySchedule: true\`. Only emit \`todayOverridePatch.blocks\` when they specifically want exact block placements; otherwise omit \`blocks\` so the constraint optimizer lays out a non-overlapping schedule around TKB & meals.
+   - For today's wake/sleep/meals/focus/blocks: put them in \`todayOverridePatch\` and set \`regenerateTodaySchedule: true\`.
+   - Always preserve ALL active requested tasks/subjects for today in \`todayOverridePatch.focusSubjects\` in the student's requested priority order (including non-course or ad-hoc tasks such as lab research, reading papers, or project work; never drop subjects or tasks requested earlier in this conversation unless the student asked to drop them).
+   - Whenever the student specifies non-course tasks (such as lab research or paper reading), specific durations/time windows, or an explicit chronological sequence of tasks (e.g., lab -> linear algebra -> calculus), ALWAYS emit explicit non-overlapping \`todayOverridePatch.blocks\` matching the exact order and tasks requested; otherwise you may omit \`blocks\` so the constraint optimizer lays out a non-overlapping schedule around TKB & meals.
    - If the student reports today's actual energy, bedtime, wake time, unintended 4-5 AM awakening, food coma hit, or surfed urge windows: also update \`todayLogPatch\`.
    - If they want persistent habit changes (target bedtime, early waking care, midday nap preference, post-dinner food coma buffer \`sleep.postDinnerComaProtection\` + \`sleep.eveningDrowsyStart\`, default meal times, hobbies, game budget/cutoff, discreet guardrails, muted/pinned subjects, intensity): update \`lifestylePatch\`.
 2. Special Guidance for Food Coma & Wake/Post-Nap Urges / Unwanted Cravings:

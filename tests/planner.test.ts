@@ -2108,4 +2108,122 @@ describe("Study Planner server AI workflows & Mobile Companion sync", () => {
 			unsub();
 		}
 	});
+
+	it("preserves non-course focus tasks alongside multi-cluster exam courses in exact requested order even in healthy afternoon mode", () => {
+		const date = "2026-11-21";
+		const lateAfternoon = new Date(2026, 10, 21, 17, 0).getTime();
+		const config: PlannerConfig = sanitizePlannerConfig({
+			...DEFAULT_PLANNER_CONFIG,
+			intensity: "healthy",
+			dailyMaxSubjects: 2,
+			milestones: [
+				{
+					id: "ep_olp",
+					examProfileId: "olp_1",
+					kind: "exam",
+					title: "OLP sinh viên vòng 1",
+					subject: "Dạy giải tích olympic sinh viên + Dạy đại số olympic sinh viên",
+					dueDate: "2026-11-28",
+					priority: 3,
+					cognitiveLoad: "heavy",
+					clusterIds: ["c_gt", "c_ds"],
+					estimatedHours: 16,
+					completedHours: 0,
+					syllabusTopics: [],
+					notes: "",
+				},
+			],
+			dayOverrides: {
+				[date]: {
+					date,
+					wakeTime: "07:00",
+					focusSubjects: ["Nghiên cứu lab", "Dạy đại số olympic sinh viên", "Dạy giải tích olympic sinh viên"],
+					note: "Đọc Bài 2 trang 1-4 trước khi ôn Olympic",
+				},
+			},
+		});
+		const signals: PlannerPersonalSignals = {
+			date,
+			subjectSignals: [
+				{
+					clusterId: "c_ds",
+					label: "Dạy đại số olympic sinh viên",
+					nodeCount: 20,
+					trackedCount: 15,
+					dueCount: 2,
+					weakCount: 1,
+					untrackedCount: 5,
+					readinessPct: 45,
+					dueSampleNames: [],
+					weakSampleNames: ["Ma trận phụ hợp"],
+					activePlanTopics: ["Nghịch đảo chuyển vị"],
+					recentChatTitles: ["Dạy đại số olympic sinh viên"],
+					lastStudiedAt: new Date(lateAfternoon - 86_400_000).toISOString(),
+				},
+				{
+					clusterId: "c_gt",
+					label: "Dạy giải tích olympic sinh viên",
+					nodeCount: 20,
+					trackedCount: 15,
+					dueCount: 2,
+					weakCount: 1,
+					untrackedCount: 5,
+					readinessPct: 40,
+					dueSampleNames: [],
+					weakSampleNames: ["Giới hạn dãy"],
+					activePlanTopics: ["Định lý Rolle"],
+					recentChatTitles: ["Dạy giải tích olympic sinh viên"],
+					lastStudiedAt: new Date(lateAfternoon - 86_400_000).toISOString(),
+				},
+			],
+			examPrep: {
+				config: {
+					mode: "exam",
+					pace: "efficient",
+					examTitle: "OLP sinh viên vòng 1",
+					examDate: "2026-11-28",
+					clusterIds: ["c_gt", "c_ds"],
+					exams: [{ id: "olp_1", title: "OLP sinh viên vòng 1", date: "2026-11-28", pace: "efficient", clusterIds: ["c_gt", "c_ds"] }],
+					activeExamId: "olp_1",
+					updatedAt: new Date(lateAfternoon).toISOString(),
+				},
+				totalNodeCount: 40,
+				scopedNodeCount: 40,
+				trackedCount: 30,
+				dueCount: 4,
+				weakFoundationsCount: 2,
+				untrackedFoundationsCount: 10,
+				duePropositionNames: [],
+				weakFoundationNames: [],
+				untrackedFoundationNames: [],
+				examReadinessPct: 42,
+				daysRemaining: 7,
+				availableScopes: [
+					{ id: "c_ds", label: "Dạy đại số olympic sinh viên", nodeCount: 20, trackedCount: 15, dueCount: 2, readinessPct: 45 },
+					{ id: "c_gt", label: "Dạy giải tích olympic sinh viên", nodeCount: 20, trackedCount: 15, dueCount: 2, readinessPct: 40 },
+				],
+				activeScopeLabels: ["Dạy đại số olympic sinh viên", "Dạy giải tích olympic sinh viên"],
+				priorityPropositionIds: [],
+				promptDirective: null,
+			},
+			recentSessions: [],
+			habitTrend: {
+				loggedDays: 1,
+				avgEnergy: 4,
+				latestBedtime: "23:15",
+				avgStudyMin: 90,
+			},
+		};
+
+		const plan = computeLocalPlannerPlan(config, signals, lateAfternoon, { fromNow: true });
+		const studyBlocks = plan.blocks.filter((b) => b.type === "study");
+		assert.deepEqual(
+			studyBlocks.slice(0, 3).map((b) => b.subject),
+			["Nghiên cứu lab", "Dạy đại số olympic sinh viên", "Dạy giải tích olympic sinh viên"],
+		);
+		assert.deepEqual(
+			plan.quotas.map((q) => q.subject),
+			["Nghiên cứu lab", "Dạy đại số olympic sinh viên", "Dạy giải tích olympic sinh viên"],
+		);
+	});
 });
