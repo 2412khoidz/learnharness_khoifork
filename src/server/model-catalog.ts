@@ -18,6 +18,7 @@
  */
 
 import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { piModels } from "../agent/models.ts";
 import { customProviderAvailable } from "./custom-provider.ts";
@@ -26,6 +27,7 @@ import { NATIVE_SUBSCRIPTIONS } from "../core/contracts/subscriptions.ts";
 import { nativeSubscriptionId, nativeSubscriptionConnected, nativeSubscriptionModel, nativeSubscriptionModels, refreshSubscriptionModels } from "../agent/subscription-bridge.ts";
 import {
 	addCustomProviderModel,
+	augmentProviderModels,
 	getCustomProviderModels,
 	getDynamicProviderModels,
 	getPausedProviders,
@@ -46,9 +48,10 @@ export {
 
 export async function refreshConnectionCatalog(provider?: string): Promise<void> {
 	await Promise.all([
+		// The subscription bridge trusts the bundled OpenAI catalog plus explicit supplemental/custom ChatGPT models.
 		!provider || provider === "chatgpt"
 			? refreshChatGPTModels(
-				[...piModels().getModels("openai"), ...getDynamicProviderModels("chatgpt")]
+				[...augmentProviderModels("openai", getBuiltinModels("openai")), ...getDynamicProviderModels("chatgpt")]
 					.filter((m): m is Model<"openai-responses"> => m.api === "openai-responses"),
 			)
 			: Promise.resolve(),

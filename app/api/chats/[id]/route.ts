@@ -4,8 +4,10 @@ import { pendingPluginQuestionOf, activeProblemOf, stripToolResultImages } from 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
 	const { id } = await params;
 	// Metadata-only reads for views that already hold the transcript.
-	const only = new URL(req.url).searchParams.get("only");
+	const url = new URL(req.url);
+	const only = url.searchParams.get("only") ?? url.searchParams.get("view");
 	if (only === "stats" || only === "coverage" || only === "settings") {
+		// Stats/metadata refreshes don't adopt history or need plugin availability.
 		const chat = getChat(id);
 		if (!chat) return Response.json({ error: "Not found" }, { status: 404 });
 		if (only === "stats") return Response.json({ turns: chat.turns, pricing: sessionCost(chat) });

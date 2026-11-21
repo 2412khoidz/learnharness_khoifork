@@ -40,7 +40,7 @@ const dock = (input: { statement: string }, expanded = true) => (
 function math(html: string) {
 	const { document } = parseHTML(html);
 	return {
-		annotations: [...document.querySelectorAll('annotation[encoding="application/x-tex"]')].map((n) => n.textContent),
+		annotations: [...document.querySelectorAll('.katex[data-tex]')].map((n) => n.getAttribute('data-tex')),
 		glyphs: [...document.querySelectorAll(".katex-html")].map((n) => n.textContent).join(""),
 		errors: document.querySelectorAll(".katex-error").length,
 	};
@@ -313,9 +313,9 @@ describe("bare LaTeX display wrapping for legacy graph nodes", () => {
 		);
 		const actual = math(html);
 		assert.equal(actual.errors, 0);
-		assert.ok(actual.annotations.some((a) => a.includes("Q_1") && a.includes("\\times")));
-		assert.ok(actual.annotations.some((a) => a.includes("\\le") && a.includes("f'(x)")));
-		assert.ok(actual.annotations.some((a) => a.includes("\\in") && a.includes("\\mathbb{R}")));
+		assert.ok(actual.annotations.some((a) => Boolean(a && a.includes("Q_1") && a.includes("\\times"))));
+		assert.ok(actual.annotations.some((a) => Boolean(a && a.includes("\\le") && a.includes("f'(x)"))));
+		assert.ok(actual.annotations.some((a) => Boolean(a && a.includes("\\in") && a.includes("\\mathbb{R}"))));
 		assert.ok(actual.glyphs.includes("×"));
 		assert.ok(actual.glyphs.includes("≤"));
 		assert.ok(actual.glyphs.includes("∈"));

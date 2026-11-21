@@ -217,6 +217,11 @@ describe("provider-neutral raw agent loops", { concurrency: false }, () => {
 						const expected = transport.provider === "openrouter" ? OR_KEY : round === 0 ? "dummy-selected-key-first" : "dummy-selected-key-rotated";
 						assert.equal(request.headers.get(transport.authHeader), transport.authHeader === "authorization" ? `Bearer ${expected}` : expected);
 						if (transport.provider !== "openrouter") assert.ok(!JSON.stringify({ ...request, headers: Object.fromEntries(request.headers) }).includes(OR_KEY));
+						if (transport.provider === "anthropic") {
+							assert.ok(!Object.hasOwn(request.body, "thread"), "key rotation must not reuse a server-side thread");
+							assert.doesNotMatch(request.headers.get("anthropic-beta") ?? "", /message-threads/);
+							assert.match(JSON.stringify(request.body), /cache_control/, "native prompt caching is independent of threads");
+						}
 						assertPayload(transport, loop, round, request.body);
 					}
 				});
