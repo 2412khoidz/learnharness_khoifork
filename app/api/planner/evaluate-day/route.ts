@@ -20,6 +20,7 @@ export async function POST(request: Request) {
 	const manualEntries = Array.isArray(obj.manualEntries) ? (obj.manualEntries as JournalActivityEntry[]) : undefined;
 	const mode = obj.mode === "llm" ? "llm" : "local";
 	const discreet = obj.discreet !== false;
+	const formatJournal = obj.formatJournal !== false;
 	const preferredRole =
 		typeof obj.preferredRole === "string" && ALLOWED_ROLES.has(obj.preferredRole)
 			? (obj.preferredRole as ModelRole)
@@ -32,6 +33,7 @@ export async function POST(request: Request) {
 			manualEntries,
 			mode,
 			discreet,
+			formatJournal,
 			preferredRole,
 			signal: request.signal,
 		});

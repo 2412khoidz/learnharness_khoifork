@@ -171,6 +171,35 @@ export interface PlanComplianceReport {
 	nextDayAdvice: string;
 }
 
+export interface ActiveJournalActivity {
+	label: string;
+	category: JournalActivityCategory;
+	subject?: string;
+	startedAt: string;
+}
+
+export interface PresenceAwayInterval {
+	startTime: string;
+	endTime: string;
+	reason: "sleep" | "lock" | "idle";
+}
+
+export interface PresenceDaySummary {
+	date: string;
+	firstActiveAt?: string;
+	lastActiveAt?: string;
+	awayIntervals: PresenceAwayInterval[];
+}
+
+export interface JournalDraftItem {
+	startTime: string;
+	endTime?: string;
+	category: JournalActivityCategory;
+	subject?: string;
+	label: string;
+	source: "wake" | "session" | "fsrs" | "checked_block" | "fixed_event" | "presence_away" | "presence_wake";
+}
+
 export interface DailyHabitLog {
 	date: string; // YYYY-MM-DD
 	actualBedtime?: string;
@@ -190,6 +219,7 @@ export interface DailyHabitLog {
 	note?: string;
 	journalText?: string;
 	actualEntries?: JournalActivityEntry[];
+	activeActivity?: ActiveJournalActivity;
 	/** Explicitly recorded counts; no time or duration is inferred. */
 	habitCounts?: Array<{ id: string; name: string; count: number }>;
 	compliance?: PlanComplianceReport;
@@ -459,6 +489,8 @@ export interface PlannerPersonalSignals {
 	mistakeHints?: ExamPrepMistakeHints;
 	recentSessions: PlannerSessionSummary[];
 	autoTrackedStudyMinBySubject?: Record<string, number>;
+	autoDraftItems?: JournalDraftItem[];
+	presenceSummary?: PresenceDaySummary;
 	learningProfile?: PlannerLearningProfile;
 	habitTrend: {
 		loggedDays: number;
@@ -913,6 +945,19 @@ function sanitizePlannedBlocks(raw: unknown, dateFallback: string): PlannedBlock
 	return out.sort((a, b) => a.startMin - b.startMin);
 }
 
+function normalizeJournalCategory(cat: unknown): JournalActivityCategory {
+	return cat === "study" ||
+		cat === "class" ||
+		cat === "sleep" ||
+		cat === "meal" ||
+		cat === "hobby" ||
+		cat === "rest" ||
+		cat === "distraction" ||
+		cat === "other"
+		? cat
+		: "other";
+}
+
 function sanitizeActualEntries(raw: unknown, dateFallback: string): JournalActivityEntry[] {
 	if (!Array.isArray(raw)) return [];
 	const out: JournalActivityEntry[] = [];
@@ -929,11 +974,7 @@ function sanitizeActualEntries(raw: unknown, dateFallback: string): JournalActiv
 				? clamp(e > startMin ? e - startMin : e + 1440 - startMin, 1, 720)
 				: 30;
 		const endMin = e !== null ? (e > startMin ? e : e + 1440) : startMin + minutes;
-		const cat = r.category;
-		const category: JournalActivityCategory =
-			cat === "study" || cat === "class" || cat === "sleep" || cat === "meal" || cat === "hobby" || cat === "rest" || cat === "distraction" || cat === "other"
-				? cat
-				: "other";
+		const category = normalizeJournalCategory(r.category);
 		const title = typeof r.title === "string" && r.title.trim() ? r.title.trim().slice(0, 140) : "Logged activity";
 		const src = r.source === "manual" || r.source === "ai_extracted" ? r.source : "parsed_text";
 		out.push({
@@ -1107,6 +1148,24 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			return [{ id: item.id.trim().slice(0, 80), name: item.name.trim().slice(0, 120), count: item.count }];
 		}).slice(0, 100) : [];
 		const compliance = sanitizeComplianceReport(v.compliance, date);
+		const rawActive =
+			v.activeActivity && typeof v.activeActivity === "object" && !Array.isArray(v.activeActivity)
+				? (v.activeActivity as Record<string, unknown>)
+				: null;
+		const activeActivity: ActiveJournalActivity | undefined =
+			rawActive &&
+			typeof rawActive.label === "string" &&
+			rawActive.label.trim() &&
+			parseClockMin(rawActive.startedAt) !== null
+				? {
+					label: rawActive.label.trim().slice(0, 80),
+					category: normalizeJournalCategory(rawActive.category),
+					...(typeof rawActive.subject === "string" && rawActive.subject.trim()
+						? { subject: rawActive.subject.trim().slice(0, 80) }
+						: {}),
+					startedAt: normalizeClockString(rawActive.startedAt, "08:00"),
+				}
+				: undefined;
 		out[date] = {
 			date,
 			...(parseClockMin(v.actualBedtime) !== null ? { actualBedtime: normalizeClockString(v.actualBedtime, "23:30") } : {}),
@@ -1130,6 +1189,7 @@ function sanitizeLogs(raw: unknown): Record<string, DailyHabitLog> {
 			...(typeof v.note === "string" && v.note.trim() ? { note: v.note.trim().slice(0, 4000) } : {}),
 			...(typeof v.journalText === "string" && v.journalText.trim() ? { journalText: v.journalText.trim().slice(0, 4000) } : {}),
 			...(actualEntries.length > 0 ? { actualEntries } : {}),
+			...(activeActivity ? { activeActivity } : {}),
 			...(habitCounts.length > 0 ? { habitCounts } : {}),
 			...(compliance ? { compliance } : {}),
 			...(typeof v.updatedAt === "string" ? { updatedAt: v.updatedAt } : {}),
@@ -3709,6 +3769,7 @@ export interface HabitCheckInPatch {
 	journalText?: string;
 	actualEntries?: JournalActivityEntry[];
 	habitCounts?: DailyHabitLog["habitCounts"];
+	switchActivity?: { label: string; category?: JournalActivityCategory; subject?: string } | null;
 }
 
 export function applyHabitCheckIn(
@@ -3805,6 +3866,47 @@ export function applyHabitCheckIn(
 				? clamp((existing.urgesSurfed ?? 0) + 1, 0, 100)
 				: existing.urgesSurfed;
 
+	let nextJournalText = patch.journalText !== undefined ? patch.journalText.trim() : (existing.journalText ?? "").trim();
+	let nextActiveActivity: ActiveJournalActivity | undefined = existing.activeActivity;
+	if (patch.switchActivity !== undefined) {
+		const nowDate = new Date(now);
+		const nowClock = formatClockMin(nowDate.getHours() * 60 + nowDate.getMinutes());
+		if (existing.activeActivity) {
+			const startMin = parseClockMin(existing.activeActivity.startedAt);
+			const endMin = parseClockMin(nowClock);
+			const elapsedMin =
+				startMin !== null && endMin !== null
+					? endMin >= startMin
+						? endMin - startMin
+						: endMin + 1440 - startMin
+					: 0;
+			if (elapsedMin >= 2 && elapsedMin <= 720) {
+				const entryLine = `${existing.activeActivity.startedAt} - ${nowClock} : ${existing.activeActivity.label}`;
+				if (!nextJournalText.includes(entryLine)) {
+					nextJournalText = nextJournalText ? `${nextJournalText}\n${entryLine}` : entryLine;
+				}
+				if (existing.activeActivity.category === "study" && existing.activeActivity.subject) {
+					loggedStudyMinBySubject[existing.activeActivity.subject] =
+						(loggedStudyMinBySubject[existing.activeActivity.subject] ?? 0) + elapsedMin;
+				}
+			}
+		}
+		if (patch.switchActivity === null) {
+			nextActiveActivity = undefined;
+		} else if (patch.switchActivity.label.trim()) {
+			const cleanLabel = patch.switchActivity.label.trim().slice(0, 80);
+			const knownSubjects = config.milestones.map((m) => m.subject);
+			const classified = classifyJournalLine(cleanLabel, knownSubjects);
+			const resolvedSubject = patch.switchActivity.subject?.trim() || classified.subject;
+			nextActiveActivity = {
+				label: cleanLabel,
+				category: patch.switchActivity.category ?? classified.category,
+				...(resolvedSubject ? { subject: resolvedSubject.slice(0, 80) } : {}),
+				startedAt: nowClock,
+			};
+		}
+	}
+
 	const nextLog: DailyHabitLog = {
 		...existing,
 		...(patch.actualBedtime === null ? { actualBedtime: undefined } : patch.actualBedtime !== undefined && parseClockMin(patch.actualBedtime) !== null
@@ -3825,7 +3927,10 @@ export function applyHabitCheckIn(
 		...(patch.mealsOk !== undefined ? { mealsOk: patch.mealsOk } : {}),
 		...(patch.sleepOnTarget !== undefined ? { sleepOnTarget: patch.sleepOnTarget } : {}),
 		...(patch.note !== undefined ? { note: patch.note.trim().slice(0, 4000) } : {}),
-		...(patch.journalText !== undefined ? { journalText: patch.journalText.trim().slice(0, 4000) } : {}),
+		...(patch.journalText !== undefined || patch.switchActivity !== undefined
+			? { journalText: nextJournalText.slice(0, 4000) }
+			: {}),
+		...(patch.switchActivity !== undefined ? { activeActivity: nextActiveActivity } : {}),
 		...(patch.actualEntries !== undefined ? { actualEntries: sanitizeActualEntries(patch.actualEntries, date) } : {}),
 		...(patch.habitCounts !== undefined ? { habitCounts: patch.habitCounts } : {}),
 		completedBlockIds: [...completedBlockIds],
@@ -4431,14 +4536,125 @@ export function parseJournalTextLocal(
 	return out;
 }
 
-/** Explicit clock points in natural text, including Vietnamese 8r = 08:30. */
+/** Explicit clock points in natural text, including Vietnamese 8r, 8h rưỡi, 8 giờ 30, and 8g30. */
 export function journalClockPoints(text: string): Set<string> {
 	const points = new Set<string>();
-	for (const match of text.matchAll(/(?<![\p{L}\p{N}_])(\d{1,2})\s*(?:(:|h)\s*(\d{1,2})?|([rR])(?![\p{L}\p{N}_]))/giu)) {
-		const hour = Number(match[1]), minute = match[4] ? 30 : Number(match[3] ?? 0);
+	const re = /(?<![\p{L}\p{N}_])(\d{1,2})\s*(?:(:)\s*(\d{1,2})(?![\p{L}\p{N}_])|(h)(?:(\d{1,2})(?![\p{L}\p{N}_])|\s*(\d{2})(?![\p{L}\p{N}_])|\s*(rưỡi|ruoi|r(?![\p{L}\p{N}_])))?|(giờ|gio)(?:\s*(\d{1,2})(?![\p{L}\p{N}_])|\s*(rưỡi|ruoi))?|(g)(?:(\d{2})(?![\p{L}\p{N}_])|\s*(rưỡi|ruoi))|([rR])(?![\p{L}\p{N}_]))/giu;
+	for (const match of text.matchAll(re)) {
+		const hour = Number(match[1]);
+		const isHalf = Boolean(match[7] || match[10] || match[13] || match[14]);
+		const minStr = match[3] ?? match[5] ?? match[6] ?? match[9] ?? match[12];
+		const minute = isHalf ? 30 : Number(minStr ?? 0);
 		if (hour <= 23 && minute <= 59) points.add(formatClockMin(hour * 60 + minute));
 	}
 	return points;
+}
+
+/**
+ * Validate and normalize AI-formatted 24h journal text (`HH:MM - HH:MM : <activity>`
+ * and `HH:MM : <activity>`), rejecting ungrounded/hallucinated clocks and truncated rewrites.
+ */
+export function sanitizeFormattedJournalText(
+	formatted: string | undefined,
+	rawJournalText: string,
+	opts?: {
+		allowedExtraClocks?: readonly string[];
+		discreet?: boolean;
+	},
+): string | null {
+	if (!formatted?.trim() || !rawJournalText.trim()) return null;
+	const rawClocks = journalClockPoints(rawJournalText);
+	if (rawClocks.size === 0) return null;
+
+	const allowedClocks = new Set<string>([...rawClocks, ...(opts?.allowedExtraClocks ?? [])]);
+	const usedClocks = new Set<string>();
+	const outLines: string[] = [];
+	const seenLines = new Set<string>();
+	const pushLine = (line: string) => {
+		if (!line || seenLines.has(line)) return;
+		seenLines.add(line);
+		outLines.push(line);
+	};
+
+	const rangeRe = /^(\d{1,2})\s*(?::|h)\s*(\d{1,2})?\s*(?:-|–|—|to|den|đến)\s*(\d{1,2})\s*(?::|h)\s*(\d{1,2})?\s*(?:[:\-–—]\s*)?(.*)$/iu;
+	const singleRe = /^(\d{1,2})\s*(?:(:|h)\s*(\d{1,2})?|([rR])(?![\p{L}\p{N}_]))\s*(?:[:\-–—]\s*)?(.*)$/iu;
+
+	for (const rawLine of formatted.split(/\r?\n/)) {
+		const trimmed = rawLine.trim().replace(/^[-*•]\s+/, "");
+		if (!trimmed) continue;
+
+		const rangeMatch = trimmed.match(rangeRe);
+		if (rangeMatch) {
+			const startMin = parseFlexibleTimeToken(rangeMatch[1]!, rangeMatch[2]);
+			const endMin = parseFlexibleTimeToken(rangeMatch[3]!, rangeMatch[4]);
+			const desc = (rangeMatch[5] ?? "").replace(/^[\s:.\-–—]+/, "").trim();
+			if (!desc) continue;
+
+			if (startMin !== null && endMin !== null && startMin !== endMin) {
+				const startTime = formatClockMin(startMin);
+				const endTime = formatClockMin(endMin);
+				const startOk = allowedClocks.has(startTime);
+				const endOk = allowedClocks.has(endTime);
+				if (startOk && endOk) {
+					usedClocks.add(startTime);
+					usedClocks.add(endTime);
+					pushLine(`${startTime} - ${endTime} : ${desc}`);
+				} else if (startOk) {
+					usedClocks.add(startTime);
+					pushLine(`${startTime} : ${desc}`);
+				} else if (endOk) {
+					usedClocks.add(endTime);
+					pushLine(`${endTime} : ${desc}`);
+				} else {
+					pushLine(desc);
+				}
+			} else if (startMin !== null && startMin === endMin) {
+				const clockTime = formatClockMin(startMin);
+				if (allowedClocks.has(clockTime)) {
+					usedClocks.add(clockTime);
+					pushLine(`${clockTime} : ${desc}`);
+				} else {
+					pushLine(desc);
+				}
+			} else {
+				pushLine(desc);
+			}
+			continue;
+		}
+
+		const singleMatch = trimmed.match(singleRe);
+		if (singleMatch) {
+			const hour = Number(singleMatch[1]);
+			const minute = singleMatch[4] ? 30 : Number(singleMatch[3] ?? 0);
+			const desc = (singleMatch[5] ?? "").replace(/^[\s:.\-–—]+/, "").trim();
+			if (!desc) continue;
+
+			if (hour <= 23 && minute <= 59) {
+				const clockTime = formatClockMin(hour * 60 + minute);
+				if (allowedClocks.has(clockTime)) {
+					usedClocks.add(clockTime);
+					pushLine(`${clockTime} : ${desc}`);
+				} else {
+					pushLine(desc);
+				}
+			} else {
+				pushLine(desc);
+			}
+			continue;
+		}
+
+		pushLine(trimmed);
+	}
+
+	const coveredRaw = [...rawClocks].filter((c) => usedClocks.has(c)).length;
+	if (outLines.length === 0 || usedClocks.size === 0 || coveredRaw < Math.ceil(rawClocks.size * 0.5)) {
+		return null;
+	}
+
+	const joined = outLines.join("\n").trim();
+	const masked = opts?.discreet ? redactSensitiveJournalText(joined) : joined;
+	const finalText = masked.trim().slice(0, 4000);
+	return finalText || null;
 }
 
 /**
@@ -4639,4 +4855,289 @@ export function applyJournalEvaluationToConfig(
 		},
 		config,
 	);
+}
+
+// ─── Auto-Draft Journal & Copy-Plan Helpers ──────────────────────────────────
+
+function intervalOverlapRatio(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
+	const overlap = Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+	return overlap / Math.max(1, aEnd - aStart);
+}
+
+function groupTimestampsIntoBursts(
+	timestamps: readonly number[],
+	date: string,
+	maxGapMs: number,
+	minCount: number,
+): Array<{ startMs: number; endMs: number; count: number }> {
+	const sorted = timestamps
+		.filter((t) => Number.isFinite(t) && localDateString(t) === date)
+		.sort((a, b) => a - b);
+	if (sorted.length === 0) return [];
+
+	const clusters: Array<{ startMs: number; endMs: number; count: number }> = [];
+	let curStart = sorted[0]!;
+	let curEnd = sorted[0]!;
+	let curCount = 1;
+
+	for (let i = 1; i < sorted.length; i++) {
+		const ts = sorted[i]!;
+		if (ts - curEnd <= maxGapMs) {
+			curEnd = ts;
+			curCount++;
+		} else {
+			if (curCount >= minCount || curEnd - curStart >= 5 * 60_000) {
+				clusters.push({ startMs: curStart, endMs: curEnd, count: curCount });
+			}
+			curStart = ts;
+			curEnd = ts;
+			curCount = 1;
+		}
+	}
+	if (curCount >= minCount || curEnd - curStart >= 5 * 60_000) {
+		clusters.push({ startMs: curStart, endMs: curEnd, count: curCount });
+	}
+	return clusters;
+}
+
+function mergeJournalLinesDedup(candidateLines: readonly string[], existingJournalText?: string): string {
+	const existing = (existingJournalText ?? "").trim();
+	const existingLines = existing
+		.split(/\r?\n/)
+		.map((l) => l.trim())
+		.filter(Boolean);
+	const added: string[] = [];
+
+	for (const line of candidateLines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		const rangePrefix = trimmed.match(/^(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})\b/);
+		const singlePrefix = !rangePrefix ? trimmed.match(/^(\d{2}:\d{2})\s*:/) : null;
+		const alreadyPresent = existingLines.some((ex) => {
+			if (ex === trimmed) return true;
+			if (rangePrefix) {
+				const re = new RegExp(`^${rangePrefix[1]}\\s*[-–—]\\s*${rangePrefix[2]}\\b`);
+				return re.test(ex);
+			}
+			if (singlePrefix) {
+				const re = new RegExp(`^${singlePrefix[1]}\\s*:`);
+				return re.test(ex);
+			}
+			return false;
+		});
+		if (!alreadyPresent && !added.includes(trimmed)) {
+			added.push(trimmed);
+		}
+	}
+
+	const combined = existing ? (added.length > 0 ? `${existing}\n${added.join("\n")}` : existing) : added.join("\n");
+	return combined.trim().slice(0, 4000);
+}
+
+/**
+ * Build chronological auto-draft journal items from signals ChronoHarness already knows:
+ * wake check-in, desktop first-active/away windows, Teaching/Practice chat bursts, FSRS bursts,
+ * checked blocks, and elapsed fixed events / exams.
+ */
+export function buildJournalAutoDraft(opts: {
+	date: string;
+	now: number;
+	plan?: DailyStudyPlan;
+	log?: DailyHabitLog;
+	fixedEvents?: readonly FixedWeeklyEvent[];
+	examTimetable?: readonly ExamTimetableEntry[];
+	sessionActivity?: ReadonlyArray<{ title: string; subject?: string; timestamps: readonly number[] }>;
+	fsrsReviewTimestamps?: readonly number[];
+	presence?: PresenceDaySummary;
+}): JournalDraftItem[] {
+	const { date, now, plan, log, presence } = opts;
+	const isToday = date === localDateString(now);
+	const nowObj = new Date(now);
+	const cutoffMin = isToday ? nowObj.getHours() * 60 + nowObj.getMinutes() : 24 * 60;
+
+	const items: JournalDraftItem[] = [];
+	const busyIntervals: Array<{ startMin: number; endMin: number; source: string }> = [];
+
+	// 1. Wake marker
+	if (log?.actualWakeTime && parseClockMin(log.actualWakeTime) !== null) {
+		items.push({
+			startTime: log.actualWakeTime,
+			category: "sleep",
+			label: "Thức dậy",
+			source: "wake",
+		});
+	} else if (presence?.firstActiveAt && parseClockMin(presence.firstActiveAt) !== null) {
+		items.push({
+			startTime: presence.firstActiveAt,
+			category: "other",
+			label: "Mở máy tính đầu ngày",
+			source: "presence_wake",
+		});
+	}
+
+	// 2. Teaching / Practice chat clusters (allow up to 45m thinking/problem-solving gap within one session)
+	for (const sess of opts.sessionActivity ?? []) {
+		const bursts = groupTimestampsIntoBursts(sess.timestamps, date, 45 * 60_000, 2);
+		for (const burst of bursts) {
+			const sDate = new Date(burst.startMs);
+			const eDate = new Date(burst.endMs);
+			const startMin = sDate.getHours() * 60 + sDate.getMinutes();
+			const rawEndMin = eDate.getHours() * 60 + eDate.getMinutes();
+			const endMin = Math.min(cutoffMin, Math.max(startMin + 10, rawEndMin));
+			if (endMin <= startMin) continue;
+			const targetName = (sess.subject || sess.title || "Bài học").trim();
+			items.push({
+				startTime: formatClockMin(startMin),
+				endTime: formatClockMin(endMin),
+				category: "study",
+				...(sess.subject ? { subject: sess.subject } : {}),
+				label: `Học ${targetName}`.slice(0, 120),
+				source: "session",
+			});
+			busyIntervals.push({ startMin, endMin, source: "session" });
+		}
+	}
+
+	// 3. FSRS flashcard review bursts
+	for (const burst of groupTimestampsIntoBursts(opts.fsrsReviewTimestamps ?? [], date, 15 * 60_000, 3)) {
+		const sDate = new Date(burst.startMs);
+		const eDate = new Date(burst.endMs);
+		const startMin = sDate.getHours() * 60 + sDate.getMinutes();
+		const rawEndMin = eDate.getHours() * 60 + eDate.getMinutes();
+		const endMin = Math.min(cutoffMin, Math.max(startMin + 10, rawEndMin));
+		if (endMin <= startMin) continue;
+		items.push({
+			startTime: formatClockMin(startMin),
+			endTime: formatClockMin(endMin),
+			category: "study",
+			label: `Ôn Flashcards FSRS (${burst.count} thẻ)`,
+			source: "fsrs",
+		});
+		busyIntervals.push({ startMin, endMin, source: "fsrs" });
+	}
+
+	// 4. Checked planned blocks not already covered >= 50% by session clusters
+	const completedIds = new Set(log?.completedBlockIds ?? []);
+	for (const blk of plan?.blocks ?? []) {
+		if (!completedIds.has(blk.id) || blk.type === "break" || blk.type === "sleep") continue;
+		if (blk.endMin <= blk.startMin) continue;
+		const overlappedBySession = busyIntervals.some(
+			(b) => b.source === "session" && intervalOverlapRatio(blk.startMin, blk.endMin, b.startMin, b.endMin) >= 0.5,
+		);
+		if (overlappedBySession) continue;
+		const category: JournalActivityCategory =
+			blk.type === "study"
+				? "study"
+				: blk.type === "meal"
+					? "meal"
+					: blk.type === "hobby"
+						? "hobby"
+						: blk.type === "fixed"
+							? "class"
+							: "other";
+		items.push({
+			startTime: blk.startTime,
+			endTime: blk.endTime,
+			category,
+			...(blk.subject ? { subject: blk.subject } : {}),
+			label: blk.title.slice(0, 120),
+			source: "checked_block",
+		});
+		busyIntervals.push({ startMin: blk.startMin, endMin: blk.endMin, source: "checked_block" });
+	}
+
+	// 5. Elapsed fixed events & exam timetable entries
+	const weekday = weekdayForDate(date);
+	for (const ev of opts.fixedEvents ?? []) {
+		if (ev.dayOfWeek !== weekday) continue;
+		const sMin = parseClockMin(ev.startTime);
+		const eMin = parseClockMin(ev.endTime);
+		if (sMin === null || eMin === null || eMin <= sMin || eMin > cutoffMin) continue;
+		const cat: JournalActivityCategory =
+			ev.category === "commute" ? "rest" : ev.category === "other" ? "other" : "class";
+		items.push({
+			startTime: formatClockMin(sMin),
+			endTime: formatClockMin(eMin),
+			category: cat,
+			label: ev.title.slice(0, 120),
+			source: "fixed_event",
+		});
+		busyIntervals.push({ startMin: sMin, endMin: eMin, source: "fixed_event" });
+	}
+	for (const ex of opts.examTimetable ?? []) {
+		if (ex.date !== date || !ex.startTime || !ex.endTime) continue;
+		const sMin = parseClockMin(ex.startTime);
+		const eMin = parseClockMin(ex.endTime);
+		if (sMin === null || eMin === null || eMin <= sMin || eMin > cutoffMin) continue;
+		items.push({
+			startTime: formatClockMin(sMin),
+			endTime: formatClockMin(eMin),
+			category: "class",
+			label: ex.title.slice(0, 120),
+			source: "fixed_event",
+		});
+		busyIntervals.push({ startMin: sMin, endMin: eMin, source: "fixed_event" });
+	}
+
+	// 6. Desktop presence away windows not overlapped >= 40% by app/fixed items
+	for (const aw of presence?.awayIntervals ?? []) {
+		const sMin = parseClockMin(aw.startTime);
+		const eMin = parseClockMin(aw.endTime);
+		if (sMin === null || eMin === null || eMin <= sMin || eMin > cutoffMin) continue;
+		const covered = busyIntervals.some((b) => intervalOverlapRatio(sMin, eMin, b.startMin, b.endMin) >= 0.4);
+		if (covered) continue;
+		const reasonText =
+			aw.reason === "sleep" ? "tắt/ngủ máy" : aw.reason === "lock" ? "khóa màn hình" : "không hoạt động";
+		items.push({
+			startTime: formatClockMin(sMin),
+			endTime: formatClockMin(eMin),
+			category: "rest",
+			label: `Rời máy (${reasonText})`,
+			source: "presence_away",
+		});
+	}
+
+	// Chronological sort + dedup
+	const seen = new Set<string>();
+	return items
+		.sort((a, b) => {
+			const diff = (parseClockMin(a.startTime) ?? 0) - (parseClockMin(b.startTime) ?? 0);
+			if (diff !== 0) return diff;
+			return (a.endTime ?? "").localeCompare(b.endTime ?? "");
+		})
+		.filter((item) => {
+			const key = `${item.startTime}|${item.endTime ?? ""}|${item.label}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+}
+
+/** Format `JournalDraftItem[]` into clean `HH:MM - HH:MM : label` lines without duplicating existing entries. */
+export function formatJournalDraftLines(items: readonly JournalDraftItem[], existingJournalText?: string): string {
+	const candidateLines = items.map((item) =>
+		item.endTime ? `${item.startTime} - ${item.endTime} : ${item.label}` : `${item.startTime} : ${item.label}`,
+	);
+	return mergeJournalLinesDedup(candidateLines, existingJournalText);
+}
+
+/** Copy elapsed study/meal/hobby/fixed blocks from a day's plan into `HH:MM - HH:MM : title` journal lines. */
+export function buildFromPlanJournalLines(
+	plan: DailyStudyPlan | undefined,
+	now: number,
+	existingJournalText?: string,
+): string {
+	if (!plan || !Array.isArray(plan.blocks)) return (existingJournalText ?? "").trim();
+	const isToday = plan.date === localDateString(now);
+	const nowObj = new Date(now);
+	const cutoffMin = isToday ? nowObj.getHours() * 60 + nowObj.getMinutes() : 24 * 60;
+	const candidateLines = plan.blocks
+		.filter(
+			(b) =>
+				(b.type === "study" || b.type === "meal" || b.type === "hobby" || b.type === "fixed") &&
+				b.endMin > b.startMin &&
+				(!isToday || b.endMin <= cutoffMin),
+		)
+		.map((b) => `${b.startTime} - ${b.endTime} : ${b.title}`);
+	return mergeJournalLinesDedup(candidateLines, existingJournalText);
 }

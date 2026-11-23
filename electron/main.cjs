@@ -24,8 +24,9 @@
  *     would shadow every settings-page key change until restart.
  */
 
-const { app, BrowserWindow, Menu, ipcMain, nativeTheme, session, shell, dialog } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, nativeTheme, powerMonitor, session, shell, dialog } = require("electron");
 const { pickAttachmentPath } = require("./attachment-picker.cjs");
+const { createPresenceTracker } = require("./presence-tracker.cjs");
 const { createChatGPT, fileStore } = require("./chatgpt.cjs");
 const { attachChatGPTChild, trustedSender, chatGPTControl } = require("./chatgpt-ipc.cjs");
 const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cjs");
@@ -157,6 +158,7 @@ let subscriptions = null;
 let subscriptionChild = null;
 // Per-launch request capability, never OAuth tokens and never renderer state.
 let desktopAPISecret = null;
+let presenceTracker = null;
 let reopenWindow = null;
 const trustedAppWindows = new Set();
 
@@ -676,7 +678,10 @@ async function main() {
 	});
 
 	// The child must not outlive us — cover every quit path.
-	app.on("before-quit", killServer);
+	app.on("before-quit", () => {
+		presenceTracker?.stop();
+		killServer();
+	});
 	process.on("exit", killServer);
 	process.on("SIGHUP", killServer);
 
@@ -684,10 +689,12 @@ async function main() {
 
 	// Read the same record/custom theme the server uses before constructing
 	// any native window, including the external development shell.
-	appearance = readAppearance(serverDataDir({
+	const resolvedDataDir = serverDataDir({
 		devUrl: process.env.LH_DEV_URL, env: process.env,
 		packagedDataDir: DATA_DIR(), repoRoot: path.join(__dirname, ".."),
-	}));
+	});
+	appearance = readAppearance(resolvedDataDir);
+	presenceTracker = createPresenceTracker({ dataDir: resolvedDataDir, powerMonitor });
 	nativeTheme.themeSource = themeSourceFor(appearance.mode);
 
 	// Dev mode: point at a running `next dev` server (LH_DEV_URL) — no

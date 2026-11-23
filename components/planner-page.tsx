@@ -4,11 +4,13 @@ import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "rea
 import Link from "next/link";
 import {
 	addDaysToDate,
+	buildFromPlanJournalLines,
 	buildMonthGridDates,
 	clipPreservingLatex,
 	computeLocalPlannerPlan,
 	daysBetweenDates,
 	formatClockMin,
+	formatJournalDraftLines,
 	formatPlainMathPreview,
 	journalBedtimeForNight,
 	journalWakeForDate,
@@ -46,6 +48,7 @@ import {
 import { TopBar } from "@/components/top-bar";
 import { HostMarkdown } from "@/components/host-markdown";
 import { BrailleSpinner } from "@/components/braille-spinner";
+import { DICTATION_KEYLESS, joinDictation, useDictation } from "@/components/dictation";
 import { PlannerCoachChat, type CoachProposalPreview } from "@/components/planner-coach-chat";
 import { PlannerExamTimetable } from "@/components/planner-exam-timetable";
 import { PlannerCapacityModal } from "@/components/planner-capacity-modal";
@@ -60,6 +63,7 @@ import {
 	ChevronLeftIcon,
 	ChevronRightIcon,
 	CircleIcon,
+	ClipboardListIcon,
 	CpuIcon,
 	EyeIcon,
 	EyeOffIcon,
@@ -69,6 +73,7 @@ import {
 	ImagePlusIcon,
 	Link2Icon,
 	MessageSquareTextIcon,
+	MicIcon,
 	MoonIcon,
 	PauseIcon,
 	PencilIcon,
@@ -82,6 +87,7 @@ import {
 	ShieldCheckIcon,
 	SlidersHorizontalIcon,
 	SparklesIcon,
+	SquareIcon,
 	TrashIcon,
 	WandSparklesIcon,
 	XIcon,
@@ -4009,12 +4015,20 @@ export function JournalAuditTab({
 	const [auditMode, setAuditMode] = useState<"local" | "llm">("local");
 	const [preferredRole, setPreferredRole] = useState("");
 	const [discreetMode, setDiscreetMode] = useState(true);
+	const [autoFormatJournal, setAutoFormatJournal] = useState(true);
+	const [lastRawJournal, setLastRawJournal] = useState<{ date: string; text: string } | null>(null);
 	const [hideEditorText, setHideEditorText] = useState(false);
 	const [evaluating, setEvaluating] = useState(false);
+	const dictation = useDictation({
+		append: (spoken) => setJournalText((prev) => joinDictation(prev, spoken)),
+		destination: "explicit",
+		disabled: hideEditorText,
+	});
 
 	useEffect(() => {
 		try {
 			if (window.localStorage.getItem("lh:journal-discreet") === "0") setDiscreetMode(false);
+			if (window.localStorage.getItem("lh:journal-auto-format") === "0") setAutoFormatJournal(false);
 		} catch {
 			// Ignore localStorage unavailability.
 		}
@@ -4025,6 +4039,18 @@ export function JournalAuditTab({
 			const next = !prev;
 			try {
 				window.localStorage.setItem("lh:journal-discreet", next ? "1" : "0");
+			} catch {
+				// Ignore localStorage unavailability.
+			}
+			return next;
+		});
+	};
+
+	const toggleAutoFormatJournal = () => {
+		setAutoFormatJournal((prev) => {
+			const next = !prev;
+			try {
+				window.localStorage.setItem("lh:journal-auto-format", next ? "1" : "0");
 			} catch {
 				// Ignore localStorage unavailability.
 			}
@@ -4044,6 +4070,10 @@ export function JournalAuditTab({
 		setJournalText(log?.journalText ?? "");
 		setManualEntries((log?.actualEntries ?? []).filter((e) => e.source === "manual"));
 	}, [selectedDate, snap.config.logs]);
+
+	useEffect(() => {
+		setLastRawJournal((prev) => (prev && prev.date === selectedDate ? prev : null));
+	}, [selectedDate]);
 
 	const historyDates = useMemo(() => {
 		const needle = historySearch.trim().toLowerCase();
@@ -4096,6 +4126,7 @@ export function JournalAuditTab({
 	const runAudit = async () => {
 		setEvaluating(true);
 		onError(null);
+		const rawBeforeAudit = journalText;
 		try {
 			const res = await fetch("/api/planner/evaluate-day", {
 				method: "POST",
@@ -4106,21 +4137,40 @@ export function JournalAuditTab({
 					manualEntries,
 					mode: auditMode,
 					discreet: discreetMode,
+					...(auditMode === "llm" ? { formatJournal: autoFormatJournal } : {}),
 					...(auditMode === "llm" && preferredRole ? { preferredRole } : {}),
 				}),
 			});
 			const data = (await res.json()) as {
 				snapshot?: PlannerSnapshot;
 				report?: PlanComplianceReport;
+				formattedJournalApplied?: boolean;
 				error?: string;
 			};
 			if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-			if (data.snapshot) onSnapshotUpdate(data.snapshot);
+			if (data.snapshot) {
+				onSnapshotUpdate(data.snapshot);
+				const nextText = data.snapshot.config.logs[selectedDate]?.journalText ?? "";
+				setJournalText(nextText);
+				if (data.formattedJournalApplied && rawBeforeAudit.trim() && nextText.trim() !== rawBeforeAudit.trim()) {
+					setLastRawJournal({ date: selectedDate, text: rawBeforeAudit });
+				} else {
+					setLastRawJournal(null);
+				}
+			}
 		} catch (e) {
 			onError(e instanceof Error ? e.message : "Failed to audit 24h journal.");
 		} finally {
 			setEvaluating(false);
 		}
+	};
+
+	const restoreRawJournal = async () => {
+		if (!lastRawJournal || lastRawJournal.date !== selectedDate) return;
+		const prev = lastRawJournal.text;
+		setJournalText(prev);
+		setLastRawJournal(null);
+		await onCheckIn({ date: selectedDate, journalText: prev });
 	};
 
 	const compliance = activeLog?.compliance;
@@ -4130,6 +4180,52 @@ export function JournalAuditTab({
 		...manualEntries,
 	].sort((a, b) => a.startTime.localeCompare(b.startTime));
 	const dayPlan = snap.config.plans[selectedDate] ?? (selectedDate === snap.plan.date ? snap.plan : undefined);
+	const autoDraftItems = selectedDate === snap.plan.date ? (snap.signals?.autoDraftItems ?? []) : [];
+	const switcherChips = useMemo(() => {
+		const chips: Array<{ label: string; category: JournalActivityCategory; subject?: string }> = [];
+		const seen = new Set<string>();
+		const pushChip = (label: string, category: JournalActivityCategory, subject?: string) => {
+			const clean = label.trim();
+			if (!clean || seen.has(clean.toLowerCase())) return;
+			seen.add(clean.toLowerCase());
+			chips.push({ label: clean, category, ...(subject ? { subject } : {}) });
+		};
+		for (const q of dayPlan?.quotas ?? []) {
+			if (chips.length >= 3) break;
+			pushChip(q.subject, "study", q.subject);
+		}
+		for (const ms of snap.config.milestones ?? []) {
+			if (chips.length >= 3) break;
+			pushChip(ms.subject, "study", ms.subject);
+		}
+		pushChip("Nghiên cứu / Đọc tài liệu", "study");
+		pushChip("Đi học", "class");
+		pushChip("Ăn uống", "meal");
+		pushChip("Ngủ trưa", "sleep");
+		pushChip("Nghỉ / Giải trí", "hobby");
+		pushChip("Ra ngoài", "other");
+		return chips;
+	}, [dayPlan?.quotas, snap.config.milestones]);
+
+	const applyAutoFillDraft = () => {
+		if (autoDraftItems.length === 0) return;
+		const prevText = journalText;
+		const nextText = formatJournalDraftLines(autoDraftItems, prevText);
+		if (nextText !== prevText) {
+			setLastRawJournal({ date: selectedDate, text: prevText });
+			setJournalText(nextText);
+		}
+	};
+
+	const applyCopyElapsedPlan = () => {
+		if (!dayPlan) return;
+		const prevText = journalText;
+		const nextText = buildFromPlanJournalLines(dayPlan, Date.now(), prevText);
+		if (nextText !== prevText) {
+			setLastRawJournal({ date: selectedDate, text: prevText });
+			setJournalText(nextText);
+		}
+	};
 
 	return (
 		<div className="grid gap-4 lg:grid-cols-12 text-xs">
@@ -4270,17 +4366,104 @@ export function JournalAuditTab({
 					</div>
 				)}
 
+				{!hideEditorText && selectedDate === snap.plan.date && (
+					<div className="flex flex-col gap-1.5 rounded-lg border bg-muted/15 px-2.5 py-2 text-[11px]">
+						<div className="flex flex-wrap items-center justify-between gap-2">
+							<span className="font-medium text-muted-foreground">
+								{activeLog?.activeActivity ? (
+									<span className="text-foreground">
+										Đang làm: <strong className="text-primary">{activeLog.activeActivity.label}</strong> (từ {activeLog.activeActivity.startedAt})
+									</span>
+								) : (
+									"Quick Switcher (1 chạm ghi giờ thực tế):"
+								)}
+							</span>
+							{activeLog?.activeActivity && (
+								<button
+									type="button"
+									data-testid="journal-switcher-stop"
+									disabled={busy || evaluating}
+									onClick={() => void onCheckIn({ date: selectedDate, switchActivity: null })}
+									className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20 disabled:opacity-40"
+								>
+									<SquareIcon className="size-2.5" /> Dừng &amp; Ghi log
+								</button>
+							)}
+						</div>
+						<div className="flex flex-wrap gap-1">
+							{switcherChips.map((chip) => {
+								const isActive = activeLog?.activeActivity?.label === chip.label;
+								return (
+									<button
+										key={chip.label}
+										type="button"
+										data-testid="journal-switcher-chip"
+										aria-pressed={isActive}
+										disabled={busy || evaluating}
+										onClick={() =>
+											void onCheckIn({
+												date: selectedDate,
+												switchActivity: isActive
+													? null
+													: { label: chip.label, category: chip.category, ...(chip.subject ? { subject: chip.subject } : {}) },
+											})
+										}
+										className={cn(
+											"rounded-full border px-2.5 py-0.5 text-[10px] font-medium transition-colors disabled:opacity-40",
+											isActive
+												? "border-primary bg-primary text-primary-foreground"
+												: "bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
+										)}
+									>
+										{isActive ? "● " : ""}{chip.label}
+									</button>
+								);
+							})}
+						</div>
+					</div>
+				)}
+
 				<div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 px-2.5 py-1.5 text-[11px]">
-					<label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-foreground" title="Hide journal previews in the history list and mask sensitive phrases in audit output">
-						<input
-							type="checkbox"
-							checked={discreetMode}
-							onChange={toggleDiscreetMode}
-						/>
-						<ShieldCheckIcon className="size-3.5 text-primary" />
-						Discreet Mode (hide history &amp; mask audit output)
-					</label>
+					<div className="flex flex-wrap items-center gap-3">
+						<label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-foreground" title="Hide journal previews in the history list and mask sensitive phrases in audit output">
+							<input
+								type="checkbox"
+								checked={discreetMode}
+								onChange={toggleDiscreetMode}
+							/>
+							<ShieldCheckIcon className="size-3.5 text-primary" />
+							Discreet Mode (hide history &amp; mask audit output)
+						</label>
+						{auditMode === "llm" && (
+							<label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-foreground" title="Rewrite natural text into 'HH:MM - HH:MM : activity' inside this editor when scoring with AI Auditor">
+								<input
+									type="checkbox"
+									data-testid="journal-auto-format-toggle"
+									checked={autoFormatJournal}
+									onChange={toggleAutoFormatJournal}
+								/>
+								Auto-format to HH:MM - HH:MM : ...
+							</label>
+						)}
+					</div>
 					<div className="flex items-center gap-1.5">
+						<button
+							type="button"
+							data-testid="journal-dictate-toggle"
+							disabled={hideEditorText || dictation.blocked || dictation.phase === "stopping"}
+							aria-pressed={dictation.active}
+							onClick={dictation.toggle}
+							title={dictation.error ?? (dictation.active ? "Stop voice dictation" : "Dictate 24h journal via microphone")}
+							className={cn(
+								"inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] transition-colors disabled:opacity-40",
+								dictation.active
+									? "border-error/40 bg-error/10 font-medium text-error"
+									: "bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
+							)}
+						>
+							<MicIcon className="size-3" />
+							{dictation.active ? "Stop" : "Dictate"}
+						</button>
 						<button
 							type="button"
 							disabled={hideEditorText}
@@ -4310,6 +4493,41 @@ export function JournalAuditTab({
 					</div>
 				) : (
 				<>
+				{dictation.error && (
+					<p className="text-[11px] text-error" role="alert">
+						{dictation.error === DICTATION_KEYLESS
+							? "Voice dictation needs a DEEPGRAM_API_KEY in Settings → Keys."
+							: dictation.error}
+					</p>
+				)}
+				{(autoDraftItems.length > 0 || Boolean(dayPlan)) && (
+					<div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+						{autoDraftItems.length > 0 && (
+							<button
+								type="button"
+								data-testid="journal-autofill-draft"
+								disabled={busy || evaluating}
+								onClick={applyAutoFillDraft}
+								className="inline-flex items-center gap-1 rounded border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-accent disabled:opacity-40"
+								title="Generate draft lines from your ChronoHarness sessions, FSRS reviews, checked blocks, and PC activity"
+							>
+								<WandSparklesIcon className="size-3 text-primary" /> Auto-fill Draft ({autoDraftItems.length})
+							</button>
+						)}
+						{Boolean(dayPlan) && (
+							<button
+								type="button"
+								data-testid="journal-copy-plan"
+								disabled={busy || evaluating}
+								onClick={applyCopyElapsedPlan}
+								className="inline-flex items-center gap-1 rounded border bg-card px-2.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+								title="Copy elapsed study/meal/hobby blocks from today's schedule into the journal"
+							>
+								<ClipboardListIcon className="size-3" /> Copy elapsed plan
+							</button>
+						)}
+					</div>
+				)}
 				<textarea
 					rows={5}
 					value={journalText}
@@ -4317,7 +4535,26 @@ export function JournalAuditTab({
 					placeholder={"Write freely what actually happened across 24h (timestamps or notes), e.g.:\n08:30-11:00 Giải 3 bài dãy số Giải tích Olympic\n12:00-13:00 Ăn trưa + nghỉ\n14:00-15:00 Mệt / personal reset\n20:00-21:45 Ôn FSRS Đại số + sửa mistake rule"}
 					className="w-full rounded-lg border bg-background p-2.5 text-xs leading-relaxed"
 				/>
-				<p className="text-[11px] text-muted-foreground">AI Auditor can extract explicit times from natural text, including 8r for 08:30. It sends the journal to the selected model. Check the timeline after scoring; missing times are left unknown. Your journal text remains unchanged.</p>
+				<div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+					<p>
+						{auditMode === "llm"
+							? autoFormatJournal
+								? "AI Auditor extracts explicit/chained times, scores adherence, and formats your journal lines into HH:MM - HH:MM : activity in place."
+								: "AI Auditor extracts explicit times from natural text, including 8r for 08:30. Check the timeline after scoring; missing times are left unknown. Your journal text remains unchanged."
+							: "Local mode extracts explicit HH:MM-HH:MM lines at 0 tokens. Switch to AI Auditor to auto-format freeform paragraphs."}
+					</p>
+					{lastRawJournal?.date === selectedDate && (
+						<button
+							type="button"
+							data-testid="journal-restore-raw"
+							disabled={busy || evaluating}
+							onClick={() => void restoreRawJournal()}
+							className="shrink-0 rounded border bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-accent disabled:opacity-40"
+						>
+							Restore original text
+						</button>
+					)}
+				</div>
 
 				{/* Quick structured log row */}
 				<div className="rounded-lg border bg-muted/20 p-2.5">

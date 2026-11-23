@@ -26,6 +26,7 @@ import {
 	applyJournalEvaluationToConfig,
 	applyLlmPlanOutput,
 	buildCompactPlannerDigest,
+	buildJournalAutoDraft,
 	clipPreservingLatex,
 	clipPlannerBlocksFromNow,
 	computeHabitStrengthSummary,
@@ -48,6 +49,7 @@ import {
 	parseSimpleWeeklyText,
 	redactSensitiveJournalText,
 	resolveActiveBlockStatus,
+	sanitizeFormattedJournalText,
 	sanitizePlannerConfig,
 	studyBlocksForAudit,
 	WEEKDAYS,
@@ -65,6 +67,7 @@ import {
 	type CoachAttachment,
 	type HabitCheckInPatch,
 	type JournalActivityEntry,
+	type JournalDraftItem,
 	type LifestyleConfig,
 	type LlmCoachPlanPayload,
 	type MealSlot,
@@ -79,6 +82,7 @@ import {
 	type PlannerPersonalSignals,
 	type PlannerSessionSummary,
 	type PlannerSubjectSignal,
+	type PresenceDaySummary,
 	type StudyMilestone,
 	type SubjectLearningMetrics,
 	type SyllabusTopic,
@@ -775,6 +779,110 @@ function collectSessionWorkItemsForSubject(
 	};
 }
 
+function readPresenceDaySummary(date: string, dataDir = PATHS.data): PresenceDaySummary | undefined {
+	try {
+		const filePath = path.join(dataDir, "presence-log.json");
+		if (!fs.existsSync(filePath)) return undefined;
+		const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as { days?: Record<string, unknown> };
+		const rawDay = parsed?.days?.[date];
+		if (!rawDay || typeof rawDay !== "object" || Array.isArray(rawDay)) return undefined;
+		const rec = rawDay as Record<string, unknown>;
+		const firstMin = typeof rec.firstActiveAt === "string" ? parseClockMin(rec.firstActiveAt) : null;
+		const lastMin = typeof rec.lastActiveAt === "string" ? parseClockMin(rec.lastActiveAt) : null;
+		const awayIntervals: PresenceDaySummary["awayIntervals"] = [];
+		if (Array.isArray(rec.awayIntervals)) {
+			for (const item of rec.awayIntervals) {
+				if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+				const aw = item as Record<string, unknown>;
+				const sMin = typeof aw.startTime === "string" ? parseClockMin(aw.startTime) : null;
+				const eMin = typeof aw.endTime === "string" ? parseClockMin(aw.endTime) : null;
+				const reason = aw.reason === "sleep" || aw.reason === "lock" || aw.reason === "idle" ? aw.reason : null;
+				if (sMin !== null && eMin !== null && eMin > sMin && reason) {
+					awayIntervals.push({
+						startTime: formatClockMin(sMin),
+						endTime: formatClockMin(eMin),
+						reason,
+					});
+				}
+			}
+		}
+		if (firstMin === null && lastMin === null && awayIntervals.length === 0) return undefined;
+		return {
+			date,
+			...(firstMin !== null ? { firstActiveAt: formatClockMin(firstMin) } : {}),
+			...(lastMin !== null ? { lastActiveAt: formatClockMin(lastMin) } : {}),
+			awayIntervals,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function collectTodaySessionActivity(
+	sessions: readonly PlannerSessionSummary[],
+	date: string,
+	chatsDir: string | undefined,
+	isolatedNoChats: boolean,
+	matchers: ReadonlyArray<{ subject: string; needles: string[] }>,
+): Array<{ title: string; subject?: string; timestamps: number[] }> {
+	if (isolatedNoChats) return [];
+	const prevDate = addDaysToDate(date, -1);
+	const out: Array<{ title: string; subject?: string; timestamps: number[] }> = [];
+	for (const s of sessions) {
+		if (!s.updatedAt || s.updatedAt.slice(0, 10) < prevDate) continue;
+		const chat = readChatSafe(s.id, chatsDir);
+		if (!chat || !Array.isArray(chat.messages)) continue;
+		const timestamps: number[] = [];
+		for (const m of chat.messages as Array<Record<string, unknown>>) {
+			const ts = typeof m.timestamp === "number" && Number.isFinite(m.timestamp) ? m.timestamp : null;
+			if (ts !== null && localDateString(ts) === date) timestamps.push(ts);
+		}
+		if (timestamps.length === 0) continue;
+		const chatTitle = chat.title || s.title;
+		const titleLower = chatTitle.toLowerCase();
+		const hit = matchers.find((m) =>
+			m.needles.some((needle) => needle.length >= 2 && (titleLower.includes(needle) || needle.includes(titleLower))),
+		);
+		out.push({
+			title: chatTitle,
+			...(hit ? { subject: hit.subject } : {}),
+			timestamps,
+		});
+	}
+	return out;
+}
+
+function collectTodayFsrsReviewTimestamps(
+	flashcards: ReturnType<typeof readFlashcardsSnapshot>,
+	date: string,
+): number[] {
+	if (!flashcards) return [];
+	const seen = new Set<number>();
+	const addIfDate = (ts: unknown) => {
+		if (typeof ts !== "number" || !Number.isFinite(ts)) return;
+		if (localDateString(ts) === date) seen.add(ts);
+	};
+	if (Array.isArray(flashcards.reviews)) {
+		for (const raw of flashcards.reviews) {
+			if (!raw || typeof raw !== "object") continue;
+			const r = raw as Record<string, unknown>;
+			addIfDate(r.reviewedAt ?? r.ts ?? r.timestamp);
+		}
+	}
+	if (flashcards.propositions && typeof flashcards.propositions === "object") {
+		for (const prop of Object.values(flashcards.propositions)) {
+			addIfDate(prop.schedule?.last_review);
+			if (Array.isArray(prop.cues)) {
+				for (const cue of prop.cues) {
+					if (!cue || typeof cue !== "object") continue;
+					addIfDate((cue as Record<string, unknown>).lastReviewedAt);
+				}
+			}
+		}
+	}
+	return [...seen].sort((a, b) => a - b);
+}
+
 export function buildPlannerPersonalSignals(
 	config: PlannerConfig,
 	opts?: PlannerReadOptions & { chatsDir?: string; date?: string },
@@ -940,13 +1048,30 @@ export function buildPlannerPersonalSignals(
 		}
 		: undefined;
 
+	const isolatedNoChats = Boolean(opts?.plannerFile && !opts.chatsDir);
 	const learningProfile = buildPlannerLearningProfile({
 		config,
 		subjectSignals,
 		flashcards: loadedFlashcards,
 		propIdToSubject,
-		sessions: opts?.plannerFile && !opts.chatsDir ? [] : allSessions,
+		sessions: isolatedNoChats ? [] : allSessions,
 		chatsDir: opts?.chatsDir,
+	});
+
+	const presenceDataDir = opts?.plannerFile ? path.dirname(opts.plannerFile) : PATHS.data;
+	const presenceSummary = readPresenceDaySummary(date, presenceDataDir);
+	const sessionActivity = collectTodaySessionActivity(allSessions, date, opts?.chatsDir, isolatedNoChats, matchers);
+	const fsrsReviewTimestamps = collectTodayFsrsReviewTimestamps(loadedFlashcards, date);
+	const autoDraftItems = buildJournalAutoDraft({
+		date,
+		now,
+		plan: config.plans[date],
+		log: config.logs[date],
+		fixedEvents: config.fixedEvents,
+		examTimetable: config.examTimetable,
+		sessionActivity,
+		fsrsReviewTimestamps,
+		presence: presenceSummary,
 	});
 
 	return {
@@ -956,6 +1081,8 @@ export function buildPlannerPersonalSignals(
 		...(cleanedMistakeHints ? { mistakeHints: cleanedMistakeHints } : {}),
 		recentSessions: sessions,
 		autoTrackedStudyMinBySubject,
+		...(autoDraftItems.length > 0 ? { autoDraftItems } : {}),
+		...(presenceSummary ? { presenceSummary } : {}),
 		learningProfile,
 		habitTrend: {
 			loggedDays: recentLogs.length,
@@ -2313,6 +2440,12 @@ const journalEvaluationSchema = Type.Object({
 			minutes: Type.Number(),
 		}),
 	),
+	formattedJournal: Type.Optional(
+		Type.String({
+			description:
+				"Clean multi-line rewrite of the learner's journal using 'HH:MM - HH:MM : <activity>' for explicit/chained time ranges and 'HH:MM : <activity>' for single clock points, preserving every activity and note in the learner's language without inventing times.",
+		}),
+	),
 });
 
 export async function evaluateDailyJournalServer(
@@ -2323,6 +2456,7 @@ export async function evaluateDailyJournalServer(
 		manualEntries?: JournalActivityEntry[];
 		mode?: "local" | "llm";
 		discreet?: boolean;
+		formatJournal?: boolean;
 		preferredRole?: ModelRole;
 		engineOverride?: PiEngine;
 		signal?: AbortSignal;
@@ -2332,6 +2466,7 @@ export async function evaluateDailyJournalServer(
 	report: PlanComplianceReport;
 	parsedEntries: JournalActivityEntry[];
 	modelLabel: string;
+	formattedJournalApplied?: boolean;
 }> {
 	const now = opts.now ?? Date.now();
 	const date = isValidDateString(opts.date) ? opts.date : localDateString(now);
@@ -2374,6 +2509,7 @@ export async function evaluateDailyJournalServer(
 			report: localEval.report,
 			parsedEntries: localEntries,
 			modelLabel: "local:journal-auditor",
+			formattedJournalApplied: false,
 		};
 	}
 
@@ -2401,9 +2537,11 @@ export async function evaluateDailyJournalServer(
 		? plannedStudyBlocks.filter((b) => b.endMin <= cutoffMin).reduce((a, b) => a + b.durationMin, 0)
 		: localEval.report.plannedStudyMin;
 	const isPartialMiddayLog = isToday && remainingPlannedMin > 0;
+	const shouldFormatJournal = opts.formatJournal !== false;
 
 	const prompt = JSON.stringify({
 		date,
+		formatJournal: shouldFormatJournal,
 		isPartialMiddayLog,
 		scorable: localEval.report.scorable !== false,
 		currentClockTime: formatClockMin(cutoffMin),
@@ -2435,13 +2573,14 @@ export async function evaluateDailyJournalServer(
 			title: string;
 			minutes: number;
 		}>;
+		formattedJournal?: string;
 	}
 
 	const aiOut = await runPlannerSubmit<AiJournalEvalOut>({
 		role: resolved.role,
 		engine: resolved.engine,
 		systemPrompt:
-			"You are a candid, supportive Student Study Auditor. Parse free-form journal text into timeline entries and give concise practical advice. Write summary, strengths, friction points and advice in the primary language of the learner’s journal. Acknowledge feelings without inventing causes. Treat recorded numbers as provisional. Clock abbreviations such as 8r mean 08:30. Use only explicitly stated time points: do not invent start or end times or fill gaps. When the journal says until now on the current day, actualClockTime may be the endpoint. Preserve meaningful activity descriptions and do not collapse a whole activity into a generic private label. If scorable is false, say there is not enough data to rate adherence and do not invent a percentage in your explanation. If isPartialMiddayLog is true, score only elapsed planned study and never treat upcoming blocks as skipped; focus advice on the remaining blocks. Call submit_journal_evaluation once.",
+			"You are a candid, supportive Student Study Auditor. Parse free-form journal text into timeline entries and give concise practical advice. Write summary, strengths, friction points, advice and formattedJournal in the primary language of the learner’s journal. Acknowledge feelings without inventing causes. Treat recorded numbers as provisional. Clock abbreviations such as 8r, 8h rưỡi or 8 giờ 30 mean 08:30. Use only explicitly stated time points: do not invent start or end times or fill gaps. Chained sequential time markers in natural prose (e.g. 'từ 11r đến 13h30, rồi ... đến 14h25, rồi ngủ đến 15h30, dậy tắm rửa ... đến 16h30') form valid explicit intervals (11:30-13:30, 13:30-14:25, 14:25-15:30, 15:30-16:30) using only stated clock points, whereas standalone single clock markers (e.g. 'dậy từ 8h, 9h ăn sáng') do NOT get invented end times. When the journal says until now on the current day, actualClockTime may be the endpoint. Preserve meaningful activity descriptions and do not collapse a whole activity into a generic private label. If formatJournal is true and the journal contains clock times, ALWAYS fill formattedJournal by rewriting the learner’s journal cleanly in chronological order with one item per line: 'HH:MM - HH:MM : <activity>' for bounded intervals, 'HH:MM : <activity>' for single clock points (such as wake-up, meal start, bedtime), and concise plain lines for untimed reflections, keeping every event in the learner’s language without inventing any times. If scorable is false, say there is not enough data to rate adherence and do not invent a percentage in your explanation. If isPartialMiddayLog is true, score only elapsed planned study and never treat upcoming blocks as skipped; focus advice on the remaining blocks. Call submit_journal_evaluation once.",
 		promptText: prompt,
 		toolName: "submit_journal_evaluation",
 		toolDescription: "Submit 24h Plan vs Actual compliance evaluation and extracted timeline.",
@@ -2521,8 +2660,12 @@ export async function evaluateDailyJournalServer(
 			...latestManual.filter((entry) => !combinedEntries.some((item) => item.id === entry.id)),
 		]
 		: combinedEntries;
+	const allowedExtraClocks = [...groundedClocks, ...manualEntries.flatMap((entry) => [entry.startTime, entry.endTime])];
+	const sanitizedFormatted = shouldFormatJournal
+		? sanitizeFormattedJournalText(aiOut.formattedJournal, journalBodyRaw, { allowedExtraClocks, discreet })
+		: null;
 	const updated = applyJournalEvaluationToConfig(latest, date, {
-		journalText: opts.journalText ?? latest.logs[date]?.journalText,
+		journalText: sanitizedFormatted ?? (opts.journalText ?? latest.logs[date]?.journalText),
 		entries: mergedEntries,
 		report,
 		suggestedRealismFactor,
@@ -2535,6 +2678,7 @@ export async function evaluateDailyJournalServer(
 		report,
 		parsedEntries: mergedEntries,
 		modelLabel: resolved.modelLabel,
+		formattedJournalApplied: Boolean(sanitizedFormatted),
 	};
 }
 

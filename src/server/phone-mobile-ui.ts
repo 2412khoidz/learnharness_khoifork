@@ -405,8 +405,17 @@ export function buildMobileHtml(uploadEndpoint: string): string {
           <span class="serif" style="font-size:15px;font-weight:700">24h Reality Journal</span>
           <span class="muted mono" style="font-size:10px">Calibrates realism</span>
         </div>
+        <div id="mob-switcher-status" class="hidden row-between" style="margin-bottom:6px;padding:6px 8px;border-radius:8px;border:1px solid var(--border);background:var(--bg);font-size:11px"></div>
+        <div class="scope-strip" id="mob-switcher-chips" style="margin-top:0;margin-bottom:8px"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+          <button type="button" class="btn btn-sm hidden" id="mob-journal-draft-btn">Auto-fill Draft</button>
+          <button type="button" class="btn btn-sm hidden" id="mob-journal-voice-btn">&#127908; Voice</button>
+        </div>
         <textarea class="field" id="mob-journal-text" rows="4" placeholder="Example: 08:00-09:15 Solved LP Ex 1-4; 12:00-13:00 Lunch; 14:30-16:00 Review Cauchy..."></textarea>
-        <button type="button" class="btn btn-primary btn-block" id="mob-journal-audit-btn" style="margin-top:8px">Save &amp; Score 24h Log (0 tokens)</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+          <button type="button" class="btn btn-primary" id="mob-journal-audit-btn" style="flex:1">Save &amp; Score 24h Log (0 tokens)</button>
+          <button type="button" class="btn hidden" id="mob-journal-ai-btn" style="flex:1">Save &amp; AI Format</button>
+        </div>
         <div id="mob-compliance-box" class="hidden" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)"></div>
       </div>
     </section>
@@ -1163,6 +1172,83 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       journalEl.value = log.journalText || "";
     }
 
+    var swStatus = byId("mob-switcher-status");
+    if (swStatus) {
+      var act = log.activeActivity;
+      swStatus.innerHTML = "";
+      if (act && act.label) {
+        swStatus.classList.remove("hidden");
+        var infoSpan = document.createElement("span");
+        infoSpan.innerHTML = "<strong class='ok'>Active:</strong> " + escapeHtml(act.label) + " <span class='muted mono'>(" + escapeHtml(act.startedAt || "") + ")</span>";
+        var stopBtn = document.createElement("button");
+        stopBtn.type = "button";
+        stopBtn.className = "btn btn-sm";
+        stopBtn.textContent = "Stop & Log";
+        stopBtn.addEventListener("click", function () {
+          checkInMobilePlanner({ date: pl.date, switchActivity: null }, "Logged " + act.label);
+        });
+        swStatus.appendChild(infoSpan);
+        swStatus.appendChild(stopBtn);
+      } else {
+        swStatus.classList.add("hidden");
+      }
+    }
+
+    var swChips = byId("mob-switcher-chips");
+    if (swChips) {
+      swChips.innerHTML = "";
+      var chipItems = [];
+      var seenChip = {};
+      (pl.quotas || []).slice(0, 3).forEach(function (q) {
+        if (q.subject && !seenChip[q.subject]) {
+          seenChip[q.subject] = true;
+          chipItems.push({ label: q.subject, category: "study", subject: q.subject });
+        }
+      });
+      var presets = [
+        { label: "Nghiên cứu / Lab", category: "study" },
+        { label: "Đi học", category: "class" },
+        { label: "Ăn uống", category: "meal" },
+        { label: "Ngủ trưa", category: "sleep" },
+        { label: "Nghỉ / Giải trí", category: "hobby" },
+        { label: "Ra ngoài", category: "other" }
+      ];
+      presets.forEach(function (p) {
+        if (!seenChip[p.label]) {
+          seenChip[p.label] = true;
+          chipItems.push(p);
+        }
+      });
+      chipItems.forEach(function (item) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        var isActive = Boolean(log.activeActivity && log.activeActivity.label === item.label);
+        btn.className = "scope-chip" + (isActive ? " active" : "");
+        btn.textContent = (isActive ? "● " : "") + item.label;
+        btn.addEventListener("click", function () {
+          var payload = isActive
+            ? null
+            : (item.subject ? { label: item.label, category: item.category, subject: item.subject } : { label: item.label, category: item.category });
+          checkInMobilePlanner({ date: pl.date, switchActivity: payload }, isActive ? "Stopped " + item.label : "Now: " + item.label);
+        });
+        swChips.appendChild(btn);
+      });
+    }
+
+    var draftBtn = byId("mob-journal-draft-btn");
+    if (draftBtn) {
+      if (pl.autoDraftCount && pl.autoDraftCount > 0 && pl.autoDraftLines) {
+        draftBtn.classList.remove("hidden");
+        draftBtn.textContent = "Auto-fill Draft (" + pl.autoDraftCount + ")";
+      } else {
+        draftBtn.classList.add("hidden");
+      }
+    }
+    var aiBtn = byId("mob-journal-ai-btn");
+    if (aiBtn) {
+      aiBtn.classList.toggle("hidden", !pl.aiAuditAvailable);
+    }
+
     var compBox = byId("mob-compliance-box");
     if (compBox) {
       var comp = log.compliance;
@@ -1754,6 +1840,98 @@ export function buildMobileHtml(uploadEndpoint: string): string {
       checkInMobilePlanner({ date: pl.date, urgeTriggerWindows: cur }, "Trigger updated");
     });
   });
+
+  var mobDraftBtn = byId("mob-journal-draft-btn");
+  if (mobDraftBtn) {
+    mobDraftBtn.addEventListener("click", function () {
+      var pl = state.planner;
+      var journalEl = byId("mob-journal-text");
+      if (!pl || !journalEl || !pl.autoDraftLines) return;
+      var curLines = (journalEl.value || "").replace(/\\r\\n/g, "\\n").split("\\n").map(function (s) { return s.trim(); }).filter(Boolean);
+      var newLines = String(pl.autoDraftLines).replace(/\\r\\n/g, "\\n").split("\\n").map(function (s) { return s.trim(); }).filter(Boolean);
+      var added = [];
+      newLines.forEach(function (nl) {
+        var dup = curLines.some(function (cl) { return cl === nl; });
+        if (!dup) added.push(nl);
+      });
+      if (added.length > 0) {
+        var cur = journalEl.value.trim();
+        journalEl.value = cur ? cur + "\\n" + added.join("\\n") : added.join("\\n");
+      }
+      journalEl.focus();
+    });
+  }
+
+  var mobVoiceBtn = byId("mob-journal-voice-btn");
+  var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var mobSpeech = null;
+  if (mobVoiceBtn && SpeechRec) {
+    mobVoiceBtn.classList.remove("hidden");
+    mobVoiceBtn.addEventListener("click", function () {
+      var journalEl = byId("mob-journal-text");
+      if (!journalEl) return;
+      if (mobSpeech) {
+        try { mobSpeech.stop(); } catch (_err) {}
+        return;
+      }
+      try {
+        var rec = new SpeechRec();
+        mobSpeech = rec;
+        rec.lang = "vi-VN";
+        rec.continuous = true;
+        rec.interimResults = false;
+        mobVoiceBtn.classList.add("active");
+        mobVoiceBtn.textContent = "Listening... Tap to Stop";
+        rec.onresult = function (ev) {
+          var txt = "";
+          for (var i = ev.resultIndex; i < ev.results.length; i++) {
+            if (ev.results[i].isFinal && ev.results[i][0] && ev.results[i][0].transcript) {
+              txt += (txt ? " " : "") + ev.results[i][0].transcript.trim();
+            }
+          }
+          if (txt) {
+            var cur = journalEl.value.trim();
+            journalEl.value = cur ? cur + "\\n" + txt : txt;
+          }
+        };
+        rec.onerror = function () {
+          mobSpeech = null;
+          mobVoiceBtn.classList.remove("active");
+          mobVoiceBtn.innerHTML = "&#127908; Voice";
+        };
+        rec.onend = function () {
+          mobSpeech = null;
+          mobVoiceBtn.classList.remove("active");
+          mobVoiceBtn.innerHTML = "&#127908; Voice";
+        };
+        rec.start();
+      } catch (_err2) {
+        mobSpeech = null;
+        mobVoiceBtn.classList.remove("active");
+        mobVoiceBtn.innerHTML = "&#127908; Voice";
+      }
+    });
+  }
+
+  var mobAiBtn = byId("mob-journal-ai-btn");
+  if (mobAiBtn) {
+    mobAiBtn.addEventListener("click", function () {
+      var pl = state.planner;
+      var journalEl = byId("mob-journal-text");
+      if (!pl || !journalEl) return;
+      mobAiBtn.disabled = true;
+      mobAiBtn.textContent = "AI Formatting...";
+      checkInMobilePlanner({
+        date: pl.date,
+        journalText: journalEl.value.trim(),
+        evaluateJournal: true,
+        evaluateMode: "llm"
+      }, "AI formatted & scored").finally(function () {
+        mobAiBtn.disabled = false;
+        mobAiBtn.textContent = "Save & AI Format";
+      });
+    });
+  }
 
   byId("mob-journal-audit-btn").addEventListener("click", function () {
     var pl = state.planner;

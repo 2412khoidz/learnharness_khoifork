@@ -34,6 +34,7 @@ import { readExamPrepStatus, writeExamPrepConfig } from "./exam-prep.ts";
 import { checkInPlannerHabit, evaluateDailyJournalServer, patchPlannerConfig, readPlannerSnapshot } from "./planner.ts";
 import {
 	daysBetweenDates,
+	formatJournalDraftLines,
 	type DailyHabitLog,
 	type DailyStudyPlan,
 	type HabitCheckInPatch,
@@ -113,6 +114,9 @@ export interface MobileCompanionPlannerView {
 	todayLog: DailyHabitLog | null;
 	quotas: DailyStudyPlan["quotas"];
 	blocks: DailyStudyPlan["blocks"];
+	autoDraftLines?: string;
+	autoDraftCount?: number;
+	aiAuditAvailable?: boolean;
 	upcomingMilestones: Array<{ id: string; kind: string; title: string; dueDate: string; daysLeft: number }>;
 	resetProtocol?: {
 		wakeAnchor: string;
@@ -126,6 +130,7 @@ export interface MobileCompanionPlannerView {
 export interface MobilePlannerCheckInRequest extends HabitCheckInPatch {
 	intensity?: PlannerIntensity;
 	evaluateJournal?: boolean;
+	evaluateMode?: "local" | "llm";
 	taskNote?: string;
 }
 
@@ -322,6 +327,8 @@ export function buildMobileCompanionPlannerView(opts: MobileCompanionOptions = {
 			dueDate: m.dueDate,
 			daysLeft: daysBetweenDates(snap.plan.date, m.dueDate),
 		}));
+	const draftItems = snap.signals.autoDraftItems ?? [];
+	const autoDraftLines = draftItems.length > 0 ? formatJournalDraftLines(draftItems) : "";
 	return {
 		date: snap.plan.date,
 		engineUsed: snap.plan.engineUsed,
@@ -338,6 +345,9 @@ export function buildMobileCompanionPlannerView(opts: MobileCompanionOptions = {
 		todayLog,
 		quotas: snap.plan.quotas,
 		blocks: snap.plan.blocks,
+		autoDraftCount: draftItems.length,
+		...(autoDraftLines ? { autoDraftLines } : {}),
+		aiAuditAvailable: Boolean(snap.aiAvailability.coach.available),
 		upcomingMilestones,
 		resetProtocol: {
 			wakeAnchor:
@@ -375,7 +385,8 @@ function hasDirectHabitPatchFields(patch: HabitCheckInPatch): boolean {
 		patch.sleepOnTarget !== undefined ||
 		patch.note !== undefined ||
 		patch.journalText !== undefined ||
-		patch.actualEntries !== undefined
+		patch.actualEntries !== undefined ||
+		patch.switchActivity !== undefined
 	);
 }
 
@@ -396,7 +407,7 @@ export async function updateMobileCompanionPlannerCheckIn(
 	if (patch.intensity && (patch.intensity === "healthy" || patch.intensity === "balanced" || patch.intensity === "intensive")) {
 		patchPlannerConfig({ intensity: patch.intensity }, plannerOpts);
 	}
-	const { intensity: _intensity, evaluateJournal, taskNote, ...habitPatch } = patch;
+	const { intensity: _intensity, evaluateJournal, evaluateMode, taskNote, ...habitPatch } = patch;
 	const cleanedTaskNote = typeof taskNote === "string" ? taskNote.trim().slice(0, 240) : "";
 	if (cleanedTaskNote && habitPatch.journalText === undefined && !evaluateJournal) {
 		const before = readPlannerSnapshot(plannerOpts);
@@ -413,12 +424,14 @@ export async function updateMobileCompanionPlannerCheckIn(
 			const { journalText: _jt, ...habitWithoutJournal } = habitPatch;
 			checkInPlannerHabit(habitWithoutJournal, plannerOpts);
 		}
+		const auditMode = evaluateMode === "llm" ? "llm" : "local";
 		await evaluateDailyJournalServer({
 			...plannerOpts,
 			date: habitPatch.date,
 			journalText: habitPatch.journalText,
 			manualEntries: habitPatch.actualEntries,
-			mode: "local",
+			mode: auditMode,
+			formatJournal: auditMode === "llm",
 		});
 		emit("planner-changed", {});
 	} else if (hasDirectHabitPatchFields(habitPatch)) {

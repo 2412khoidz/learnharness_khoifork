@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, it } from "node:test";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type ToolCall } from "@earendil-works/pi-ai";
 import type { PiEngine } from "../src/agent/models.ts";
+import { journalWakeForDate } from "../src/core/planner.ts";
 import { checkInPlannerHabit, chatWithPlannerCoachServer, evaluateDailyJournalServer, generatePlannerSchedule, readPlannerSnapshot, savePlannerConfig } from "../src/server/planner.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-replan-ai-"));
@@ -191,4 +192,170 @@ it("preserves AI/Coach plans across snapshot reloads & metadata edits, and clear
 	assert.equal(aiRes.snapshot.config.dayOverrides?.[date]?.customBlocks, undefined);
 	assert.deepEqual(aiRes.snapshot.plan.blocks.filter((b) => b.type === "study").map((b) => b.title), ["Phiên AI mới"]);
 	assert.deepEqual(readPlannerSnapshot({ plannerFile, examPrepFile, date, now }).plan.blocks.filter((b) => b.type === "study").map((b) => b.title), ["Phiên AI mới"]);
+});
+
+it("auto-formats freeform prose journal in place via AI Auditor while respecting Discreet Mode and opt-out", async () => {
+	const plannerFile = path.join(dir, "audit-format-in-place.json");
+	const eveningNow = new Date(2026, 10, 16, 18, 0).getTime();
+	const rawBlob =
+		"hôm nay tôi dậy từ 8h, 9h ăn sáng, 10r ăn cơm, sau đó call người yêu từ 11r đến 13h30, rồi lại thủ dâm đến 14h25, rồi ngủ đến 15h30, sau đó 17h học đến 17h45 môn Biểu diễn tri thức";
+	const aiFormatted = [
+		"08:00 : Dậy",
+		"09:00 : Ăn sáng",
+		"10:30 : Ăn cơm",
+		"11:30 - 13:30 : Gọi điện người yêu",
+		"13:30 - 14:25 : Thủ dâm",
+		"14:25 - 15:30 : Ngủ trưa",
+		"17:00 - 17:45 : Học Biểu diễn tri thức",
+	].join("\n");
+
+	let capturedPrompt = "";
+	const res = await evaluateDailyJournalServer({
+		date,
+		plannerFile,
+		now: eveningNow,
+		mode: "llm",
+		discreet: true,
+		journalText: rawBlob,
+		engineOverride: fakeEngine(
+			"submit_journal_evaluation",
+			{
+				adherencePct: 60,
+				actualStudyMin: 45,
+				summary: "Học được một ca chiều.",
+				strengths: ["Hoàn thành ca học chiều"],
+				frictionPoints: [],
+				nextDayAdvice: "Giữ nhịp tối.",
+				entries: [
+					{ startTime: "11:30", endTime: "13:30", category: "other", title: "Gọi điện người yêu", minutes: 120 },
+					{ startTime: "13:30", endTime: "14:25", category: "other", title: "Thủ dâm", minutes: 55 },
+					{ startTime: "14:25", endTime: "15:30", category: "sleep", title: "Ngủ trưa", minutes: 65 },
+					{ startTime: "17:00", endTime: "17:45", category: "study", subject: "Biểu diễn tri thức", title: "Học Biểu diễn tri thức", minutes: 45 },
+				],
+				formattedJournal: aiFormatted,
+			},
+			(p) => {
+				capturedPrompt = p;
+			},
+		),
+	});
+
+	assert.match(capturedPrompt, /thủ dâm/, "raw journal is passed to the AI auditor");
+	assert.equal(res.formattedJournalApplied, true);
+	const savedText = res.snapshot.config.logs[date]?.journalText ?? "";
+	assert.equal(
+		savedText,
+		[
+			"08:00 : Dậy",
+			"09:00 : Ăn sáng",
+			"10:30 : Ăn cơm",
+			"11:30 - 13:30 : Gọi điện người yêu",
+			"13:30 - 14:25 : [private]",
+			"14:25 - 15:30 : Ngủ trưa",
+			"17:00 - 17:45 : Học Biểu diễn tri thức",
+		].join("\n"),
+	);
+	assert.equal(journalWakeForDate(res.snapshot.config.logs, date)?.time, "08:00");
+
+	const localFollowUp = await evaluateDailyJournalServer({
+		date,
+		plannerFile,
+		now: eveningNow,
+		mode: "local",
+		journalText: savedText,
+	});
+	assert.equal(localFollowUp.formattedJournalApplied, false);
+	assert.ok(localFollowUp.parsedEntries.some((e) => e.startTime === "17:00" && e.endTime === "17:45" && e.category === "study"));
+
+	const optOut = await evaluateDailyJournalServer({
+		date,
+		plannerFile,
+		now: eveningNow,
+		mode: "llm",
+		discreet: true,
+		formatJournal: false,
+		journalText: rawBlob,
+		engineOverride: fakeEngine(
+			"submit_journal_evaluation",
+			{
+				adherencePct: 60,
+				actualStudyMin: 45,
+				summary: "OK",
+				strengths: [],
+				frictionPoints: [],
+				nextDayAdvice: "Keep going",
+				entries: [
+					{ startTime: "17:00", endTime: "17:45", category: "study", subject: "Biểu diễn tri thức", title: "Học Biểu diễn tri thức", minutes: 45 },
+				],
+				formattedJournal: aiFormatted,
+			},
+			() => {},
+		),
+	});
+	assert.equal(optOut.formattedJournalApplied, false);
+	assert.equal(optOut.snapshot.config.logs[date]?.journalText, rawBlob);
+});
+
+it("feeds server presence-log.json + chat bursts into signals.autoDraftItems and syncs Quick Switcher across Mobile Companion", async () => {
+	const dataDir = path.join(dir, "mobile-auto-draft");
+	const chatsDir = path.join(dataDir, "chats");
+	fs.mkdirSync(chatsDir, { recursive: true });
+	const plannerFile = path.join(dataDir, "planner.json");
+	const examPrepFile = path.join(dataDir, "exam-prep.json");
+	const flashcardsFile = path.join(dataDir, "flashcards.json");
+
+	const d = "2026-11-16";
+	const tMorning = new Date(2026, 10, 16, 9, 0).getTime();
+	const tEndChat = new Date(2026, 10, 16, 9, 40).getTime();
+	const eveningNow = new Date(2026, 10, 16, 18, 0).getTime();
+
+	fs.writeFileSync(
+		path.join(chatsDir, "c_ds.json"),
+		JSON.stringify({
+			id: "c_ds",
+			title: "Đại số tuyến tính",
+			updatedAt: new Date(tEndChat).toISOString(),
+			messages: [
+				{ role: "user", timestamp: tMorning, content: [{ type: "text", text: "Bắt đầu" }] },
+				{ role: "assistant", timestamp: tEndChat, content: [{ type: "text", text: "Xong" }] },
+			],
+		}),
+	);
+	fs.writeFileSync(
+		path.join(dataDir, "presence-log.json"),
+		JSON.stringify({
+			version: 1,
+			days: {
+				[d]: {
+					firstActiveAt: "08:10",
+					lastActiveAt: "17:55",
+					awayIntervals: [{ startTime: "12:15", endTime: "13:05", reason: "sleep" }],
+				},
+			},
+		}),
+	);
+
+	const snap = readPlannerSnapshot({ plannerFile, examPrepFile, flashcardsFile, chatsDir, date: d, now: eveningNow });
+	assert.ok((snap.signals.autoDraftItems?.length ?? 0) >= 3);
+	assert.ok(snap.signals.autoDraftItems?.some((item) => item.source === "presence_wake" && item.startTime === "08:10"));
+	assert.ok(snap.signals.autoDraftItems?.some((item) => item.source === "session" && item.startTime === "09:00" && item.endTime === "09:40"));
+	assert.ok(snap.signals.autoDraftItems?.some((item) => item.source === "presence_away" && item.startTime === "12:15" && item.endTime === "13:05"));
+
+	const { buildMobileCompanionPlannerView, updateMobileCompanionPlannerCheckIn } = await import("../src/server/phone-companion.ts");
+	const initialMob = buildMobileCompanionPlannerView({ plannerFile, examPrepFile, flashcardsFile, chatsDir, now: eveningNow });
+	assert.ok((initialMob.autoDraftCount ?? 0) >= 3);
+	assert.ok(initialMob.autoDraftLines?.includes("09:00 - 09:40 : Học Đại số tuyến tính"));
+
+	const afterStart = await updateMobileCompanionPlannerCheckIn(
+		{ date: d, switchActivity: { label: "Nghiên cứu / Lab", category: "study" } },
+		{ plannerFile, examPrepFile, flashcardsFile, chatsDir, now: new Date(2026, 10, 16, 16, 0).getTime() },
+	);
+	assert.equal(afterStart.planner.todayLog?.activeActivity?.label, "Nghiên cứu / Lab");
+
+	const afterStop = await updateMobileCompanionPlannerCheckIn(
+		{ date: d, switchActivity: null },
+		{ plannerFile, examPrepFile, flashcardsFile, chatsDir, now: new Date(2026, 10, 16, 16, 50).getTime() },
+	);
+	assert.equal(afterStop.planner.todayLog?.activeActivity, undefined);
+	assert.ok(afterStop.planner.todayLog?.journalText?.includes("16:00 - 16:50 : Nghiên cứu / Lab"));
 });
