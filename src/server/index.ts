@@ -103,6 +103,12 @@ export {
 	type PhoneTunnelSpawner,
 	type TunnelSpawnerCallbacks,
 } from "./phone-upload.ts";
+export {
+	closeWebShareSession,
+	getWebShareStatus,
+	startWebShareSession,
+	type StartWebShareOptions,
+} from "./web-share.ts";
 
 export * from "./recall-review-progress.ts";
 

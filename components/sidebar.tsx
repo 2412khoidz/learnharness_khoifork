@@ -35,6 +35,7 @@ import { HostContentRootContext, HostRouteLifetimeProvider } from "@/components/
 import { isInteractionScopeEligible } from "@/components/plugin-input-focus";
 import { InteractionLayersProvider, useInteractionLayers, useOptionalInteractionLayers } from "@/components/interaction-layers";
 import { StartupMessage, type StartupMessageOffer } from "@/components/startup-message";
+import { WebShareButton } from "@/components/web-share-button";
 
 /**
  * Toggleable sidebar — NOT a modal drawer: no backdrop, no focus theft. It
@@ -1102,9 +1103,9 @@ function SessionsSidebar() {
 					    learner opted out (no ambient signal, user decision). */}
 					<ActivitySection />
 
-					{/* Bottom utility row: Settings + Planner + Mistakes sit side-by-side so
+					{/* Bottom utility row: Settings + Planner + Mistakes + Share sit side-by-side so
 					    the session list keeps its full vertical space. */}
-					<div className="flex items-center justify-between gap-1 px-2.5 pb-3 pt-1">
+					<div className="flex items-center justify-between gap-0.5 px-2 pb-3 pt-1">
 						<Hint label="Settings" action="open-settings" side="right">
 							<button
 								type="button"
@@ -1138,6 +1139,7 @@ function SessionsSidebar() {
 							<CircleAlertIcon className="size-3 shrink-0" />
 							Mistakes
 						</Link>
+						<WebShareButton />
 					</div>
 				</div>
 

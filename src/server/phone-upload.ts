@@ -258,7 +258,7 @@ function startCloudflareTunnel(
 	};
 }
 
-function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbacks): { close: () => void } {
+export function defaultPhoneTunnelSpawner(port: number, callbacks: TunnelSpawnerCallbacks): { close: () => void } {
 	let closed = false;
 	let activeHandle: { close: () => void } | null = null;
 	let retryTimer: ReturnType<typeof setTimeout> | null = null;
